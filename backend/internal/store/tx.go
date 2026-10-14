@@ -118,4 +118,32 @@ type Tx interface {
 	// delays the next claim until notBefore (zero means now). applied is false
 	// if the job was no longer running.
 	RequeueJob(c Claim, notBefore time.Time, checkpoint json.RawMessage) (applied bool, err error)
+
+	// InsertApproval adds a pending approval for a running job. Fenced: the
+	// caller must hold the job's lease (ErrFenceLost / ErrConflict /
+	// ErrNotFound as for AssertLease). Invalid input gives ErrInvalid; a
+	// duplicate id or idempotency key gives ErrConflict.
+	InsertApproval(a Approval, fence int64) (Approval, error)
+	// GetApproval returns the user's approval, or ErrNotFound.
+	GetApproval(userID, id string) (Approval, error)
+	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
+	// means 50; the maximum is 500.
+	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)
+	// DecideApproval records the user's decision (approved or rejected) on a
+	// pending approval. ErrNotFound; ErrConflict if it is no longer pending;
+	// ErrExpired if it is past ExpiresAt (state unchanged); ErrInvalid if the
+	// decision is not approved/rejected, decidedBy is empty or argsHash does
+	// not match the stored hash (state unchanged).
+	DecideApproval(userID, id string, decision ApprovalState, decidedBy, argsHash string) (Approval, error)
+	// TransitionApproval is the worker's compare-and-swap between states, for
+	// the edges ApprovalTransitionAllowed permits. ErrInvalid for any other
+	// edge, ErrNotFound, ErrConflict if the current state is not from.
+	TransitionApproval(userID, id string, from, to ApprovalState, patch ApprovalPatch) (Approval, error)
+	// ExpireApprovals moves every pending approval past its ExpiresAt to
+	// expired and returns what it changed.
+	ExpireApprovals() ([]ApprovalRef, error)
+	// ResumeJobIfSettled moves a job from waiting_approval back to queued
+	// (claimable now) when none of its approvals is still pending. It returns
+	// false if the job is not waiting or something is still pending.
+	ResumeJobIfSettled(userID, jobID string) (resumed bool, err error)
 }
