@@ -26,6 +26,21 @@ func requeue(t *testing.T, st store.Store, c store.Claim, notBefore time.Time) b
 }
 
 func runLeases(t *testing.T, f Factory) {
+	t.Run("requeue with a zero time is claimable now", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		clk.Advance(10 * time.Minute)
+		if !requeue(t, st, c, time.Time{}) {
+			t.Fatal("requeue was not applied")
+		}
+		got := getJob(t, st, "u1", c.Job.ID)
+		if got.State != store.JobQueued || !got.NotBefore.Equal(clk.Now()) {
+			t.Fatalf("job = %s, not_before %v, want queued and %v", got.State, got.NotBefore, clk.Now())
+		}
+	})
+
 	t.Run("AssertLease accepts the current claim and rejects the rest", func(t *testing.T) {
 		st, _ := open(t, f)
 		mustUser(t, st, "u1")

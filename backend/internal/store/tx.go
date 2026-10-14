@@ -122,7 +122,9 @@ type Tx interface {
 	// InsertApproval adds a pending approval for a running job. Fenced: the
 	// caller must hold the job's lease (ErrFenceLost / ErrConflict /
 	// ErrNotFound as for AssertLease). Invalid input gives ErrInvalid; a
-	// duplicate id or idempotency key gives ErrConflict.
+	// duplicate id or idempotency key gives ErrConflict. It must run in the
+	// SAME transaction as ReleaseJob(waiting_approval), so a job never waits
+	// without its approvals, nor has approvals while still running.
 	InsertApproval(a Approval, fence int64) (Approval, error)
 	// GetApproval returns the user's approval, or ErrNotFound.
 	GetApproval(userID, id string) (Approval, error)
@@ -133,18 +135,24 @@ type Tx interface {
 	// pending approval. ErrNotFound; ErrConflict if it is no longer pending;
 	// ErrExpired if it is past ExpiresAt (state unchanged); ErrInvalid if the
 	// decision is not approved/rejected, decidedBy is empty or argsHash does
-	// not match the stored hash (state unchanged).
+	// not match the stored hash (state unchanged). Run it in the same
+	// transaction as the approval_decided audit event and ResumeJobIfSettled,
+	// so a decision is never recorded without the job being resumed.
 	DecideApproval(userID, id string, decision ApprovalState, decidedBy, argsHash string) (Approval, error)
 	// TransitionApproval is the worker's compare-and-swap between states, for
 	// the edges ApprovalTransitionAllowed permits. ErrInvalid for any other
 	// edge, ErrNotFound, ErrConflict if the current state is not from.
 	TransitionApproval(userID, id string, from, to ApprovalState, patch ApprovalPatch) (Approval, error)
 	// ExpireApprovals moves every pending approval past its ExpiresAt to
-	// expired and returns what it changed.
+	// expired and returns what it changed. Run it in the same transaction as
+	// ResumeJobIfSettled for every returned ref: the refs are never returned
+	// again, so a split would strand the job in waiting_approval.
 	ExpireApprovals() ([]ApprovalRef, error)
 	// ResumeJobIfSettled moves a job from waiting_approval back to queued
 	// (claimable now) when none of its approvals is still pending. It returns
-	// false if the job is not waiting or something is still pending.
+	// false if the job is not waiting or something is still pending. Call it
+	// in the same transaction as the DecideApproval or ExpireApprovals that may
+	// have settled the job (see those methods).
 	ResumeJobIfSettled(userID, jobID string) (resumed bool, err error)
 
 	// BeginIdempotent records that a call with this key has started. If the
@@ -152,7 +160,10 @@ type Tx interface {
 	// existing record is returned, so a restarted worker sees started, done or
 	// failed instead of running the call again. Key, UserID and Tool are
 	// required (ErrInvalid); a key owned by another user is ErrConflict; an
-	// unknown user is ErrNotFound.
+	// unknown user is ErrNotFound. In transaction A of the execution protocol
+	// an ErrConflict from the preceding approved->executing transition means
+	// "already started: reconcile via GetIdempotent". Keys must be derived by
+	// the server (job id, call id, arguments hash), never taken from user input.
 	BeginIdempotent(rec IdemRecord) (existing *IdemRecord, err error)
 	// FinishIdempotent moves a started record to done or failed and stores the
 	// result. ErrInvalid for other states or malformed JSON, ErrNotFound, and
@@ -183,10 +194,12 @@ type Tx interface {
 	ListUsers(afterID string, limit int) ([]User, error)
 	// ListDormantUsers returns the ids of users that are not paused, have
 	// dormancy_days > 0 and were last seen at or before now minus that many
-	// days, least recently seen first.
+	// days, least recently seen first. limit <= 0 means 100; the maximum is
+	// 1000.
 	ListDormantUsers(now time.Time, limit int) ([]string, error)
 	// ListTokensDueForRenewal returns valid tokens that have reached half of
-	// their lifetime (including expired ones), soonest expiry first.
+	// their lifetime (including expired ones), soonest expiry first. limit <= 0
+	// means 100; the maximum is 1000.
 	ListTokensDueForRenewal(now time.Time, limit int) ([]TokenDue, error)
 
 	// GetCursor returns the user's cursor; an absent cursor is a zero cursor

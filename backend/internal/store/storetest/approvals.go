@@ -345,6 +345,9 @@ func runApprovals(t *testing.T, f Factory) {
 		}
 	})
 
+	// The store has a single writer, so the two transactions are serialised and
+	// the loser sees the winner's committed state; this proves the
+	// compare-and-swap outcome, not a race inside one transaction.
 	t.Run("two concurrent decisions have exactly one winner", func(t *testing.T) {
 		st, clk := open(t, f)
 		c := runningFor(t, st, "u1")
@@ -549,7 +552,7 @@ func runApprovals(t *testing.T, f Factory) {
 	})
 
 	t.Run("resume leaves other jobs alone", func(t *testing.T) {
-		st, clk := open(t, f)
+		st, _ := open(t, f)
 		c := runningFor(t, st, "u1")
 		if resume(t, st, "u1", c.Job.ID) {
 			t.Fatal("resumed a running job")
@@ -562,7 +565,6 @@ func runApprovals(t *testing.T, f Factory) {
 		if !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("another user's job: err = %v, want ErrNotFound", err)
 		}
-		_ = clk
 	})
 
 	t.Run("deleting the user removes the approvals", func(t *testing.T) {

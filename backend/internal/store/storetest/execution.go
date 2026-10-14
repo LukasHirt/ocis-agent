@@ -165,6 +165,12 @@ func runExecution(t *testing.T, f Factory) {
 		if !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("second A: err = %v, want ErrConflict (approval is already executing)", err)
 		}
+		if got := getApproval(t, st, "u1", a.ID); got.State != store.ApprovalExecuting {
+			t.Errorf("the failed second A changed the approval to %s", got.State)
+		}
+		if got := getKey(t, st, "u1", a.IdemKey); got.State != store.IdemStarted || got.FinishedAt != nil || len(got.Result) != 0 {
+			t.Errorf("the failed second A changed the idempotency record to %+v", got)
+		}
 		// after reconciling, the worker completes with B
 		mustTx(t, st, func(tx store.Tx) error { return finishExecution(tx, c, a, `{"deleted":true}`, false) })
 		if got := getApproval(t, st, "u1", a.ID); got.State != store.ApprovalExecuted {
@@ -218,6 +224,48 @@ func runExecution(t *testing.T, f Factory) {
 		})
 		if !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("an idempotency record exists after a refused A: %v", err)
+		}
+	})
+
+	t.Run("transaction A rolls back when the idempotency key belongs to another user", func(t *testing.T) {
+		st, clk := open(t, f)
+		c, a := approvedRun(t, st, clk)
+		mustUser(t, st, "u2")
+		if _, err := beginKey(st, "u2", a.IdemKey); err != nil {
+			t.Fatal(err)
+		}
+		err := st.InTx(bg(), func(tx store.Tx) error { _, err := beginExecution(tx, c, a); return err })
+		if !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("err = %v, want ErrConflict", err)
+		}
+		if got := getApproval(t, st, "u1", a.ID); got.State != store.ApprovalApproved {
+			t.Errorf("approval = %s, want it rolled back to approved", got.State)
+		}
+		if got := getKey(t, st, "u2", a.IdemKey); got.State != store.IdemStarted {
+			t.Errorf("the other user's record = %+v, want it untouched", got)
+		}
+	})
+
+	t.Run("transaction B can record a failed call", func(t *testing.T) {
+		st, clk := open(t, f)
+		c, a := approvedRun(t, st, clk)
+		mustTx(t, st, func(tx store.Tx) error { _, err := beginExecution(tx, c, a); return err })
+		mustTx(t, st, func(tx store.Tx) error {
+			if err := tx.AssertLease(c.Job.UserID, c.Job.ID, c.Fence); err != nil {
+				return err
+			}
+			if err := tx.FinishIdempotent(a.UserID, a.IdemKey, store.IdemFailed, json.RawMessage(`{"error":"boom"}`)); err != nil {
+				return err
+			}
+			_, err := tx.TransitionApproval(a.UserID, a.ID, store.ApprovalExecuting, store.ApprovalFailed,
+				store.ApprovalPatch{Result: json.RawMessage(`{"error":"boom"}`)})
+			return err
+		})
+		if got := getKey(t, st, "u1", a.IdemKey); got.State != store.IdemFailed || string(got.Result) != `{"error":"boom"}` || got.FinishedAt == nil {
+			t.Errorf("record = %+v", got)
+		}
+		if got := getApproval(t, st, "u1", a.ID); got.State != store.ApprovalFailed || got.ExecutedAt != nil {
+			t.Errorf("approval = %+v", got)
 		}
 	})
 

@@ -80,7 +80,7 @@ func (t *tx) FinishIdempotent(userID, key string, state store.IdemState, result 
 		 WHERE idem_key = ? AND user_id = ? AND state = 'started'`,
 		string(state), ms(t.now()), string(result), string(result), key, userID)
 	if err != nil {
-		return err
+		return fmt.Errorf("sqlite: finish idempotent call: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		cur, err := t.GetIdempotent(userID, key)

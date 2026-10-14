@@ -22,7 +22,9 @@ func (e *invalidError) Error() string { return "store: " + e.msg }
 func (e *invalidError) Is(target error) bool { return target == ErrInvalid }
 
 // Invalid returns an error that matches ErrInvalid. Its text is "store: "
-// followed by the formatted message.
+// followed by the formatted message. The format is printf-style: write %% for
+// a literal percent sign; %w is not supported. For dynamic text use
+// Invalid("%s", text) rather than passing the text as the format.
 func Invalid(format string, args ...any) error {
 	return &invalidError{msg: fmt.Sprintf(format, args...)}
 }

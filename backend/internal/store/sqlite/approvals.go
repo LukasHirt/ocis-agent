@@ -73,7 +73,8 @@ func (t *tx) InsertApproval(a store.Approval, fence int64) (store.Approval, erro
 	if len(a.Preview) == 0 {
 		a.Preview = json.RawMessage("{}")
 	}
-	a.State, a.RequestedAt = store.ApprovalPending, now
+	a.State, a.RequestedAt = store.ApprovalPending, fromMS(ms(now))
+	a.ExpiresAt = fromMS(ms(a.ExpiresAt))
 	a.DecidedBy, a.DecidedAt, a.ExecutedAt, a.Result = "", nil, nil, nil
 	_, err := t.q.ExecContext(t.ctx,
 		`INSERT INTO approvals(`+approvalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,'')`,
@@ -175,7 +176,8 @@ func (t *tx) DecideApproval(userID, id string, decision store.ApprovalState, dec
 		return store.Approval{}, fmt.Errorf("%w: approval is no longer pending", store.ErrConflict)
 	}
 	a.State, a.DecidedBy = decision, decidedBy
-	a.DecidedAt = &now
+	decidedAt := fromMS(ms(now))
+	a.DecidedAt = &decidedAt
 	return a, nil
 }
 

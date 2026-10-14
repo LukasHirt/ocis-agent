@@ -135,6 +135,29 @@ func runScheduling(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("a user pause is cleared only by naming the user reason", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		pause(t, st, "u1", store.PauseUser)
+		before := getPolicy(t, st, "u1").UpdatedAt
+		clk.Advance(time.Minute)
+		auto := []string{store.PauseDormant, store.PauseCredentialExpired, store.PauseCredentialInvalid,
+			store.PauseCredentialRevoked, store.PauseTokenAnomaly}
+		if clearPause(t, st, "u1", auto...) {
+			t.Fatal("automatic reasons cleared the user's pause")
+		}
+		p := getPolicy(t, st, "u1")
+		if !p.Paused || p.PauseReason != store.PauseUser || !p.UpdatedAt.Equal(before) {
+			t.Fatalf("a mismatched clear changed the policy: %+v (updated_at was %v)", p, before)
+		}
+		if !clearPause(t, st, "u1", store.PauseUser) {
+			t.Fatal("did not clear the user's pause when naming it")
+		}
+		if p := getPolicy(t, st, "u1"); p.Paused || p.PauseReason != "" {
+			t.Fatalf("after clear: %+v", p)
+		}
+	})
+
 	t.Run("clear validation", func(t *testing.T) {
 		st, _ := open(t, f)
 		mustUser(t, st, "u1")
@@ -283,7 +306,7 @@ func runScheduling(t *testing.T, f Factory) {
 		clk.Advance(31 * day)
 		mustTx(t, st, func(tx store.Tx) error { return tx.TouchUser("active", clk.Now()) })
 		got := dormant(clk.Now())
-		if len(got) != 2 || (got[0] != "idle" && got[0] != "week") || (got[1] != "idle" && got[1] != "week") {
+		if len(got) != 2 || got[0] != "idle" || got[1] != "week" {
 			t.Errorf("after 31 days want idle and week (not active, paused or disabled), got %v", got)
 		}
 		if got := dormant(start.Add(30*day - time.Millisecond)); len(got) != 1 || got[0] != "week" {
