@@ -15,7 +15,7 @@ const (
 	defaultJobLimit = 50
 	maxJobLimit     = 500
 
-	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, not_before, checkpoint, error, created_at, updated_at`
+	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at`
 )
 
 // leaseHeld is the fence condition shared by the fenced writes: the user's
@@ -31,7 +31,7 @@ func scanJob(row scanner) (store.Job, error) {
 	var j store.Job
 	var state, checkpoint string
 	var notBefore, created, updated int64
-	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt,
+	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
 		&notBefore, &checkpoint, &j.Error, &created, &updated)
 	if err != nil {
 		return store.Job{}, err
@@ -54,7 +54,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	if j.ID == "" {
 		j.ID = store.NewID()
 	}
-	j.State, j.Attempt, j.Error = store.JobQueued, 0, ""
+	j.State, j.Attempt, j.Runs, j.Error = store.JobQueued, 0, 0, ""
 	if j.NotBefore.IsZero() {
 		j.NotBefore = now
 	}
@@ -63,8 +63,8 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt,
+		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt, j.Runs,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
 	case isUnique(err):
@@ -272,7 +272,7 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 		return store.Claim{}, false, err
 	}
 	if _, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'running', attempt = attempt + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
+		`UPDATE jobs SET state = 'running', attempt = attempt + 1, runs = runs + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
 		return store.Claim{}, false, err
 	}
 	job, err := t.GetJob(userID, id)

@@ -107,4 +107,15 @@ type Tx interface {
 	ReleaseJob(c Claim, next JobState, checkpoint json.RawMessage, errMsg string) (applied bool, err error)
 	// ReapExpired requeues or fails running jobs whose lease is gone.
 	ReapExpired(maxAttempts int, backoff func(attempt int) time.Duration) (ReapResult, error)
+
+	// AssertLease succeeds only if the job is running and the user's lease
+	// names this job with this fence and a non-blank holder. Use it inside a
+	// composite transaction (approval transition + idempotency + audit + step)
+	// to prove the caller still owns the job. ErrNotFound if there is no such
+	// job, ErrConflict if it is terminal, ErrFenceLost otherwise.
+	AssertLease(userID, jobID string, fence int64) error
+	// RequeueJob releases the claim back to queued (as ReleaseJob does) and
+	// delays the next claim until notBefore (zero means now). applied is false
+	// if the job was no longer running.
+	RequeueJob(c Claim, notBefore time.Time, checkpoint json.RawMessage) (applied bool, err error)
 }
