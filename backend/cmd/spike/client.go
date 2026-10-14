@@ -82,8 +82,34 @@ func (c *client) createToken(ctx context.Context, cr cred, label string) (respon
 	return resp, &t, nil
 }
 
-func (c *client) deleteToken(ctx context.Context, cr cred, token string) (response, error) {
-	return c.do(ctx, cr, http.MethodDelete, "/auth-app/tokens?token="+url.QueryEscape(token), nil, nil)
+// deleteToken calls DELETE /auth-app/tokens. The server identifies the token by
+// the hashed value that GET /auth-app/tokens lists, NOT by the plaintext token
+// (the plaintext yields 500 "error invalidating app password").
+func (c *client) deleteToken(ctx context.Context, cr cred, listed string) (response, error) {
+	return c.do(ctx, cr, http.MethodDelete, "/auth-app/tokens?token="+url.QueryEscape(listed), nil, nil)
+}
+
+// deleteByLabel lists the caller's tokens and deletes every one with the given
+// label. It returns the last DELETE response, or a synthetic 404 if none matched.
+func (c *client) deleteByLabel(ctx context.Context, cr cred, label string) (response, error) {
+	resp, err := c.do(ctx, cr, http.MethodGet, "/auth-app/tokens", nil, nil)
+	if err != nil {
+		return response{}, err
+	}
+	var list []appToken
+	if err := json.Unmarshal(resp.body, &list); err != nil {
+		return resp, fmt.Errorf("list tokens: status %d: %v", resp.status, err)
+	}
+	last := response{status: http.StatusNotFound}
+	for _, t := range list {
+		if t.Label != label {
+			continue
+		}
+		if last, err = c.deleteToken(ctx, cr, t.Token); err != nil {
+			return last, err
+		}
+	}
+	return last, nil
 }
 
 func (c *client) me(ctx context.Context, cr cred) (response, error) {

@@ -48,7 +48,10 @@ func run(base, user, pass string, insecure bool, window time.Duration) error {
 			resp.status, redact(string(resp.body), pass))
 	}
 	app := cred{user, tok.Token}
-	defer func() { _, _ = c.deleteToken(ctx, owner, tok.Token) }()
+	defer func() {
+		_, _ = c.deleteByLabel(ctx, owner, "ocis-agent-spike")
+		_, _ = c.deleteByLabel(ctx, owner, "ocis-agent-spike-renewed")
+	}()
 
 	fmt.Fprintln(out, "## Setup")
 	fmt.Fprintf(out, "- POST /auth-app/tokens authenticated with the user password: **%d** (200 is expected: the handler writes the body before WriteHeader(201))\n", resp.status)

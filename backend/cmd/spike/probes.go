@@ -34,9 +34,9 @@ func probeQ3(ctx context.Context, c *client, app cred, orig *appToken, out io.Wr
 			orig.ExpirationDate.Format(time.RFC3339), renewed.ExpirationDate.Format(time.RFC3339), renewed.Label)
 		meResp, meErr := c.me(ctx, cred{app.user, renewed.Token})
 		fmt.Fprintf(out, "  - GET /graph/v1.0/me with the renewed token: %s\n", status(meResp, meErr))
-		delResp, delErr := c.deleteToken(ctx, cred{app.user, renewed.Token}, app.secret)
+		delResp, delErr := c.deleteByLabel(ctx, cred{app.user, renewed.Token}, "ocis-agent-spike")
 		fmt.Fprintf(out, "  - DELETE of the ORIGINAL token authenticated with the renewed one: %s\n", status(delResp, delErr))
-		cleanResp, cleanErr := c.deleteToken(ctx, cred{app.user, renewed.Token}, renewed.Token)
+		cleanResp, cleanErr := c.deleteByLabel(ctx, cred{app.user, renewed.Token}, "ocis-agent-spike-renewed")
 		fmt.Fprintf(out, "  - cleanup DELETE of the renewed token (self): %s\n", status(cleanResp, cleanErr))
 	}
 	listResp, listErr := c.do(ctx, app, http.MethodGet, "/auth-app/tokens", nil, nil)
