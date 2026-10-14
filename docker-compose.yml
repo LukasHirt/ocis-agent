@@ -1,0 +1,41 @@
+services:
+  ocis:
+    image: owncloud/ocis:${OCIS_DOCKER_TAG:-latest}
+    entrypoint: ["/bin/sh"]
+    # ocis init fails on later runs because the config exists; ignore that
+    command: ["-c", "ocis init || true; exec ocis server"]
+    environment:
+      OCIS_URL: https://localhost:${OCIS_DEV_PORT:-9200}
+      PROXY_TLS: "false"
+      OCIS_INSECURE: "true"
+      OCIS_LOG_LEVEL: info
+      # auth-app: app tokens. Impersonation stays off.
+      OCIS_ADD_RUN_SERVICES: auth-app
+      PROXY_ENABLE_APP_AUTH: "true"
+      AUTH_APP_ENABLE_IMPERSONATION: "false"
+      # dev only: lets the spike create the first app token without an OIDC browser flow
+      PROXY_ENABLE_BASIC_AUTH: "true"
+      IDM_ADMIN_PASSWORD: admin
+      IDM_CREATE_DEMO_USERS: "true"
+    volumes:
+      - ocis-config:/etc/ocis
+      - ocis-data:/var/lib/ocis
+      - ./frontend/dist:/var/lib/ocis/web/assets/apps/agent:ro
+    restart: unless-stopped
+
+  proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      - ocis
+    ports:
+      - "${OCIS_DEV_PORT:-9200}:9200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./dev/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dev/certs:/etc/nginx/certs:ro
+    restart: unless-stopped
+
+volumes:
+  ocis-config:
+  ocis-data:

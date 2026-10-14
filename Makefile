@@ -1,3 +1,6 @@
+-include .env
+OCIS_DEV_PORT ?= 9200
+
 .PHONY: backend-test backend-vet frontend-build frontend-test license-check dev-up dev-down spike
 
 # needs the REUSE tool: pipx install reuse   (or: uvx reuse lint)
@@ -31,4 +34,4 @@ dev-down:
 	docker compose down
 
 spike:
-	go run -C backend ./cmd/spike $(ARGS)
+	go run -C backend ./cmd/spike -base https://localhost:$(OCIS_DEV_PORT) $(ARGS)

@@ -19,9 +19,11 @@ Licensed under Apache-2.0 (`LICENSE`, `REUSE.toml`); run `make license-check`.
 
     make dev-up         # builds the extension, creates .env and a self-signed cert if
                         # missing, starts oCIS + nginx on https://localhost:9200
+                        # (host port is OCIS_DEV_PORT in .env)
+    # AGENT_OCIS_URL must match OCIS_DEV_PORT
     AGENT_OCIS_URL=https://localhost:9200 \
     AGENT_MASTER_KEY=$(openssl rand -base64 32) \
     AGENT_INSECURE=true \
     go run -C backend ./cmd/ocis-agent    # sidecar on :9300, routed at /agent-api/
 
-Log in at https://localhost:9200 as `admin` / `admin` or a demo user such as `alice` / `demo`.
+Log in at https://localhost:9200 (host port is OCIS_DEV_PORT in .env) as `admin` / `admin` or a demo user such as `einstein` / `relativity`.
