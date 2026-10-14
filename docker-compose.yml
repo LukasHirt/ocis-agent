@@ -34,7 +34,9 @@ services:
     environment:
       OCIS_DEV_PORT: ${OCIS_DEV_PORT:-9200}
     ports:
-      - "${OCIS_DEV_PORT:-9200}:${OCIS_DEV_PORT:-9200}"
+      # loopback only: the dev stack ships admin/admin and basic auth, so it must not be
+      # reachable from the network
+      - "127.0.0.1:${OCIS_DEV_PORT:-9200}:${OCIS_DEV_PORT:-9200}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

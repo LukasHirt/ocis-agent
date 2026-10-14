@@ -1,5 +1,5 @@
 #!/bin/sh
-# Generates a self-signed certificate for https://localhost:9200 (dev only).
+# Generates a self-signed certificate for https://localhost:<port> (dev only).
 set -eu
 dir="$(cd "$(dirname "$0")" && pwd)/certs"
 mkdir -p "$dir"

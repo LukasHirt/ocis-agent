@@ -15,16 +15,19 @@ See `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` and `SUPPORT.md`.
 Commits use Conventional Commits with a DCO sign-off (`git commit -s`).
 Licensed under Apache-2.0 (`LICENSE`, `REUSE.toml`); run `make license-check`.
 
+## Prerequisites
+
+Go 1.26, Node >= 24.15, pnpm 10.33.3 (via corepack), Docker with compose, openssl, and uv or pipx for `reuse`.
+
 ## Dev quick start
 
     make dev-up         # builds the extension, creates .env and a self-signed cert if
                         # missing, starts oCIS + nginx on https://localhost:9200
-                        # (host port is OCIS_DEV_PORT in .env)
-    AGENT_OCIS_URL=https://localhost:${OCIS_DEV_PORT:-9200} \
-    AGENT_MASTER_KEY=$(openssl rand -base64 32) \
-    AGENT_INSECURE=true \
-    go run -C backend ./cmd/ocis-agent    # sidecar on :9300, routed at /agent-api/
+                        # (port is OCIS_DEV_PORT in .env; published on 127.0.0.1 only)
+    make sidecar        # sidecar on :9300 with a throwaway master key, routed at /agent-api/
 
 Log in at https://localhost:9200 (port is OCIS_DEV_PORT in .env; changing it after the first start needs `docker compose down -v`) as `admin` / `admin` or a demo user such as `einstein` / `relativity`.
 
 The built extension is served by oCIS at `/assets/apps/agent/manifest.json`.
+
+The sidecar binds `:9300` by default. On macOS/Docker Desktop `AGENT_HTTP_ADDR=127.0.0.1:9300` also works. On Linux the nginx container reaches the host through the docker bridge (host-gateway), so a loopback-only sidecar is NOT reachable from nginx there; keep the default.

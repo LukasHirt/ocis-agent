@@ -24,7 +24,7 @@ everything a contributor needs.
 - `make backend-vet backend-test` Go vet, gofmt check, unit tests
 - `make frontend-test frontend-build` Vitest and the production extension build
 - `make license-check` REUSE lint (must pass before every commit)
-- `make dev-up dev-down` local oCIS stack (plain `docker compose up -d` also works from the repo root); `make spike` runs a probe of app-token renewal, SSE events and WebDAV preconditions against the dev stack
+- `make dev-up dev-down` local oCIS stack (after the first `make dev-up`, `docker compose up -d` also works; a fresh clone first needs `dev/certs` and `frontend/dist`, which `make dev-up` creates, and creating them via a bare compose run leaves root-owned bind-mount directories on Linux); `make sidecar` runs the sidecar against the dev stack; `make spike` runs a probe of app-token renewal, SSE events and WebDAV preconditions against the dev stack
 
 ## Conventions
 
@@ -52,16 +52,16 @@ everything a contributor needs.
 5. Approvals, policy changes and token operations require the user's OIDC token, never the
    agent's app token.
 
-## Verified oCIS behaviour (measured against oCIS 8.2.1 on the dev stack)
+## Verified oCIS behaviour (measured on the dev stack; identical on oCIS 8.2.1 and 9.0.0-rc.1, the pinned tag)
 
-- `POST /auth-app/tokens` authenticated with an app token itself succeeds and returns a usable new token, but the
-  agent does not renew in the background: renewal happens only during an interactive session, because background
-  renewal would let a stolen token live indefinitely.
+- `POST /auth-app/tokens` authenticated with an app token itself succeeds and returns a usable new token.
+  Policy for v1, pending the maintainers' confirmation: the agent does not renew in the background (renewal only
+  during an interactive session), because background renewal would let a stolen token live indefinitely.
 - `DELETE /auth-app/tokens?token=` needs the hash returned in the `token` field of `GET /auth-app/tokens`, not the
   plaintext token (plaintext gives 500); with the hash it returns 200 and the token then gets 401.
 - The SSE endpoint `/ocs/v2.php/apps/notifications/api/v1/notifications/sse` accepts app-token Basic auth and emits
   `folder-created`, `postprocessing-finished` (upload), `item-renamed` (move) and `item-trashed` (delete) for the
-  user's file operations; the data carries ids and etag but no path. Polling remains the backstop trigger.
+  user's file operations; the data carries ids and etag but no path. Polling is the primary file-change trigger in v1; SSE only speeds it up.
 - WebDAV preconditions: `If-None-Match: *` on PUT is ignored (204, the file is overwritten); `If-Match` on PUT is
   enforced but returns 409 (treat 409 and 412 as conflict); `If-Match` on DELETE is ignored (204); `Overwrite: F` on
   MOVE and COPY is enforced (412).

@@ -27,6 +27,10 @@ server {
   location / {
     # oCIS' own proxy binds 127.0.0.1:19200 (PROXY_HTTP_ADDR) in the shared namespace
     proxy_pass http://127.0.0.1:19200;
+    # repeated: proxy_set_header in a location replaces the server-level ones
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
   }
