@@ -49,16 +49,21 @@ everything a contributor needs.
    to start without it. Never log, print or commit app tokens, the master key or LLM keys.
 4. The sidecar talks to oCIS only through public HTTP APIs (Graph, WebDAV, auth-app, SSE).
    No changes to oCIS itself.
-5. Approvals, policy changes and token operations require the user's OIDC token, never the
-   agent's app token.
+5. Approvals, policy changes, enrolment, incident revoke and unenroll require the user's OIDC token,
+   never the agent's app token. Only renewing or rotating the agent's own token may use the app token.
 
 ## Verified oCIS behaviour (measured on the dev stack; identical on oCIS 8.2.1 and 9.0.0-rc.1, the pinned tag)
 
-- `POST /auth-app/tokens` authenticated with an app token itself succeeds and returns a usable new token.
-  Policy for v1, pending the maintainers' confirmation: the agent does not renew in the background (renewal only
-  during an interactive session), because background renewal would let a stolen token live indefinitely.
-- `DELETE /auth-app/tokens?token=` needs the hash returned in the `token` field of `GET /auth-app/tokens`, not the
-  plaintext token (plaintext gives 500); with the hash it returns 200 and the token then gets 401.
+- `POST /auth-app/tokens` authenticated with an app token itself succeeds and returns a usable new token, and tokens are
+  independent (deleting one leaves the others valid). A stolen token can therefore renew itself whatever the sidecar does.
+- Policy for v1: the sidecar renews its own token in the background (below 50% of the TTL, default `AGENT_TOKEN_TTL`
+  72h): create with the current token and a unique label `ocis-agent-<instanceId>-<nonce>`, verify with Graph `/me`, swap
+  transactionally, then delete the old token. Safeguards: unenroll deletes every token with this instance's label prefix;
+  a separately confirmed incident revoke deletes all of the user's app tokens; every renewal and sweep lists the tokens
+  and pauses the agent (`token_anomaly`) on an unknown token with our prefix; the agent pauses itself (`dormant`) when
+  the user has not been seen for `AGENT_DORMANCY_DAYS` (default 30). Never log or audit token or hash values.
+- `DELETE /auth-app/tokens?token=` needs the hash returned in the `token` field of `GET /auth-app/tokens` (find it by
+  label and created date), not the plaintext token (plaintext gives 500); with the hash it returns 200 and the token then gets 401.
 - The SSE endpoint `/ocs/v2.php/apps/notifications/api/v1/notifications/sse` accepts app-token Basic auth and emits
   `folder-created`, `postprocessing-finished` (upload), `item-renamed` (move) and `item-trashed` (delete) for the
   user's file operations; the data carries ids and etag but no path. Polling is the primary file-change trigger in v1; SSE only speeds it up.
