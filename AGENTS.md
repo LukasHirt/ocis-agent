@@ -76,3 +76,10 @@ everything a contributor needs.
 - Decision: no new notification channel (no email, webhook or oCIS notification hack). When the agent pauses itself, the
   reason is surfaced only inside the extension (status endpoint, banner, audit log).
 - oCIS has no per-user notification create API (only admin or secret gated global notifications).
+
+## Persistence
+
+- Operational state lives in SQLite (`internal/store/sqlite`, pure Go) behind `store.Store`; `ocis-agent migrate` applies the embedded migrations, and start-up does too. Behaviour is specified by the suite in `internal/store/storetest`; a new store implementation must pass it unchanged.
+- The audit log is append-only and hash-chained per user (`internal/audit`). Never UPDATE or DELETE `audit` rows; a database trigger rejects it. Add events with `Tx.AppendAudit` in the same transaction as the state change they describe.
+- Job leases: one running job per user. Every worker write (`SaveCheckpoint`, `AppendStep`, `RenewLease`, `ReleaseJob`) carries the lease fence, which only grows and is kept after release or reap. A voluntary release (back to queued or waiting_approval) refunds the attempt, so attempts count crashes, not approval pauses. Treat `ErrFenceLost` as "stop working on this job now".
+- Secrets are sealed with `internal/secrets` (AES-256-GCM, per-use nonce, DEKs wrapped by the master key from `AGENT_MASTER_KEY`). Pass an `aad` (for example the user id) so a ciphertext cannot be moved to another context. Never store or log token values, DEKs or the master key.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strconv"
 )
 
@@ -17,6 +18,7 @@ type Config struct {
 	AllowedOrigin string
 	HTTPAddr      string
 	DataDir       string
+	SQLitePath    string
 	Insecure      bool
 	MasterKey     []byte
 }
@@ -48,6 +50,7 @@ func Load(getenv func(string) string) (Config, error) {
 
 	cfg.HTTPAddr = valueOr(getenv("AGENT_HTTP_ADDR"), ":9300")
 	cfg.DataDir = valueOr(getenv("AGENT_DATA_DIR"), "/var/lib/ocis-agent")
+	cfg.SQLitePath = valueOr(getenv("AGENT_SQLITE_PATH"), filepath.Join(cfg.DataDir, "agent.db"))
 
 	if raw := getenv("AGENT_INSECURE"); raw != "" {
 		b, err := strconv.ParseBool(raw)
