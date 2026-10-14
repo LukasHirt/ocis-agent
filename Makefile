@@ -36,6 +36,9 @@ dev-down:
 spike:
 	go run -C backend ./cmd/spike -base https://localhost:$(OCIS_DEV_PORT) $(ARGS)
 
-# throwaway dev master key per run; the sidecar listens on :9300 (nginx routes /agent-api/ to it)
+# the sidecar listens on :9300 (nginx routes /agent-api/ to it). Local state and a stable dev master key
+# live in backend/bin/data (git-ignored); delete that directory to reset. Never use this key elsewhere.
 sidecar:
-	AGENT_OCIS_URL=https://localhost:$(OCIS_DEV_PORT) AGENT_INSECURE=true AGENT_MASTER_KEY=$$(openssl rand -base64 32) go run -C backend ./cmd/ocis-agent
+	@mkdir -p $(CURDIR)/backend/bin/data
+	@test -f $(CURDIR)/backend/bin/data/dev-master.key || (umask 077 && openssl rand -base64 32 > $(CURDIR)/backend/bin/data/dev-master.key)
+	AGENT_DATA_DIR=$(CURDIR)/backend/bin/data AGENT_OCIS_URL=https://localhost:$(OCIS_DEV_PORT) AGENT_INSECURE=true AGENT_MASTER_KEY=$$(cat $(CURDIR)/backend/bin/data/dev-master.key) go run -C backend ./cmd/ocis-agent

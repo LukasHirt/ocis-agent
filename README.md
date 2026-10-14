@@ -24,7 +24,8 @@ Go 1.26, Node >= 24.15, pnpm 10.33.3 (via corepack), Docker with compose, openss
     make dev-up         # builds the extension, creates .env and a self-signed cert if
                         # missing, starts oCIS + nginx on https://localhost:9200
                         # (port is OCIS_DEV_PORT in .env; published on 127.0.0.1 only)
-    make sidecar        # sidecar on :9300 with a throwaway master key, routed at /agent-api/
+    make sidecar        # sidecar on :9300, routed at /agent-api/; its dev master key and
+                        # database persist in backend/bin/data (delete it to reset; never use the key elsewhere)
 
 Log in at https://localhost:9200 (port is OCIS_DEV_PORT in .env; changing it after the first start needs `docker compose down -v`) as `admin` / `admin` or a demo user such as `einstein` / `relativity`.
 
