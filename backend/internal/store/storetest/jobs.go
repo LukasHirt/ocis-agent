@@ -290,8 +290,8 @@ func runJobs(t *testing.T, f Factory) {
 		j := addJob(t, st, "u1", "j")
 		c := mustClaim(t, st, "w1")
 		release(t, st, c, store.JobWaitingApproval)
-		if err := saveCheckpoint(st, "u1", j.ID, c.Fence); err == nil {
-			t.Fatal("SaveCheckpoint succeeded after release")
+		if err := saveCheckpoint(st, "u1", j.ID, c.Fence); !errors.Is(err, store.ErrFenceLost) {
+			t.Fatalf("SaveCheckpoint after release: err = %v, want ErrFenceLost", err)
 		}
 		if got := getJob(t, st, "u1", j.ID); got.State != store.JobWaitingApproval {
 			t.Errorf("state = %s", got.State)
@@ -485,6 +485,212 @@ func runJobs(t *testing.T, f Factory) {
 		}
 		if err := saveCheckpoint(st, "u1", j2.ID, c2.Fence); err != nil {
 			t.Errorf("the live worker lost its lease to the reaper: %v", err)
+		}
+	})
+
+	t.Run("renewing a cancelled job's lease reports a conflict", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		j := addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", j.ID) })
+		err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.RenewLease(c, leaseTTL); return err })
+		if !errors.Is(err, store.ErrConflict) {
+			t.Errorf("RenewLease on a cancelled job: err = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("a wrong fence is rejected even for the same worker and job", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		stale := c
+		stale.Fence = c.Fence + 1
+		err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.RenewLease(stale, leaseTTL); return err })
+		if !errors.Is(err, store.ErrFenceLost) {
+			t.Errorf("RenewLease(wrong fence): err = %v, want ErrFenceLost", err)
+		}
+		err = st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReleaseJob(stale, store.JobSucceeded, nil, ""); return err })
+		if !errors.Is(err, store.ErrFenceLost) {
+			t.Errorf("ReleaseJob(wrong fence): err = %v, want ErrFenceLost", err)
+		}
+		mustTx(t, st, func(tx store.Tx) error { _, err := tx.RenewLease(c, leaseTTL); return err })
+		if !release(t, st, c, store.JobSucceeded) {
+			t.Error("the real claim could not release")
+		}
+	})
+
+	t.Run("double release", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		addJob(t, st, "u1", "j1")
+		c := mustClaim(t, st, "w1")
+		if !release(t, st, c, store.JobWaitingApproval) {
+			t.Fatal("first release was not applied")
+		}
+		err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReleaseJob(c, store.JobWaitingApproval, nil, ""); return err })
+		if !errors.Is(err, store.ErrFenceLost) {
+			t.Errorf("second ReleaseJob: err = %v, want ErrFenceLost", err)
+		}
+		err = st.InTx(bg(), func(tx store.Tx) error { _, err := tx.RenewLease(c, leaseTTL); return err })
+		if !errors.Is(err, store.ErrFenceLost) {
+			t.Errorf("RenewLease after release: err = %v, want ErrFenceLost", err)
+		}
+
+		clk.Advance(time.Second)
+		addJob(t, st, "u1", "j2")
+		c2 := mustClaim(t, st, "w1")
+		if !release(t, st, c2, store.JobSucceeded) {
+			t.Fatal("release into succeeded was not applied")
+		}
+		err = st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReleaseJob(c2, store.JobSucceeded, nil, ""); return err })
+		if !errors.Is(err, store.ErrConflict) {
+			t.Errorf("second release of a succeeded job: err = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("steps cannot be appended to a terminal job", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		j := addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", j.ID) })
+		err := st.InTx(bg(), func(tx store.Tx) error {
+			_, err := tx.AppendStep(store.JobStep{JobID: j.ID, Kind: "tool", Status: "ok"}, c.Fence)
+			return err
+		})
+		if !errors.Is(err, store.ErrConflict) {
+			t.Errorf("AppendStep on a cancelled job: err = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("release stores the checkpoint and error and rejects bad states", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		j := addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		for _, bad := range []store.JobState{store.JobRunning, store.JobState("bogus")} {
+			err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReleaseJob(c, bad, nil, ""); return err })
+			if err == nil {
+				t.Errorf("ReleaseJob into %q succeeded", bad)
+			}
+		}
+		var applied bool
+		mustTx(t, st, func(tx store.Tx) error {
+			var err error
+			applied, err = tx.ReleaseJob(c, store.JobFailed, json.RawMessage(`{"x":1}`), "boom")
+			return err
+		})
+		if !applied {
+			t.Fatal("release was not applied")
+		}
+		got := getJob(t, st, "u1", j.ID)
+		if got.State != store.JobFailed || got.Error != "boom" || string(got.Checkpoint) != `{"x":1}` {
+			t.Errorf("job = %+v", got)
+		}
+	})
+
+	t.Run("ttl and maxAttempts are validated", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		addJob(t, st, "u1", "j")
+		for _, ttl := range []time.Duration{0, time.Microsecond} {
+			err := st.InTx(bg(), func(tx store.Tx) error { _, _, err := tx.ClaimNextJob("w", ttl); return err })
+			if err == nil {
+				t.Errorf("ClaimNextJob(ttl=%v) succeeded", ttl)
+			}
+		}
+		c := mustClaim(t, st, "w1")
+		if err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.RenewLease(c, 0); return err }); err == nil {
+			t.Error("RenewLease(ttl=0) succeeded")
+		}
+		if err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReapExpired(0, backoffMinutes); return err }); err == nil {
+			t.Error("ReapExpired(0, ...) succeeded")
+		}
+		if err := st.InTx(bg(), func(tx store.Tx) error { _, err := tx.ReapExpired(1, nil); return err }); err == nil {
+			t.Error("ReapExpired(1, nil) succeeded")
+		}
+	})
+
+	t.Run("steps survive a requeue and numbering continues", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		j := addJob(t, st, "u1", "j")
+		c1 := mustClaim(t, st, "w1")
+		mustTx(t, st, func(tx store.Tx) error {
+			s, err := tx.AppendStep(store.JobStep{JobID: j.ID, Kind: "llm", Status: "ok"}, c1.Fence)
+			if err == nil && s.N != 1 {
+				t.Errorf("first step N = %d", s.N)
+			}
+			return err
+		})
+		clk.Advance(3 * time.Minute)
+		mustTx(t, st, func(tx store.Tx) error {
+			r, err := tx.ReapExpired(3, backoffMinutes)
+			if err == nil && r.Requeued != 1 {
+				t.Errorf("reap = %+v", r)
+			}
+			return err
+		})
+		clk.Advance(time.Minute)
+		c2 := mustClaim(t, st, "w2")
+		var s store.JobStep
+		mustTx(t, st, func(tx store.Tx) error {
+			var err error
+			s, err = tx.AppendStep(store.JobStep{JobID: j.ID, Kind: "llm", Status: "ok"}, c2.Fence)
+			return err
+		})
+		if s.N != 2 {
+			t.Errorf("step after requeue N = %d, want 2", s.N)
+		}
+		var steps []store.JobStep
+		_ = st.View(bg(), func(tx store.Tx) error {
+			var err error
+			steps, err = tx.ListSteps("u1", j.ID)
+			return err
+		})
+		if len(steps) != 2 {
+			t.Errorf("steps = %+v", steps)
+		}
+	})
+
+	t.Run("a voluntary release does not consume an attempt", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		j := addJob(t, st, "u1", "j")
+		c := mustClaim(t, st, "w1")
+		if c.Job.Attempt != 1 {
+			t.Fatalf("attempt = %d", c.Job.Attempt)
+		}
+		release(t, st, c, store.JobQueued)
+		if got := getJob(t, st, "u1", j.ID); got.Attempt != 0 {
+			t.Errorf("attempt after requeue release = %d, want 0", got.Attempt)
+		}
+		c = mustClaim(t, st, "w1")
+		if c.Job.Attempt != 1 {
+			t.Errorf("attempt after reclaim = %d, want 1", c.Job.Attempt)
+		}
+		release(t, st, c, store.JobWaitingApproval)
+		if got := getJob(t, st, "u1", j.ID); got.Attempt != 0 {
+			t.Errorf("attempt after approval pause = %d, want 0", got.Attempt)
+		}
+	})
+
+	t.Run("a duplicate job id conflicts", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		ins := func() error {
+			return st.InTx(bg(), func(tx store.Tx) error {
+				_, err := tx.InsertJob(store.Job{ID: "fixed", UserID: "u1", TriggerKind: "chat", Goal: "g"})
+				return err
+			})
+		}
+		if err := ins(); err != nil {
+			t.Fatal(err)
+		}
+		if err := ins(); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("duplicate id: err = %v, want ErrConflict", err)
 		}
 	})
 

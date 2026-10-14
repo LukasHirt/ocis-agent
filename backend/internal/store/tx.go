@@ -102,6 +102,8 @@ type Tx interface {
 	// ReleaseJob frees the lease and moves the job to next (not running) if it
 	// is still running. applied is false if the job was no longer running
 	// (for example cancelled). An empty checkpoint keeps the stored one.
+	// Attempt counts runs that did not end with a voluntary release, so pauses
+	// for approval do not count towards the reaper's max-attempts budget.
 	ReleaseJob(c Claim, next JobState, checkpoint json.RawMessage, errMsg string) (applied bool, err error)
 	// ReapExpired requeues or fails running jobs whose lease is gone.
 	ReapExpired(maxAttempts int, backoff func(attempt int) time.Duration) (ReapResult, error)

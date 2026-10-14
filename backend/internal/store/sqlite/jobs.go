@@ -19,9 +19,11 @@ const (
 )
 
 // leaseHeld is the fence condition shared by the fenced writes: the user's
-// lease row names this job, carries this fence and is not blank. The first
-// placeholder is the job id, the second the fence.
+// lease row names this job, carries this fence and is not blank. The single
+// placeholder is the fence; the job is matched through jobs.id.
 const leaseHeld = `EXISTS (SELECT 1 FROM leases l WHERE l.user_id = jobs.user_id AND l.job_id = jobs.id AND l.fence = ? AND l.holder <> '')`
+
+var errTTL = errors.New("store: the lease ttl must be at least one millisecond")
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -65,6 +67,8 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
+	case isUnique(err):
+		return store.Job{}, fmt.Errorf("%w: job %s exists", store.ErrConflict, j.ID)
 	case isForeignKey(err):
 		return store.Job{}, fmt.Errorf("%w: user %s", store.ErrNotFound, j.UserID)
 	case err != nil:
@@ -234,8 +238,11 @@ func (t *tx) ListSteps(userID, jobID string) ([]store.JobStep, error) {
 
 // ClaimNextJob implements store.Tx.
 func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, error) {
-	if worker == "" || ttl <= 0 {
-		return store.Claim{}, false, errors.New("store: claiming needs a worker id and a positive ttl")
+	if worker == "" {
+		return store.Claim{}, false, errors.New("store: claiming needs a worker id")
+	}
+	if ttl < time.Millisecond {
+		return store.Claim{}, false, errTTL
 	}
 	now := t.now()
 	var id, userID string
@@ -277,18 +284,19 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 
 // RenewLease implements store.Tx.
 func (t *tx) RenewLease(c store.Claim, ttl time.Duration) (store.Claim, error) {
-	if ttl <= 0 {
-		return store.Claim{}, errors.New("store: renewing needs a positive ttl")
+	if ttl < time.Millisecond {
+		return store.Claim{}, errTTL
 	}
 	expires := t.now().Add(ttl)
 	res, err := t.q.ExecContext(t.ctx,
-		`UPDATE leases SET expires_at = ? WHERE user_id = ? AND holder = ? AND job_id = ? AND fence = ? AND holder <> ''`,
+		`UPDATE leases SET expires_at = ? WHERE user_id = ? AND holder = ? AND job_id = ? AND fence = ? AND holder <> ''
+		 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id = leases.job_id AND jobs.state = 'running')`,
 		ms(expires), c.Job.UserID, c.Worker, c.Job.ID, c.Fence)
 	if err != nil {
 		return store.Claim{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return store.Claim{}, store.ErrFenceLost
+		return store.Claim{}, t.diagnoseJobWrite(c.Job.UserID, c.Job.ID, true)
 	}
 	c.ExpiresAt = expires
 	return c, nil
@@ -310,12 +318,14 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 		return false, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return false, store.ErrFenceLost
+		return false, t.diagnoseJobWrite(c.Job.UserID, c.Job.ID, true)
 	}
 	res, err = t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = ?, checkpoint = CASE WHEN ? = '' THEN checkpoint ELSE ? END, error = ?, updated_at = ?
+		`UPDATE jobs SET state = ?, checkpoint = CASE WHEN ? = '' THEN checkpoint ELSE ? END, error = ?,
+		     attempt = CASE WHEN ? IN ('queued','waiting_approval') AND attempt > 0 THEN attempt - 1 ELSE attempt END,
+		     updated_at = ?
 		 WHERE id = ? AND user_id = ? AND state = 'running'`,
-		string(next), string(checkpoint), string(checkpoint), errMsg, ms(t.now()), c.Job.ID, c.Job.UserID)
+		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), ms(t.now()), c.Job.ID, c.Job.UserID)
 	if err != nil {
 		return false, err
 	}
