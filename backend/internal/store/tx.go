@@ -164,4 +164,35 @@ type Tx interface {
 	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
 	// means 100; the maximum is 1000.
 	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
+
+	// PausePolicy pauses the agent for reason unless a pause that outranks it
+	// is already in place (see PauseSupersedes). changed is false if nothing
+	// was written. ErrInvalid for an empty or unknown reason, ErrNotFound.
+	PausePolicy(userID, reason string) (changed bool, err error)
+	// ClearPause resumes the agent only if the current pause reason is one of
+	// reasons. ErrInvalid if none or an unknown reason is given; ErrNotFound.
+	ClearPause(userID string, reasons ...string) (cleared bool, err error)
+	// WipeAppToken empties the stored ciphertext and nonce and marks the token
+	// revoked (the label and key reference stay). ErrNotFound if there is no
+	// token. Sealed data is encrypted, so this is a removal of the secret from
+	// the live row, not a secure erase of free pages.
+	WipeAppToken(userID string) error
+
+	// ListUsers returns users in user id order after afterID. limit <= 0 means
+	// 100; the maximum is 1000.
+	ListUsers(afterID string, limit int) ([]User, error)
+	// ListDormantUsers returns the ids of users that are not paused, have
+	// dormancy_days > 0 and were last seen at or before now minus that many
+	// days, least recently seen first.
+	ListDormantUsers(now time.Time, limit int) ([]string, error)
+	// ListTokensDueForRenewal returns valid tokens that have reached half of
+	// their lifetime (including expired ones), soonest expiry first.
+	ListTokensDueForRenewal(now time.Time, limit int) ([]TokenDue, error)
+
+	// GetCursor returns the user's cursor; an absent cursor is a zero cursor
+	// with an empty, non-nil MemoryETags map.
+	GetCursor(userID string) (Cursor, error)
+	// PutCursor inserts or replaces the user's cursor. ErrInvalid without a
+	// user id, ErrNotFound for an unknown user.
+	PutCursor(c Cursor) error
 }
