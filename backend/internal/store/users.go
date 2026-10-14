@@ -1,8 +1,6 @@
 package store
 
 import (
-	"errors"
-	"fmt"
 	"time"
 )
 
@@ -66,19 +64,19 @@ func DefaultPolicy(userID string, now time.Time) Policy {
 func (p Policy) Validate() error {
 	switch {
 	case p.UserID == "":
-		return errors.New("store: a policy needs a user id")
+		return Invalid("a policy needs a user id")
 	case !ValidPauseReason(p.PauseReason):
-		return fmt.Errorf("store: unknown pause reason %q", p.PauseReason)
+		return Invalid("unknown pause reason %q", p.PauseReason)
 	case p.Paused && p.PauseReason == "":
-		return errors.New("store: a paused policy needs a pause reason")
+		return Invalid("a paused policy needs a pause reason")
 	case !p.Paused && p.PauseReason != "":
-		return errors.New("store: a pause reason requires paused=true")
+		return Invalid("a pause reason requires paused=true")
 	case p.SweepInterval < time.Second || p.SweepInterval%time.Second != 0:
-		return errors.New("store: the sweep interval must be a whole number of seconds, at least one second")
+		return Invalid("the sweep interval must be a whole number of seconds, at least one second")
 	case p.DailyTokens < 0:
-		return errors.New("store: daily tokens must not be negative")
+		return Invalid("daily tokens must not be negative")
 	case p.DormancyDays < 0:
-		return errors.New("store: dormancy days must not be negative")
+		return Invalid("dormancy days must not be negative")
 	}
 	return nil
 }

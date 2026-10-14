@@ -11,7 +11,7 @@ import (
 // PutDEK implements store.Tx.
 func (t *tx) PutDEK(d store.DEK) error {
 	if d.ID == "" || len(d.WrappedKey) == 0 || len(d.Nonce) == 0 {
-		return errors.New("store: a DEK needs an id, a wrapped key and a nonce")
+		return store.Invalid("a DEK needs an id, a wrapped key and a nonce")
 	}
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = t.now()
