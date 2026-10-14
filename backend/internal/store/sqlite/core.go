@@ -151,6 +151,11 @@ func (t *tx) PutAppToken(a store.AppToken) error {
 		return errors.New("store: an app token needs sealed data")
 	case !a.Status.Valid():
 		return fmt.Errorf("store: unknown token status %q", a.Status)
+	case a.ExpiresAt.IsZero():
+		return errors.New("store: an app token needs an expiry")
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = t.now()
 	}
 	_, err := t.q.ExecContext(t.ctx,
 		`INSERT INTO app_tokens(user_id, ciphertext, nonce, dek_id, label, created_at, expires_at, status)

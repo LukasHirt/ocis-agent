@@ -73,8 +73,8 @@ func (p Policy) Validate() error {
 		return errors.New("store: a paused policy needs a pause reason")
 	case !p.Paused && p.PauseReason != "":
 		return errors.New("store: a pause reason requires paused=true")
-	case p.SweepInterval <= 0:
-		return errors.New("store: the sweep interval must be positive")
+	case p.SweepInterval < time.Second || p.SweepInterval%time.Second != 0:
+		return errors.New("store: the sweep interval must be a whole number of seconds, at least one second")
 	case p.DailyTokens < 0:
 		return errors.New("store: daily tokens must not be negative")
 	case p.DormancyDays < 0:

@@ -160,6 +160,8 @@ func runCore(t *testing.T, f Factory) {
 			"reason without pause":    func(p store.Policy) store.Policy { p.Paused, p.PauseReason = false, store.PauseUser; return p },
 			"unknown reason":          func(p store.Policy) store.Policy { p.Paused, p.PauseReason = true, "because"; return p },
 			"non-positive sweep":      func(p store.Policy) store.Policy { p.SweepInterval = 0; return p },
+			"sub-second sweep":        func(p store.Policy) store.Policy { p.SweepInterval = 500 * time.Millisecond; return p },
+			"fractional sweep":        func(p store.Policy) store.Policy { p.SweepInterval = 1500 * time.Millisecond; return p },
 			"negative tokens":         func(p store.Policy) store.Policy { p.DailyTokens = -1; return p },
 			"negative dormancy":       func(p store.Policy) store.Policy { p.DormancyDays = -1; return p },
 		}
@@ -237,12 +239,27 @@ func runCore(t *testing.T, f Factory) {
 			"no ciphertext": func(a store.AppToken) store.AppToken { a.Sealed.Ciphertext = nil; return a },
 			"no nonce":      func(a store.AppToken) store.AppToken { a.Sealed.Nonce = nil; return a },
 			"bad status":    func(a store.AppToken) store.AppToken { a.Status = "weird"; return a },
+			"no expiry":     func(a store.AppToken) store.AppToken { a.ExpiresAt = time.Time{}; return a },
 		}
 		for name, mut := range bad {
 			cand := mut(good)
 			if err := st.InTx(bg(), func(tx store.Tx) error { return tx.PutAppToken(cand) }); err == nil {
 				t.Errorf("%s: PutAppToken succeeded", name)
 			}
+		}
+		noCreated := good
+		noCreated.CreatedAt = time.Time{}
+		mustTx(t, st, func(tx store.Tx) error { return tx.PutAppToken(noCreated) })
+		var read store.AppToken
+		if err := st.View(bg(), func(tx store.Tx) error {
+			var err error
+			read, err = tx.GetAppToken("u1")
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !read.CreatedAt.Equal(clk.Now()) {
+			t.Errorf("CreatedAt = %v, want store clock %v", read.CreatedAt, clk.Now())
 		}
 		unknownDEK := good
 		unknownDEK.Sealed.DEKID = "no-such-dek"
