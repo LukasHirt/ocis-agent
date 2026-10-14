@@ -13,7 +13,7 @@ import (
 // PutUser implements store.Tx.
 func (t *tx) PutUser(u store.User) error {
 	if u.ID == "" || u.Name == "" || u.PersonalDriveID == "" {
-		return errors.New("store: a user needs an id, a name and a personal drive id")
+		return store.Invalid("a user needs an id, a name and a personal drive id")
 	}
 	now := t.now()
 	if u.EnrolledAt.IsZero() {
@@ -146,13 +146,13 @@ func (t *tx) PutPolicy(p store.Policy) error {
 func (t *tx) PutAppToken(a store.AppToken) error {
 	switch {
 	case a.UserID == "" || a.Label == "":
-		return errors.New("store: an app token needs a user id and a label")
+		return store.Invalid("an app token needs a user id and a label")
 	case len(a.Sealed.Ciphertext) == 0 || len(a.Sealed.Nonce) == 0 || a.Sealed.DEKID == "":
-		return errors.New("store: an app token needs sealed data")
+		return store.Invalid("an app token needs sealed data")
 	case !a.Status.Valid():
-		return fmt.Errorf("store: unknown token status %q", a.Status)
+		return store.Invalid("unknown token status %q", a.Status)
 	case a.ExpiresAt.IsZero():
-		return errors.New("store: an app token needs an expiry")
+		return store.Invalid("an app token needs an expiry")
 	}
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = t.now()
@@ -193,7 +193,7 @@ func (t *tx) GetAppToken(userID string) (store.AppToken, error) {
 // SetAppTokenStatus implements store.Tx.
 func (t *tx) SetAppTokenStatus(userID string, s store.TokenStatus) error {
 	if !s.Valid() {
-		return fmt.Errorf("store: unknown token status %q", s)
+		return store.Invalid("unknown token status %q", s)
 	}
 	res, err := t.q.ExecContext(t.ctx, `UPDATE app_tokens SET status = ? WHERE user_id = ?`, string(s), userID)
 	if err != nil {
@@ -208,7 +208,7 @@ func (t *tx) SetAppTokenStatus(userID string, s store.TokenStatus) error {
 // AddTokenLabel implements store.Tx.
 func (t *tx) AddTokenLabel(userID, label string) error {
 	if userID == "" || label == "" {
-		return errors.New("store: a token label needs a user id and a label")
+		return store.Invalid("a token label needs a user id and a label")
 	}
 	_, err := t.q.ExecContext(t.ctx,
 		`INSERT INTO app_token_labels(user_id, label, created_at) VALUES(?,?,?)`, userID, label, ms(t.now()))

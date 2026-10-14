@@ -41,6 +41,7 @@ type Job struct {
 	Goal        string
 	State       JobState
 	Attempt     int
+	Runs        int // times claimed; unlike Attempt it is never refunded, so release-to-queued loops can be capped
 	NotBefore   time.Time
 	Checkpoint  json.RawMessage
 	Error       string

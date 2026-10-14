@@ -15,7 +15,7 @@ const (
 	defaultJobLimit = 50
 	maxJobLimit     = 500
 
-	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, not_before, checkpoint, error, created_at, updated_at`
+	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at`
 )
 
 // leaseHeld is the fence condition shared by the fenced writes: the user's
@@ -23,7 +23,7 @@ const (
 // placeholder is the fence; the job is matched through jobs.id.
 const leaseHeld = `EXISTS (SELECT 1 FROM leases l WHERE l.user_id = jobs.user_id AND l.job_id = jobs.id AND l.fence = ? AND l.holder <> '')`
 
-var errTTL = errors.New("store: the lease ttl must be at least one millisecond")
+var errTTL = store.Invalid("the lease ttl must be at least one millisecond")
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -31,7 +31,7 @@ func scanJob(row scanner) (store.Job, error) {
 	var j store.Job
 	var state, checkpoint string
 	var notBefore, created, updated int64
-	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt,
+	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
 		&notBefore, &checkpoint, &j.Error, &created, &updated)
 	if err != nil {
 		return store.Job{}, err
@@ -46,15 +46,15 @@ func scanJob(row scanner) (store.Job, error) {
 func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	switch {
 	case j.UserID == "" || j.TriggerKind == "" || j.Goal == "":
-		return store.Job{}, errors.New("store: a job needs a user id, a trigger kind and a goal")
+		return store.Job{}, store.Invalid("a job needs a user id, a trigger kind and a goal")
 	case len(j.Checkpoint) > 0 && !json.Valid(j.Checkpoint):
-		return store.Job{}, errors.New("store: the checkpoint is not valid JSON")
+		return store.Job{}, store.Invalid("the checkpoint is not valid JSON")
 	}
 	now := t.now()
 	if j.ID == "" {
 		j.ID = store.NewID()
 	}
-	j.State, j.Attempt, j.Error = store.JobQueued, 0, ""
+	j.State, j.Attempt, j.Runs, j.Error = store.JobQueued, 0, 0, ""
 	if j.NotBefore.IsZero() {
 		j.NotBefore = now
 	}
@@ -63,8 +63,8 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt,
+		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt, j.Runs,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
 	case isUnique(err):
@@ -160,7 +160,7 @@ func (t *tx) diagnoseJobWrite(userID, jobID string, fenced bool) error {
 // SaveCheckpoint implements store.Tx.
 func (t *tx) SaveCheckpoint(userID, jobID string, checkpoint json.RawMessage, fence int64) error {
 	if len(checkpoint) == 0 || !json.Valid(checkpoint) {
-		return errors.New("store: the checkpoint must be valid JSON")
+		return store.Invalid("the checkpoint must be valid JSON")
 	}
 	res, err := t.q.ExecContext(t.ctx,
 		`UPDATE jobs SET checkpoint = ?, updated_at = ?
@@ -178,10 +178,10 @@ func (t *tx) SaveCheckpoint(userID, jobID string, checkpoint json.RawMessage, fe
 // AppendStep implements store.Tx.
 func (t *tx) AppendStep(step store.JobStep, fence int64) (store.JobStep, error) {
 	if step.Kind != "llm" && step.Kind != "tool" {
-		return store.JobStep{}, fmt.Errorf("store: unknown step kind %q", step.Kind)
+		return store.JobStep{}, store.Invalid("unknown step kind %q", step.Kind)
 	}
 	if step.JobID == "" || step.Status == "" {
-		return store.JobStep{}, errors.New("store: a step needs a job id and a status")
+		return store.JobStep{}, store.Invalid("a step needs a job id and a status")
 	}
 	var userID string
 	err := t.q.QueryRowContext(t.ctx, `SELECT user_id FROM jobs WHERE id = ?`, step.JobID).Scan(&userID)
@@ -239,7 +239,7 @@ func (t *tx) ListSteps(userID, jobID string) ([]store.JobStep, error) {
 // ClaimNextJob implements store.Tx.
 func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, error) {
 	if worker == "" {
-		return store.Claim{}, false, errors.New("store: claiming needs a worker id")
+		return store.Claim{}, false, store.Invalid("claiming needs a worker id")
 	}
 	if ttl < time.Millisecond {
 		return store.Claim{}, false, errTTL
@@ -272,7 +272,7 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 		return store.Claim{}, false, err
 	}
 	if _, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'running', attempt = attempt + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
+		`UPDATE jobs SET state = 'running', attempt = attempt + 1, runs = runs + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
 		return store.Claim{}, false, err
 	}
 	job, err := t.GetJob(userID, id)
@@ -305,10 +305,10 @@ func (t *tx) RenewLease(c store.Claim, ttl time.Duration) (store.Claim, error) {
 // ReleaseJob implements store.Tx.
 func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawMessage, errMsg string) (bool, error) {
 	if !next.Valid() || next == store.JobRunning {
-		return false, fmt.Errorf("store: cannot release a job into state %q", next)
+		return false, store.Invalid("cannot release a job into state %q", next)
 	}
 	if len(checkpoint) > 0 && !json.Valid(checkpoint) {
-		return false, errors.New("store: the checkpoint must be valid JSON")
+		return false, store.Invalid("the checkpoint must be valid JSON")
 	}
 	res, err := t.q.ExecContext(t.ctx,
 		`UPDATE leases SET holder = '', job_id = '', expires_at = 0
@@ -336,7 +336,7 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 // ReapExpired implements store.Tx.
 func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duration) (store.ReapResult, error) {
 	if maxAttempts < 1 || backoff == nil {
-		return store.ReapResult{}, errors.New("store: reaping needs maxAttempts >= 1 and a backoff function")
+		return store.ReapResult{}, store.Invalid("reaping needs maxAttempts >= 1 and a backoff function")
 	}
 	now := t.now()
 

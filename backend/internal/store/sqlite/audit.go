@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
+	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
 const (
@@ -17,7 +18,7 @@ const (
 // AppendAudit implements store.Tx.
 func (t *tx) AppendAudit(ev audit.Event) (audit.Record, error) {
 	if ev.UserID == "" || ev.Kind == "" {
-		return audit.Record{}, errors.New("store: an audit event needs a user id and a kind")
+		return audit.Record{}, store.Invalid("an audit event needs a user id and a kind")
 	}
 	if ev.TS.IsZero() {
 		ev.TS = t.now()

@@ -107,4 +107,105 @@ type Tx interface {
 	ReleaseJob(c Claim, next JobState, checkpoint json.RawMessage, errMsg string) (applied bool, err error)
 	// ReapExpired requeues or fails running jobs whose lease is gone.
 	ReapExpired(maxAttempts int, backoff func(attempt int) time.Duration) (ReapResult, error)
+
+	// AssertLease succeeds only if the job is running and the user's lease
+	// names this job with this fence and a non-blank holder. Use it inside a
+	// composite transaction (approval transition + idempotency + audit + step)
+	// to prove the caller still owns the job. ErrNotFound if there is no such
+	// job, ErrConflict if it is terminal, ErrFenceLost otherwise.
+	AssertLease(userID, jobID string, fence int64) error
+	// RequeueJob releases the claim back to queued (as ReleaseJob does) and
+	// delays the next claim until notBefore (zero means now). applied is false
+	// if the job was no longer running.
+	RequeueJob(c Claim, notBefore time.Time, checkpoint json.RawMessage) (applied bool, err error)
+
+	// InsertApproval adds a pending approval for a running job. Fenced: the
+	// caller must hold the job's lease (ErrFenceLost / ErrConflict /
+	// ErrNotFound as for AssertLease). Invalid input gives ErrInvalid; a
+	// duplicate id or idempotency key gives ErrConflict. It must run in the
+	// SAME transaction as ReleaseJob(waiting_approval), so a job never waits
+	// without its approvals, nor has approvals while still running.
+	InsertApproval(a Approval, fence int64) (Approval, error)
+	// GetApproval returns the user's approval, or ErrNotFound.
+	GetApproval(userID, id string) (Approval, error)
+	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
+	// means 50; the maximum is 500.
+	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)
+	// DecideApproval records the user's decision (approved or rejected) on a
+	// pending approval. ErrNotFound; ErrConflict if it is no longer pending;
+	// ErrExpired if it is past ExpiresAt (state unchanged); ErrInvalid if the
+	// decision is not approved/rejected, decidedBy is empty or argsHash does
+	// not match the stored hash (state unchanged). Run it in the same
+	// transaction as the approval_decided audit event and ResumeJobIfSettled,
+	// so a decision is never recorded without the job being resumed.
+	DecideApproval(userID, id string, decision ApprovalState, decidedBy, argsHash string) (Approval, error)
+	// TransitionApproval is the worker's compare-and-swap between states, for
+	// the edges ApprovalTransitionAllowed permits. ErrInvalid for any other
+	// edge, ErrNotFound, ErrConflict if the current state is not from.
+	TransitionApproval(userID, id string, from, to ApprovalState, patch ApprovalPatch) (Approval, error)
+	// ExpireApprovals moves every pending approval past its ExpiresAt to
+	// expired and returns what it changed. Run it in the same transaction as
+	// ResumeJobIfSettled for every returned ref: the refs are never returned
+	// again, so a split would strand the job in waiting_approval.
+	ExpireApprovals() ([]ApprovalRef, error)
+	// ResumeJobIfSettled moves a job from waiting_approval back to queued
+	// (claimable now) when none of its approvals is still pending. It returns
+	// false if the job is not waiting or something is still pending. Call it
+	// in the same transaction as the DecideApproval or ExpireApprovals that may
+	// have settled the job (see those methods).
+	ResumeJobIfSettled(userID, jobID string) (resumed bool, err error)
+
+	// BeginIdempotent records that a call with this key has started. If the
+	// key is new it returns nil. If the key exists nothing changes and the
+	// existing record is returned, so a restarted worker sees started, done or
+	// failed instead of running the call again. Key, UserID and Tool are
+	// required (ErrInvalid); a key owned by another user is ErrConflict; an
+	// unknown user is ErrNotFound. In transaction A of the execution protocol
+	// an ErrConflict from the preceding approved->executing transition means
+	// "already started: reconcile via GetIdempotent". Keys must be derived by
+	// the server (job id, call id, arguments hash), never taken from user input.
+	BeginIdempotent(rec IdemRecord) (existing *IdemRecord, err error)
+	// FinishIdempotent moves a started record to done or failed and stores the
+	// result. ErrInvalid for other states or malformed JSON, ErrNotFound, and
+	// ErrConflict if the record is not started.
+	FinishIdempotent(userID, key string, state IdemState, result json.RawMessage) error
+	// GetIdempotent returns the user's record, or ErrNotFound.
+	GetIdempotent(userID, key string) (IdemRecord, error)
+	// ListStartedIdempotent returns started records with started_at <=
+	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
+	// means 100; the maximum is 1000.
+	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
+
+	// PausePolicy pauses the agent for reason unless a pause that outranks it
+	// is already in place (see PauseSupersedes). changed is false if nothing
+	// was written. ErrInvalid for an empty or unknown reason, ErrNotFound.
+	PausePolicy(userID, reason string) (changed bool, err error)
+	// ClearPause resumes the agent only if the current pause reason is one of
+	// reasons. ErrInvalid if none or an unknown reason is given; ErrNotFound.
+	ClearPause(userID string, reasons ...string) (cleared bool, err error)
+	// WipeAppToken empties the stored ciphertext and nonce and marks the token
+	// revoked (the label and key reference stay). ErrNotFound if there is no
+	// token. Sealed data is encrypted, so this is a removal of the secret from
+	// the live row, not a secure erase of free pages.
+	WipeAppToken(userID string) error
+
+	// ListUsers returns users in user id order after afterID. limit <= 0 means
+	// 100; the maximum is 1000.
+	ListUsers(afterID string, limit int) ([]User, error)
+	// ListDormantUsers returns the ids of users that are not paused, have
+	// dormancy_days > 0 and were last seen at or before now minus that many
+	// days, least recently seen first. limit <= 0 means 100; the maximum is
+	// 1000.
+	ListDormantUsers(now time.Time, limit int) ([]string, error)
+	// ListTokensDueForRenewal returns valid tokens that have reached half of
+	// their lifetime (including expired ones), soonest expiry first. limit <= 0
+	// means 100; the maximum is 1000.
+	ListTokensDueForRenewal(now time.Time, limit int) ([]TokenDue, error)
+
+	// GetCursor returns the user's cursor; an absent cursor is a zero cursor
+	// with an empty, non-nil MemoryETags map.
+	GetCursor(userID string) (Cursor, error)
+	// PutCursor inserts or replaces the user's cursor. ErrInvalid without a
+	// user id, ErrNotFound for an unknown user.
+	PutCursor(c Cursor) error
 }
