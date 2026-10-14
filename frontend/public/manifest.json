@@ -1,0 +1,6 @@
+{
+  "entrypoint": "js/web-app-agent.js",
+  "config": {
+    "backendUrl": "/agent-api/v1"
+  }
+}
