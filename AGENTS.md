@@ -70,6 +70,9 @@ everything a contributor needs.
 - WebDAV preconditions: `If-None-Match: *` on PUT is ignored (204, the file is overwritten); `If-Match` on PUT is
   enforced but returns 409 (treat 409 and 412 as conflict); `If-Match` on DELETE is ignored (204); `Overwrite: F` on
   MOVE and COPY is enforced (412).
-- Therefore write tools must stat before creating, and `files.delete` must PROPFIND and compare the ETag to the
-  approved one itself before deleting; the remaining race window is accepted.
+- Decision: write tools stat before creating and refuse if the target exists, and `files.delete` PROPFINDs and compares
+  the ETag to the approved one itself before deleting (deletes go to the oCIS trash); the remaining race window is an
+  accepted residual risk.
+- Decision: no new notification channel (no email, webhook or oCIS notification hack). When the agent pauses itself, the
+  reason is surfaced only inside the extension (status endpoint, banner, audit log).
 - oCIS has no per-user notification create API (only admin or secret gated global notifications).
