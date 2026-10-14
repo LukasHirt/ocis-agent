@@ -146,4 +146,22 @@ type Tx interface {
 	// (claimable now) when none of its approvals is still pending. It returns
 	// false if the job is not waiting or something is still pending.
 	ResumeJobIfSettled(userID, jobID string) (resumed bool, err error)
+
+	// BeginIdempotent records that a call with this key has started. If the
+	// key is new it returns nil. If the key exists nothing changes and the
+	// existing record is returned, so a restarted worker sees started, done or
+	// failed instead of running the call again. Key, UserID and Tool are
+	// required (ErrInvalid); a key owned by another user is ErrConflict; an
+	// unknown user is ErrNotFound.
+	BeginIdempotent(rec IdemRecord) (existing *IdemRecord, err error)
+	// FinishIdempotent moves a started record to done or failed and stores the
+	// result. ErrInvalid for other states or malformed JSON, ErrNotFound, and
+	// ErrConflict if the record is not started.
+	FinishIdempotent(userID, key string, state IdemState, result json.RawMessage) error
+	// GetIdempotent returns the user's record, or ErrNotFound.
+	GetIdempotent(userID, key string) (IdemRecord, error)
+	// ListStartedIdempotent returns started records with started_at <=
+	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
+	// means 100; the maximum is 1000.
+	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
 }
