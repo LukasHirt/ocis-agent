@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
@@ -71,4 +72,37 @@ type Tx interface {
 	MarkTokenLabelDeleted(userID, label string) error
 	// ListTokenLabels returns the user's labels ordered by creation time.
 	ListTokenLabels(userID string) ([]TokenLabel, error)
+
+	// InsertJob adds a queued job (attempt 0). NotBefore defaults to Now() and
+	// Checkpoint to {}. ErrNotFound if the user does not exist.
+	InsertJob(j Job) (Job, error)
+	// GetJob returns the user's job, or ErrNotFound.
+	GetJob(userID, jobID string) (Job, error)
+	// ListJobs returns the user's jobs, newest first. f.Limit <= 0 means 50;
+	// the maximum is 500.
+	ListJobs(userID string, f JobFilter) ([]Job, error)
+	// CancelJob cancels a job that is not terminal yet. ErrNotFound, or
+	// ErrConflict if the job is already terminal.
+	CancelJob(userID, jobID string) error
+	// SaveCheckpoint stores the job's checkpoint. Fenced: ErrFenceLost unless
+	// fence is the current lease generation of this running job; ErrConflict
+	// if the job is terminal.
+	SaveCheckpoint(userID, jobID string, checkpoint json.RawMessage, fence int64) error
+	// AppendStep adds a step to a running job's timeline and assigns its N.
+	// Fenced like SaveCheckpoint.
+	AppendStep(step JobStep, fence int64) (JobStep, error)
+	// ListSteps returns the job's steps in order (empty for another user's job).
+	ListSteps(userID, jobID string) ([]JobStep, error)
+
+	// ClaimNextJob claims the oldest runnable job whose user has no active
+	// lease. The bool is false when nothing is runnable.
+	ClaimNextJob(worker string, ttl time.Duration) (Claim, bool, error)
+	// RenewLease extends the lease. ErrFenceLost if it is no longer ours.
+	RenewLease(c Claim, ttl time.Duration) (Claim, error)
+	// ReleaseJob frees the lease and moves the job to next (not running) if it
+	// is still running. applied is false if the job was no longer running
+	// (for example cancelled). An empty checkpoint keeps the stored one.
+	ReleaseJob(c Claim, next JobState, checkpoint json.RawMessage, errMsg string) (applied bool, err error)
+	// ReapExpired requeues or fails running jobs whose lease is gone.
+	ReapExpired(maxAttempts int, backoff func(attempt int) time.Duration) (ReapResult, error)
 }
