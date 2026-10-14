@@ -15,7 +15,7 @@ state everything a contributor needs.
 
 - `backend/` Go module `github.com/owncloud/ocis-agent/backend` (`cmd/`, `internal/`)
 - `frontend/` Vue 3 + TypeScript extension, built with `@ownclouders/extension-sdk`
-- `docker-compose.yml` + `dev/` dev stack (oCIS + nginx TLS proxy on https://localhost:9200; host port is OCIS_DEV_PORT in .env), run from the repo root
+- `docker-compose.yml` + `dev/` dev stack (oCIS + nginx TLS proxy on https://localhost:9200; port is OCIS_DEV_PORT in .env), run from the repo root
 
 ## Commands
 

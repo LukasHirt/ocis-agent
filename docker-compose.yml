@@ -9,6 +9,9 @@ services:
       PROXY_TLS: "false"
       OCIS_INSECURE: "true"
       OCIS_LOG_LEVEL: info
+      # shares the proxy's network namespace; nginx owns the public port, so oCIS' own
+      # proxy binds an internal one (must match dev/nginx.conf.template)
+      PROXY_HTTP_ADDR: 127.0.0.1:19200
       # auth-app: app tokens. Impersonation stays off.
       OCIS_ADD_RUN_SERVICES: auth-app
       PROXY_ENABLE_APP_AUTH: "true"
@@ -21,18 +24,21 @@ services:
       - ocis-config:/etc/ocis
       - ocis-data:/var/lib/ocis
       - ./frontend/dist:/var/lib/ocis/web/assets/apps/agent:ro
+    network_mode: "service:proxy"
+    depends_on:
+      - proxy
     restart: unless-stopped
 
   proxy:
     image: nginx:1.27-alpine
-    depends_on:
-      - ocis
+    environment:
+      OCIS_DEV_PORT: ${OCIS_DEV_PORT:-9200}
     ports:
-      - "${OCIS_DEV_PORT:-9200}:9200"
+      - "${OCIS_DEV_PORT:-9200}:${OCIS_DEV_PORT:-9200}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./dev/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dev/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./dev/certs:/etc/nginx/certs:ro
     restart: unless-stopped
 
