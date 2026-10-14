@@ -24,7 +24,7 @@ everything a contributor needs.
 - `make backend-vet backend-test` Go vet, gofmt check, unit tests
 - `make frontend-test frontend-build` Vitest and the production extension build
 - `make license-check` REUSE lint (must pass before every commit)
-- `make dev-up dev-down` local oCIS stack (after the first `make dev-up`, `docker compose up -d` also works; a fresh clone first needs `dev/certs` and `frontend/dist`, which `make dev-up` creates, and creating them via a bare compose run leaves root-owned bind-mount directories on Linux); `make sidecar` runs the sidecar against the dev stack; `make spike` runs a probe of app-token renewal, SSE events and WebDAV preconditions against the dev stack
+- `make dev-up dev-down` local oCIS stack (after the first `make dev-up`, `docker compose up -d` also works; a fresh clone first needs `dev/certs` and `frontend/dist`, which `make dev-up` creates, and creating them via a bare compose run leaves root-owned bind-mount directories on Linux); `make sidecar` runs the sidecar against the dev stack (dev master key and database persist in `backend/bin/data`; delete it to reset local state; never use that key outside local development); `make spike` runs a probe of app-token renewal, SSE events and WebDAV preconditions against the dev stack
 
 ## Conventions
 
@@ -80,6 +80,7 @@ everything a contributor needs.
 ## Persistence
 
 - Operational state lives in SQLite (`internal/store/sqlite`, pure Go) behind `store.Store`; `ocis-agent migrate` applies the embedded migrations, and start-up does too. Behaviour is specified by the suite in `internal/store/storetest`; a new store implementation must pass it unchanged.
-- The audit log is append-only and hash-chained per user (`internal/audit`). Never UPDATE or DELETE `audit` rows; a database trigger rejects it. Add events with `Tx.AppendAudit` in the same transaction as the state change they describe.
+- The audit log is append-only and hash-chained per user (`internal/audit`). Never UPDATE or DELETE `audit` rows; a database trigger rejects it. Known limit: `VerifyAudit` cannot detect removal of the tail of a user's chain; anchoring the chain head outside the database is future work. Add events with `Tx.AppendAudit` in the same transaction as the state change they describe.
 - Job leases: one running job per user. Every worker write (`SaveCheckpoint`, `AppendStep`, `RenewLease`, `ReleaseJob`) carries the lease fence, which only grows and is kept after release or reap. A voluntary release (back to queued or waiting_approval) refunds the attempt, so attempts count crashes, not approval pauses. Treat `ErrFenceLost` as "stop working on this job now".
-- Secrets are sealed with `internal/secrets` (AES-256-GCM, per-use nonce, DEKs wrapped by the master key from `AGENT_MASTER_KEY`). Pass an `aad` (for example the user id) so a ciphertext cannot be moved to another context. Never store or log token values, DEKs or the master key.
+- Secrets are sealed with `internal/secrets` (AES-256-GCM, per-use nonce, DEKs wrapped by the master key from `AGENT_MASTER_KEY`). Pass a domain-separated `aad` such as `app_token:<user id>` (not the bare user id) so a ciphertext cannot be moved to another context. Never store or log token values, DEKs or the master key.
+- `InTx` and `View` are not re-entrant: never call the store, `secrets` or `queue` from inside the callback (seal before the transaction). Start-up calls `secrets.Init`, so a wrong master key fails fast.

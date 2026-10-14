@@ -24,10 +24,24 @@ const (
 type Option func(*Queue)
 
 // WithLeaseTTL sets how long a claim's lease lasts before it must be renewed.
-func WithLeaseTTL(d time.Duration) Option { return func(q *Queue) { q.ttl = d } }
+// Values below one millisecond are ignored.
+func WithLeaseTTL(d time.Duration) Option {
+	return func(q *Queue) {
+		if d >= time.Millisecond {
+			q.ttl = d
+		}
+	}
+}
 
 // WithPollInterval sets how often a waiting Claim re-checks the store.
-func WithPollInterval(d time.Duration) Option { return func(q *Queue) { q.poll = d } }
+// Non-positive values are ignored.
+func WithPollInterval(d time.Duration) Option {
+	return func(q *Queue) {
+		if d > 0 {
+			q.poll = d
+		}
+	}
+}
 
 // Queue hands jobs to workers.
 type Queue struct {

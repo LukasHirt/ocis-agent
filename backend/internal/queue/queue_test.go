@@ -249,3 +249,17 @@ func TestRenewAndReap(t *testing.T) {
 		t.Fatalf("a reaped worker could renew: err = %v", err)
 	}
 }
+
+func TestTinyLeaseTTLIsIgnored(t *testing.T) {
+	st := newStore(t)
+	addUser(t, st, "u1")
+	q := New(st, WithLeaseTTL(0), WithPollInterval(-1))
+	if _, err := q.Enqueue(context.Background(), job("u1")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := q.Claim(ctx, "w1"); err != nil {
+		t.Fatalf("Claim with an ignored zero ttl: %v", err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,10 +50,17 @@ func Open(path string, opts ...Option) (*Store, error) {
 		o(s)
 	}
 
-	base := "file:" + escapePath(path) +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	// Create the file private (the -wal and -shm files inherit the mode); an
+	// existing file is left alone.
+	fh, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: create database file: %w", err)
+	}
+	_ = fh.Close()
 
-	var err error
+	base := "file:" + escapePath(path) +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)"
+
 	if s.w, err = sql.Open("sqlite", base+"&_txlock=immediate"); err != nil {
 		return nil, fmt.Errorf("sqlite: open writer: %w", err)
 	}

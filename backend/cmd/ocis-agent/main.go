@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/api"
 	"github.com/owncloud/ocis-agent/backend/internal/config"
+	"github.com/owncloud/ocis-agent/backend/internal/secrets"
 	"github.com/owncloud/ocis-agent/backend/internal/store/sqlite"
 )
 
@@ -31,8 +33,10 @@ func run(args []string) error {
 	case len(args) == 0:
 	case len(args) == 1 && args[0] == "migrate":
 		migrateOnly = true
+	case args[0] == "migrate":
+		return errors.New("migrate takes no arguments")
 	default:
-		return fmt.Errorf("unknown command %q (known commands: migrate)", args[0])
+		return fmt.Errorf("unknown command %q (known commands: migrate)", strings.Join(args, " "))
 	}
 
 	cfg, err := config.Load(os.Getenv)
@@ -49,10 +53,24 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		if err := st.Close(); err != nil {
+			slog.Error("close the store", "error", err)
+		}
+	}()
 	if migrateOnly {
 		slog.Info("migrations applied", "path", cfg.SQLitePath)
 		return nil
+	}
+
+	// Create the first data-encryption key and check the master key against the
+	// stored one, so a wrong AGENT_MASTER_KEY fails fast.
+	sec, err := secrets.New(st, cfg.MasterKey)
+	if err != nil {
+		return err
+	}
+	if err := sec.Init(context.Background()); err != nil {
+		return err
 	}
 
 	srv := &http.Server{

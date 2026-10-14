@@ -293,3 +293,56 @@ func TestAWrappedKeyCannotBeMovedToAnotherRow(t *testing.T) {
 		}
 	}
 }
+
+func activeID(t *testing.T, e *env) string {
+	t.Helper()
+	var id string
+	err := e.st.View(bg(), func(tx store.Tx) error {
+		d, err := tx.ActiveDEK()
+		id = d.ID
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestInitCreatesTheFirstDEKOnce(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Init(bg()); err != nil {
+		t.Fatal(err)
+	}
+	first := activeID(t, e)
+	if err := e.svc.Init(bg()); err != nil {
+		t.Fatal(err)
+	}
+	if got := activeID(t, e); got != first {
+		t.Fatalf("second Init changed the active DEK: %s -> %s", first, got)
+	}
+	sealed, err := e.svc.Seal(bg(), []byte("x"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.DEKID != first {
+		t.Fatalf("Seal used DEK %s, want %s", sealed.DEKID, first)
+	}
+}
+
+func TestInitFailsWithAnotherMasterKey(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Init(bg()); err != nil {
+		t.Fatal(err)
+	}
+	other := make([]byte, 32)
+	if _, err := rand.Read(other); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(e.st, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Init(bg()); !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("err = %v, want ErrDecrypt", err)
+	}
+}

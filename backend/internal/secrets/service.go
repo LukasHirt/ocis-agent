@@ -100,6 +100,23 @@ func (s *Service) Open(ctx context.Context, sealed store.Sealed, aad []byte) ([]
 	return plaintext, nil
 }
 
+// Init ensures an active DEK exists (creating the first one) and verifies that
+// the master key can unwrap it. Call it once at start-up so a wrong master key
+// fails fast. It is idempotent.
+func (s *Service) Init(ctx context.Context) error {
+	dek, err := s.activeDEK(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := s.aeadFor(dek); err != nil {
+		if errors.Is(err, ErrDecrypt) {
+			return fmt.Errorf("secrets: the master key cannot unwrap the stored data-encryption key; is AGENT_MASTER_KEY the key this database was created with? %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
 // Rotate retires the active DEK and creates a new one. Values sealed with the
 // old key stay readable.
 func (s *Service) Rotate(ctx context.Context) error {

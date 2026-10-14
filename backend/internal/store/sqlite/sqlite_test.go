@@ -43,6 +43,7 @@ func TestOpenAppliesPragmas(t *testing.T) {
 		{s.w, "journal_mode", "wal"},
 		{s.w, "foreign_keys", "1"},
 		{s.w, "busy_timeout", "5000"},
+		{s.w, "synchronous", "2"},
 		{s.r, "foreign_keys", "1"},
 		{s.r, "query_only", "1"},
 	}
@@ -172,5 +173,29 @@ func TestPanicInTxRollsBackAndPoolStaysUsable(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("store unusable after panic: %v", err)
+	}
+}
+
+func TestDatabaseFilesArePrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.InTx(context.Background(), func(tx store.Tx) error { return tx.SetSystem("k", "v") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, path + "-wal"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			if p != path && os.IsNotExist(err) {
+				continue
+			}
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s has mode %v, want no group/other access", filepath.Base(p), info.Mode().Perm())
+		}
 	}
 }
