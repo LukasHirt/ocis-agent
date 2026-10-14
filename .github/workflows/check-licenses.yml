@@ -1,0 +1,19 @@
+name: Check licenses
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  license-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install REUSE tool
+        run: pip install reuse
+
+      - name: Run REUSE lint
+        run: reuse lint
