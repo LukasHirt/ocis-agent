@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -186,22 +187,109 @@ func TestConcurrentFirstUseCreatesOneDEK(t *testing.T) {
 func TestNoSecretMaterialInTheDatabaseFiles(t *testing.T) {
 	e := newEnv(t)
 	marker := []byte("super-secret-token-value-0123456789")
-	if _, err := e.svc.Seal(bg(), marker, []byte("user-1")); err != nil {
+	persist := func(name string, s store.Sealed) {
+		t.Helper()
+		err := e.st.InTx(bg(), func(tx store.Tx) error {
+			if err := tx.SetSystem(name+".ct", hex.EncodeToString(s.Ciphertext)); err != nil {
+				return err
+			}
+			return tx.SetSystem(name+".nonce", hex.EncodeToString(s.Nonce))
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := e.svc.Seal(bg(), marker, []byte("user-1"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	persist("first", first)
 	if err := e.svc.Rotate(bg()); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{e.path, e.path + "-wal"} {
-		data, err := os.ReadFile(p)
+	second, err := e.svc.Seal(bg(), marker, []byte("user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	persist("second", second)
+	if first.DEKID == second.DEKID {
+		t.Fatal("expected two DEKs")
+	}
+
+	var deks []store.DEK
+	for _, id := range []string{first.DEKID, second.DEKID} {
+		var d store.DEK
+		err := e.st.View(bg(), func(tx store.Tx) error {
+			var err error
+			d, err = tx.GetDEK(id)
+			return err
+		})
 		if err != nil {
-			continue // the WAL file may not exist
+			t.Fatal(err)
 		}
-		if bytes.Contains(data, e.master) {
-			t.Errorf("master key found in %s", filepath.Base(p))
+		deks = append(deks, d)
+	}
+
+	db, err := os.ReadFile(e.path)
+	if err != nil {
+		t.Fatalf("reading the database file: %v", err)
+	}
+	all := db
+	if wal, err := os.ReadFile(e.path + "-wal"); err == nil {
+		all = append(append([]byte(nil), db...), wal...)
+	}
+
+	if !bytes.Contains(all, deks[0].WrappedKey) && !bytes.Contains(all, deks[1].WrappedKey) {
+		t.Fatal("positive control failed: no wrapped DEK found in the database files")
+	}
+	if !bytes.Contains(all, []byte(hex.EncodeToString(first.Ciphertext))) {
+		t.Fatal("positive control failed: sealed value not found in the database files")
+	}
+	if bytes.Contains(all, e.master) {
+		t.Error("master key found in the database files")
+	}
+	if bytes.Contains(all, marker) {
+		t.Error("plaintext found in the database files")
+	}
+	for _, d := range deks {
+		raw, err := e.svc.master.Open(nil, d.Nonce, d.WrappedKey, []byte("dek:"+d.ID))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if bytes.Contains(data, marker) {
-			t.Errorf("plaintext found in %s", filepath.Base(p))
+		if bytes.Contains(all, raw) {
+			t.Errorf("plaintext DEK %s found in the database files", d.ID)
+		}
+	}
+}
+
+func TestAWrappedKeyCannotBeMovedToAnotherRow(t *testing.T) {
+	e := newEnv(t)
+	sealed, err := e.svc.Seal(bg(), []byte("secret"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a store.DEK
+	if err := e.st.View(bg(), func(tx store.Tx) error {
+		var err error
+		a, err = tx.GetDEK(sealed.DEKID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = e.st.InTx(bg(), func(tx store.Tx) error {
+		if err := tx.PutDEK(store.DEK{ID: "forged", WrappedKey: a.WrappedKey, Nonce: a.Nonce}); err != nil {
+			return err
+		}
+		return tx.PutDEK(store.DEK{ID: "badnonce", WrappedKey: a.WrappedKey, Nonce: []byte{1, 2, 3}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"forged", "badnonce"} {
+		moved := sealed
+		moved.DEKID = id
+		if _, err := e.svc.Open(bg(), moved, nil); !errors.Is(err, ErrDecrypt) {
+			t.Errorf("%s: err = %v, want ErrDecrypt", id, err)
 		}
 	}
 }

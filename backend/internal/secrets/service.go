@@ -70,8 +70,9 @@ func (s *Service) Seal(ctx context.Context, plaintext, aad []byte) (store.Sealed
 	return store.Sealed{DEKID: dek.ID, Nonce: nonce, Ciphertext: aead.Seal(nil, nonce, plaintext, aad)}, nil
 }
 
-// Open decrypts a sealed value. Any failure (unknown key, wrong master key,
-// wrong aad, corrupt data) returns ErrDecrypt.
+// Open decrypts a sealed value. Key and data failures (unknown key, wrong
+// master key, wrong aad, corrupt data) return ErrDecrypt; store failures are
+// returned unchanged.
 func (s *Service) Open(ctx context.Context, sealed store.Sealed, aad []byte) ([]byte, error) {
 	var dek store.DEK
 	err := s.st.View(ctx, func(tx store.Tx) error {
