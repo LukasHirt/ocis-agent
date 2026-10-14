@@ -39,4 +39,36 @@ type Tx interface {
 	// RetireDEK marks a key as no longer used for new data. Idempotent;
 	// ErrNotFound if the id is unknown.
 	RetireDEK(id string) error
+
+	// PutUser upserts name and drive id and creates the default policy if the
+	// user has none. An existing user keeps EnrolledAt and LastSeenAt.
+	PutUser(u User) error
+	// GetUser returns the user, or ErrNotFound.
+	GetUser(id string) (User, error)
+	// TouchUser moves last_seen_at forward (never backwards).
+	TouchUser(id string, seenAt time.Time) error
+	// DeleteUser removes the user and everything that cascades from it
+	// (policy, token, labels, jobs). Audit records are never touched.
+	DeleteUser(id string) error
+
+	// GetPolicy returns the user's policy, or ErrNotFound.
+	GetPolicy(userID string) (Policy, error)
+	// PutPolicy validates and replaces the policy; UpdatedAt becomes Now().
+	PutPolicy(p Policy) error
+
+	// PutAppToken inserts or replaces the user's current app token record.
+	PutAppToken(t AppToken) error
+	// GetAppToken returns the user's token record, or ErrNotFound.
+	GetAppToken(userID string) (AppToken, error)
+	// SetAppTokenStatus changes the status of the stored token.
+	SetAppTokenStatus(userID string, s TokenStatus) error
+
+	// AddTokenLabel records a label this sidecar created. ErrConflict if it
+	// already exists.
+	AddTokenLabel(userID, label string) error
+	// MarkTokenLabelDeleted records that the token with this label was
+	// deleted. Idempotent; ErrNotFound if the label is unknown.
+	MarkTokenLabelDeleted(userID, label string) error
+	// ListTokenLabels returns the user's labels ordered by creation time.
+	ListTokenLabels(userID string) ([]TokenLabel, error)
 }
