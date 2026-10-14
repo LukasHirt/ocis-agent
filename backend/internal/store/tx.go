@@ -28,4 +28,15 @@ type Tx interface {
 	// VerifyAudit recomputes the user's whole chain. Failures wrap
 	// audit.ErrChainBroken.
 	VerifyAudit(userID string) error
+
+	// PutDEK stores a wrapped data-encryption key. ErrConflict if the id
+	// exists; a zero CreatedAt becomes Now().
+	PutDEK(d DEK) error
+	// GetDEK returns the key with the given id, or ErrNotFound.
+	GetDEK(id string) (DEK, error)
+	// ActiveDEK returns the newest non-retired key, or ErrNotFound if none.
+	ActiveDEK() (DEK, error)
+	// RetireDEK marks a key as no longer used for new data. Idempotent;
+	// ErrNotFound if the id is unknown.
+	RetireDEK(id string) error
 }
