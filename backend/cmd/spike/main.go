@@ -1,4 +1,4 @@
-// Command spike is a throwaway probe for the open questions Q3 and Q4 and for
+// Command spike is a throwaway probe for app-token self-renewal, SSE file events and
 // the WebDAV conditional-request behaviour the agent's write tools rely on. It
 // prints a markdown report on stdout. Never print a token: everything goes
 // through redact().
@@ -16,13 +16,18 @@ import (
 
 func main() {
 	var (
-		base      = flag.String("base", "https://localhost:9200", "oCIS base URL (through the dev proxy)")
+		base      = flag.String("base", "", "oCIS base URL through the dev proxy, e.g. https://localhost:9200 (required)")
 		user      = flag.String("user", "einstein", "oCIS user")
 		pass      = flag.String("pass", "relativity", "oCIS user password (needs PROXY_ENABLE_BASIC_AUTH=true)")
 		insecure  = flag.Bool("insecure", true, "skip TLS verification (dev stack uses a self-signed cert)")
 		sseWindow = flag.Duration("sse-window", 15*time.Second, "how long to listen for SSE events per run")
 	)
 	flag.Parse()
+
+	if *base == "" {
+		fmt.Fprintln(os.Stderr, "spike: -base is required (the oCIS dev stack URL, e.g. https://localhost:9200); `make spike` passes it")
+		os.Exit(1)
+	}
 
 	if err := run(*base, *user, *pass, *insecure, *sseWindow); err != nil {
 		fmt.Fprintln(os.Stderr, "spike:", err)
@@ -67,14 +72,14 @@ func run(base, user, pass string, insecure bool, window time.Duration) error {
 	}
 	fmt.Fprintf(out, "- personal drive id: `%s`\n\n", driveID)
 
-	fmt.Fprintln(out, "## Q4: SSE file events")
+	fmt.Fprintln(out, "## SSE file events")
 	probeSSE(ctx, c, "app token (Basic auth)", app, driveID, window, out)
 	probeSSE(ctx, c, "user password (control)", owner, driveID, window, out)
 
 	probeConditional(ctx, c, app, driveID, out)
 
-	// Q3 runs last: it deletes the original token when renewal works, which
+	// The renewal probe runs last: it deletes the original token when renewal works, which
 	// would break the probes above.
-	probeQ3(ctx, c, app, tok, out)
+	probeRenewal(ctx, c, app, tok, out)
 	return nil
 }

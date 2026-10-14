@@ -18,9 +18,9 @@ func status(r response, err error) string {
 	return fmt.Sprintf("%d", r.status)
 }
 
-// probeQ3 asks: can an app token create (renew) an app token?
-func probeQ3(ctx context.Context, c *client, app cred, orig *appToken, out io.Writer) {
-	fmt.Fprintln(out, "## Q3: app-token self-renewal")
+// probeRenewal asks: can an app token create (renew) an app token?
+func probeRenewal(ctx context.Context, c *client, app cred, orig *appToken, out io.Writer) {
+	fmt.Fprintln(out, "## App-token self-renewal")
 	resp, renewed, err := c.createToken(ctx, app, "ocis-agent-spike-renewed")
 	switch {
 	case err != nil:
