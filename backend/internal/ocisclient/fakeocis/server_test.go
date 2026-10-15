@@ -451,3 +451,46 @@ func TestSSEHeartbeatAndDrop(t *testing.T) {
 		}
 	}
 }
+
+func TestStalledUploadDoesNotBlockOtherRequests(t *testing.T) {
+	s := newFake(t)
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequest("PUT", s.URL+dav+"/slow.md", pr)
+	req.SetBasicAuth("einstein", pass)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	pw.Write([]byte("partial")) // the handler is now waiting for the rest of the body
+	time.Sleep(100 * time.Millisecond)
+
+	fin := make(chan int, 1)
+	go func() { fin <- status(t, s, "GET", "/graph/v1.0/me", einstein, nil, "") }()
+	select {
+	case st := <-fin:
+		if st != 200 {
+			t.Fatalf("me = %d", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stalled upload blocks other requests")
+	}
+	pw.Close()
+	<-done
+}
+
+func TestOversizedPutIs413(t *testing.T) {
+	s := newFake(t)
+	s.SetMaxPut(4)
+	if st := status(t, s, "PUT", dav+"/big.md", einstein, nil, "12345"); st != 413 {
+		t.Fatalf("oversized = %d, want 413", st)
+	}
+	if _, _, ok := s.File(drv, "/big.md"); ok {
+		t.Fatal("oversized body was stored")
+	}
+	if st := status(t, s, "PUT", dav+"/ok.md", einstein, nil, "1234"); st != 201 {
+		t.Fatalf("at the limit = %d", st)
+	}
+}

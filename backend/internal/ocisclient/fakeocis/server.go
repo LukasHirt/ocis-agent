@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	davPrefix = "/remote.php/dav/spaces/"
-	ssePath   = "/ocs/v2.php/apps/notifications/api/v1/notifications/sse"
-	maxPut    = 16 << 20
+	davPrefix     = "/remote.php/dav/spaces/"
+	ssePath       = "/ocs/v2.php/apps/notifications/api/v1/notifications/sse"
+	defaultMaxPut = 16 << 20
 )
 
 // Request is one recorded request. Path is the decoded URL path without the
@@ -85,6 +85,7 @@ type Server struct {
 	subs      []*sub
 	heartbeat time.Duration
 	closing   chan struct{}
+	maxPut    int64
 }
 
 // New starts a fake and stops it when the test ends.
@@ -95,6 +96,7 @@ func New(t testing.TB) *Server {
 		drives:   map[string]map[string]*node{},
 		clock:    time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC),
 		closing:  make(chan struct{}),
+		maxPut:   defaultMaxPut,
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	s.URL = s.srv.URL
@@ -226,6 +228,14 @@ func (s *Server) SetHeartbeat(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.heartbeat = d
+}
+
+// SetMaxPut lowers the largest accepted PUT body (default 16 MiB); larger
+// bodies are answered with 413.
+func (s *Server) SetMaxPut(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxPut = n
 }
 
 // DropStreams closes every open SSE stream from the server side.
@@ -424,6 +434,24 @@ func (s *Server) authApp(w http.ResponseWriter, r *http.Request, a *account) {
 func (s *Server) dav(w http.ResponseWriter, r *http.Request, a *account) {
 	drive, p, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, davPrefix), "/")
 	p = path.Clean("/" + p)
+	// Read the upload before taking the lock: a slow uploader must not block
+	// every other request.
+	var body []byte
+	if r.Method == http.MethodPut {
+		s.mu.Lock()
+		limit := s.maxPut
+		s.mu.Unlock()
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > limit {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	nodes := s.drives[drive]
@@ -447,7 +475,7 @@ func (s *Server) dav(w http.ResponseWriter, r *http.Request, a *account) {
 			_, _ = w.Write(n.data)
 		}
 	case http.MethodPut:
-		s.put(w, r, nodes, p)
+		s.put(w, r, nodes, p, body)
 	case "MKCOL":
 		if _, ok := nodes[p]; ok {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -484,7 +512,7 @@ func remove(nodes map[string]*node, p string) {
 	}
 }
 
-func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*node, p string) {
+func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*node, p string, data []byte) {
 	if pn, ok := nodes[path.Dir(p)]; !ok || !pn.dir || p == "/" {
 		w.WriteHeader(http.StatusConflict)
 		return
@@ -497,11 +525,6 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*n
 	// If-None-Match is ignored; a failing If-Match answers 409, not 412
 	if im := r.Header.Get("If-Match"); im != "" && (!exists || existing.etag != im) {
 		w.WriteHeader(http.StatusConflict)
-		return
-	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxPut))
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	nodes[p] = &node{data: data}
