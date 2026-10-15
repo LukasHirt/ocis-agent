@@ -447,3 +447,72 @@ func TestCredentialFailuresPassThrough(t *testing.T) {
 		t.Fatalf("List = %v", err)
 	}
 }
+
+func (e env) cachedETag(t *testing.T, name string) string {
+	t.Helper()
+	var etag string
+	if err := e.st.View(bg, func(tx store.Tx) error {
+		c, err := tx.GetCursor("u1")
+		etag = c.MemoryETags[name]
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return etag
+}
+
+func TestAFileDeletedByTheUserCanBeRecreatedByWrite(t *testing.T) {
+	e := ready(t, Limits{})
+	if _, err := e.svc.Write(bg, e.sess, "profile.md", "v1\n", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.files.Delete(bg, e.sess.Creds, "drive1", profile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Write(bg, e.sess, "profile.md", "v2\n", nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("write after delete = %v, want ErrConflict", err)
+	}
+	if got := e.cachedETag(t, "profile.md"); got != "" {
+		t.Fatalf("stale ETag %q survived", got)
+	}
+	if _, err := e.svc.Read(bg, e.sess, "profile.md"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("read = %v, want ErrNotFound", err)
+	}
+	ch, err := e.svc.Write(bg, e.sess, "profile.md", "v3\n", nil)
+	if err != nil || !ch.Created {
+		t.Fatalf("recreate = %+v %v", ch, err)
+	}
+}
+
+func TestReadOfADeletedFileDropsTheStaleETag(t *testing.T) {
+	e := ready(t, Limits{})
+	if _, err := e.svc.Write(bg, e.sess, "profile.md", "v1\n", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Write(bg, e.sess, "projects.md", "p\n", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.files.Delete(bg, e.sess.Creds, "drive1", profile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Read(bg, e.sess, "profile.md"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("read = %v, want ErrNotFound", err)
+	}
+	if e.cachedETag(t, "profile.md") != "" || e.cachedETag(t, "projects.md") == "" {
+		t.Fatal("only the deleted file's ETag may be dropped")
+	}
+	ch, err := e.svc.Write(bg, e.sess, "profile.md", "v2\n", nil)
+	if err != nil || !ch.Created {
+		t.Fatalf("recreate = %+v %v", ch, err)
+	}
+}
+
+func TestReadOfANeverCachedMissingFileIsAPlainNotFound(t *testing.T) {
+	e := ready(t, Limits{})
+	if _, err := e.svc.Read(bg, e.sess, "profile.md"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("read = %v", err)
+	}
+	if got := e.cachedETag(t, "profile.md"); got != "" {
+		t.Fatalf("cache entry %q appeared", got)
+	}
+}

@@ -37,6 +37,8 @@ const readmeText = "# ocis-agent\n\n" +
 	"Jobs, approvals and the audit log are stored by the agent service, not here.\n"
 
 // Session identifies the user and the credentials to use for one operation.
+// DriveID must be the personal drive of UserID: the ETag cache is keyed by
+// user and file name only.
 type Session struct {
 	UserID  string
 	DriveID string
@@ -148,6 +150,13 @@ func (s *Service) Read(ctx context.Context, sess Session, name string) (File, er
 		return File{}, err
 	}
 	data, etag, err := s.files.Get(ctx, sess.Creds, sess.DriveID, p, s.lim.MaxReadBytes)
+	if errors.Is(err, ocisclient.ErrNotFound) {
+		// the file is gone: forget its ETag so Write can recreate it
+		if cerr := s.dropETag(ctx, sess.UserID, name); cerr != nil {
+			return File{}, fmt.Errorf("memory: read %s: %w (and %v)", name, err, cerr)
+		}
+		return File{}, fmt.Errorf("memory: read %s: %w", name, err)
+	}
 	if err != nil {
 		return File{}, fmt.Errorf("memory: read %s: %w", name, err)
 	}
@@ -192,9 +201,16 @@ func (s *Service) Write(ctx context.Context, sess Session, name, content string,
 			return Change{}, fmt.Errorf("memory: check %s: %w", name, err)
 		}
 	} else {
+		// An existing file larger than the read limit surfaces ErrTooLarge
+		// from the existing content here.
 		data, etag, err := s.files.Get(ctx, sess.Creds, sess.DriveID, p, s.lim.MaxReadBytes)
 		switch {
 		case errors.Is(err, ocisclient.ErrNotFound):
+			// deleted since it was read: drop the stale ETag so the next
+			// Write takes the create path
+			if cerr := s.dropETag(ctx, sess.UserID, name); cerr != nil {
+				return Change{}, fmt.Errorf("%w (and %v)", ErrConflict, cerr)
+			}
 			return Change{}, ErrConflict
 		case err != nil:
 			return Change{}, fmt.Errorf("memory: read %s: %w", name, err)
@@ -224,6 +240,9 @@ func (s *Service) Write(ctx context.Context, sess Session, name, content string,
 // separated by a blank line. It always works on the current content, so it is
 // the safe way to add to a file the user may be editing: if the file changes
 // during the call, it reads again and retries, up to three times (ErrConflict).
+// A missing file (or one the user deleted) is created without a precondition,
+// so a file created at the same instant is overwritten (accepted race), and a
+// deleted file is silently recreated.
 func (s *Service) Append(ctx context.Context, sess Session, name, section string, b *Budget) (Change, error) {
 	p, err := ResolveName(name)
 	if err != nil {
@@ -334,6 +353,31 @@ func (s *Service) cacheETag(ctx context.Context, userID, name, etag string) erro
 	})
 	if err != nil {
 		return fmt.Errorf("memory: cache ETag of %s: %w", name, err)
+	}
+	return nil
+}
+
+// dropETag forgets the cached ETag of name. A no-op if there is none.
+func (s *Service) dropETag(ctx context.Context, userID, name string) error {
+	err := s.st.InTx(ctx, func(tx store.Tx) error {
+		c, err := tx.GetCursor(userID)
+		if err != nil {
+			return err
+		}
+		if _, ok := c.MemoryETags[name]; !ok {
+			return nil
+		}
+		m := make(map[string]string, len(c.MemoryETags))
+		for k, v := range c.MemoryETags {
+			if k != name {
+				m[k] = v
+			}
+		}
+		c.MemoryETags = m
+		return tx.PutCursor(c)
+	})
+	if err != nil {
+		return fmt.Errorf("memory: drop cached ETag of %s: %w", name, err)
 	}
 	return nil
 }
