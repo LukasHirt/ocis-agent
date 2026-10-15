@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -324,5 +325,37 @@ func TestLostCreateResponseOnReEnrolmentDeletesTheTokenAndMarksTheLabel(t *testi
 		if (l.Label == before.Label) != (l.DeletedAt == nil) {
 			t.Fatalf("only the abandoned label may be marked deleted: %+v", labels)
 		}
+	}
+}
+
+// brokenLookupStore makes GetAppToken fail with a non-NotFound error inside
+// every write transaction.
+type brokenLookupStore struct{ store.Store }
+
+type brokenLookupTx struct{ store.Tx }
+
+func (brokenLookupTx) GetAppToken(string) (store.AppToken, error) {
+	return store.AppToken{}, errors.New("boom")
+}
+
+func (b brokenLookupStore) InTx(ctx context.Context, fn func(tx store.Tx) error) error {
+	return b.Store.InTx(ctx, func(tx store.Tx) error { return fn(brokenLookupTx{tx}) })
+}
+
+func TestFirstEnrolmentCleanupKeepsTheUserWhenTheTokenLookupFails(t *testing.T) {
+	e := newEnv(t)
+	svc, err := New(bg, Deps{Store: brokenLookupStore{e.st}, Secrets: e.sec, Client: e.client, Memory: e.mem, Now: e.fake.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.fake.Fail("POST", "/auth-app/", 503, 1)
+	if err := svc.Enroll(bg, e.ident, e.bearer); err == nil {
+		t.Fatal("expected an error")
+	}
+	if err := e.st.View(bg, func(tx store.Tx) error {
+		_, err := tx.GetUser(userID)
+		return err
+	}); err != nil {
+		t.Fatalf("the user rows must remain when the lookup fails with a non-NotFound error, got %v", err)
 	}
 }

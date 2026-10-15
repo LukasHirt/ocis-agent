@@ -115,9 +115,18 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		}
 		s.markLabelDeleted(ctx, id.UserID, label)
 		if first {
+			// When cleanup cannot be confirmed (deleteByLabel false above, or a
+			// non-NotFound store error here) the label stays open and the user
+			// row stays, so a later Sweep deletes the token and attributes it.
+			// A later Enroll then sees first=false and does not apply
+			// Deps.DormancyDays (accepted trade-off).
 			_ = s.d.Store.InTx(cctx, func(tx store.Tx) error {
-				if _, err := tx.GetAppToken(id.UserID); err == nil {
+				_, err := tx.GetAppToken(id.UserID)
+				switch {
+				case err == nil:
 					return nil // a concurrent path stored a token: keep the user
+				case !errors.Is(err, store.ErrNotFound):
+					return err
 				}
 				return tx.DeleteUser(id.UserID)
 			})
