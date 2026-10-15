@@ -397,3 +397,98 @@ func TestPropfindBombIsCapped(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
 	}
 }
+
+func TestInvalidDriveNeverReachesTheServer(t *testing.T) {
+	f := newFixture(t)
+	for _, d := range []string{"..", ".", "a\x00b", "a\nb", "a\x7fb", "a?b", "a#b"} {
+		if _, err := f.c.Stat(bg, f.cr, d, "/a"); !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("Stat drive %q = %v, want ErrInvalidPath", d, err)
+		}
+	}
+	if n := len(f.s.Requests()); n != 0 {
+		t.Fatalf("%d request(s) were sent for invalid drives", n)
+	}
+}
+
+func TestListRejectsHostileHrefs(t *testing.T) {
+	const self = `<d:response><d:href>/remote.php/dav/spaces/dr/docs/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>`
+	for _, href := range []string{
+		"/remote.php/dav/spaces/dr/%2e%2e/x",
+		"/remote.php/dav/spaces/dr/docs//y",
+		"/remote.php/dav/spaces/dr/docs/../docs/x",
+		"/remote.php/dav/spaces/dr/docs%2Fx",
+		"/remote.php/dav/spaces/dr/docs/a%00b",
+		"https://evil.example/remote.php/dav/spaces/dr/docs/x",
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:">` + self +
+				`<d:response><d:href>` + href + `</d:href><d:propstat><d:prop><d:getetag>"1"</d:getetag></d:prop></d:propstat></d:response></d:multistatus>`))
+		}))
+		list, err := mustClient(t, srv.URL).List(bg, AppToken("u", "t"), "dr", "/docs")
+		srv.Close()
+		if err == nil {
+			for _, e := range list {
+				t.Errorf("href %q produced entry %+v", href, e)
+			}
+		}
+	}
+}
+
+func TestMoveCopyRootRefused(t *testing.T) {
+	f := newFixture(t)
+	f.s.PutFile(testDrive, "/a.md", []byte("a"))
+	n := len(f.s.Requests())
+	for name, op := range map[string]func(ctx context.Context, cr Creds, drive, from, to string) error{"move": f.c.Move, "copy": f.c.Copy} {
+		if err := op(bg, f.cr, testDrive, "/", "/x"); !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("%s of root = %v", name, err)
+		}
+		if err := op(bg, f.cr, testDrive, "/a.md", "/"); !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("%s onto root = %v", name, err)
+		}
+	}
+	if len(f.s.Requests()) != n {
+		t.Fatal("requests were sent")
+	}
+}
+
+func TestPut412WithoutIfMatchIsPrecondition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	t.Cleanup(srv.Close)
+	if _, err := mustClient(t, srv.URL).Put(bg, AppToken("u", "t"), "dr", "/a.md", []byte("x"), ""); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPutRejectsIfMatchWithNewline(t *testing.T) {
+	f := newFixture(t)
+	for _, v := range []string{"\"a\"\r\nX: y", "\"a\"\n"} {
+		if _, err := f.c.Put(bg, f.cr, testDrive, "/a.md", []byte("x"), v); err == nil {
+			t.Errorf("If-Match %q accepted", v)
+		}
+	}
+	if len(f.s.Requests()) != 0 {
+		t.Fatal("request sent")
+	}
+}
+
+func TestGetFallsBackToStatWhenNoETagHeader(t *testing.T) {
+	var propfinds int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte("hi"))
+		case "PROPFIND":
+			propfinds++
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:"><d:response><d:href>/remote.php/dav/spaces/dr/a.md</d:href><d:propstat><d:prop><d:getetag>"from-stat"</d:getetag></d:prop></d:propstat></d:response></d:multistatus>`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	data, etag, err := mustClient(t, srv.URL).Get(bg, AppToken("u", "t"), "dr", "/a.md", 10)
+	if err != nil || string(data) != "hi" || etag != `"from-stat"` || propfinds != 1 {
+		t.Fatalf("%q %q %v %d", data, etag, err, propfinds)
+	}
+}

@@ -37,8 +37,13 @@ type target struct {
 // ".." and control characters are rejected rather than resolved, so a path
 // cannot climb out of what the caller meant.
 func davTarget(drive, p string) (target, error) {
-	if drive == "" || strings.Contains(drive, "/") {
+	if drive == "" || drive == "." || drive == ".." || strings.ContainsAny(drive, "/?#") {
 		return target{}, ErrInvalidPath
+	}
+	for _, r := range drive {
+		if r < 0x20 || r == 0x7f {
+			return target{}, ErrInvalidPath
+		}
 	}
 	if p == "" {
 		return target{}, ErrInvalidPath
@@ -80,10 +85,22 @@ type multistatus struct {
 }
 
 // hrefToPath turns a PROPFIND href into a path inside the space.
-func hrefToPath(href, drive string) (string, error) {
+// Hrefs that are not canonical, hold control characters or an encoded slash,
+// or point at another host are rejected.
+func (c *Client) hrefToPath(href, drive string) (string, error) {
+	bad := errors.New("ocisclient: PROPFIND: malformed href")
 	u, err := url.Parse(href)
 	if err != nil {
-		return "", errors.New("ocisclient: PROPFIND: malformed href")
+		return "", bad
+	}
+	if u.Host != "" {
+		base, err := url.Parse(c.base)
+		if err != nil || !strings.EqualFold(u.Host, base.Host) {
+			return "", bad
+		}
+	}
+	if strings.Contains(strings.ToLower(u.EscapedPath()), "%2f") {
+		return "", bad
 	}
 	prefix := davPrefix + drive
 	if u.Path != prefix && !strings.HasPrefix(u.Path, prefix+"/") {
@@ -92,6 +109,14 @@ func hrefToPath(href, drive string) (string, error) {
 	rel := strings.TrimRight(strings.TrimPrefix(u.Path, prefix), "/")
 	if rel == "" {
 		return "/", nil
+	}
+	for _, r := range rel {
+		if r < 0x20 || r == 0x7f {
+			return "", bad
+		}
+	}
+	if rel != path.Clean(rel) || !strings.HasPrefix(rel, "/") {
+		return "", bad
 	}
 	return rel, nil
 }
@@ -115,7 +140,7 @@ func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string)
 	}
 	var out []Entry
 	for _, r := range ms.Responses {
-		ep, err := hrefToPath(r.Href, drive)
+		ep, err := c.hrefToPath(r.Href, drive)
 		if err != nil {
 			return nil, tg, err
 		}
@@ -232,6 +257,9 @@ func (c *Client) Put(ctx context.Context, cr Creds, drive, p string, data []byte
 	}
 	if data == nil {
 		data = []byte{}
+	}
+	if strings.ContainsAny(ifMatch, "\r\n") {
+		return "", errors.New("ocisclient: invalid If-Match value")
 	}
 	hdr := map[string]string{"Content-Type": "application/octet-stream"}
 	if ifMatch != "" {
