@@ -184,8 +184,9 @@ func TestFailedCreateKeepsTheOldTokenAndSelfHeals(t *testing.T) {
 	if open != 2 {
 		t.Fatalf("open labels = %d, want the current and the attempted one", open)
 	}
+	e.fake.Advance(6 * time.Minute) // past the grace period
 	res, err := e.svc.Sweep(bg, userID)
-	if err != nil || !res.Clean || res.Deleted != 1 {
+	if err != nil || !res.Clean || res.Closed != 1 || res.Deleted != 0 {
 		t.Fatalf("sweep = %+v %v", res, err)
 	}
 	for _, l := range e.labels(t, userID) {
@@ -394,5 +395,115 @@ func TestSweepNeverTouchesAnotherUsersTokens(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("marie's token must be untouched")
+	}
+}
+
+// our own labels legitimately appear in the audit log (token_created), so the
+// detail check is exact instead of a leak scan
+func (e env) anomalyCheck(t *testing.T, res SweepResult) {
+	t.Helper()
+	if res.Unknown != 1 {
+		t.Fatalf("sweep = %+v", res)
+	}
+	if p := e.policy(t, userID); !p.Paused || p.PauseReason != store.PauseTokenAnomaly {
+		t.Fatalf("policy = %+v", p)
+	}
+	evs := e.events(t, userID)
+	if last := evs[len(evs)-1]; last.Kind != "token_anomaly" || last.Detail != "unknown=1" {
+		t.Fatalf("last audit = %+v", last)
+	}
+}
+
+func TestSweepFlagsATokenUnderAClosedLabel(t *testing.T) {
+	e := enrolled(t)
+	oldLabel := e.token(t, userID).Label
+	e.fake.Advance(40 * time.Hour)
+	if r, err := e.svc.Renew(bg, userID); err != nil || !r.OldCleaned {
+		t.Fatalf("renew = %+v %v", r, err)
+	}
+	if res, err := e.svc.Sweep(bg, userID); err != nil || res.Unknown != 0 || !res.Clean {
+		t.Fatalf("a single legitimate token must be clean: %+v %v", res, err)
+	}
+	if _, err := e.client.CreateToken(bg, ocisclient.Bearer(e.bearer), time.Hour, oldLabel); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.Sweep(bg, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.anomalyCheck(t, res)
+	if res.Deleted != 0 {
+		t.Fatalf("unattributable tokens are not deleted: %+v", res)
+	}
+	found := false
+	for _, l := range e.remoteLabels() {
+		found = found || l == oldLabel
+	}
+	if !found {
+		t.Fatal("the token under the closed label must not be deleted")
+	}
+}
+
+func TestSweepFlagsASecondTokenUnderTheCurrentLabel(t *testing.T) {
+	e := enrolled(t)
+	cur := e.token(t, userID).Label
+	if res, err := e.svc.Sweep(bg, userID); err != nil || res.Unknown != 0 {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	if _, err := e.client.CreateToken(bg, ocisclient.Bearer(e.bearer), time.Hour, cur); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.Sweep(bg, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.anomalyCheck(t, res)
+	if n := len(e.fake.Tokens()); n != 2 {
+		t.Fatalf("nothing may be deleted: %d tokens", n)
+	}
+}
+
+func TestSweepKeepsYoungAbsentLabelsOpenUntilTheGraceEnds(t *testing.T) {
+	e := enrolled(t)
+	young := e.svc.newLabel()
+	if err := e.st.InTx(bg, func(tx store.Tx) error { return tx.AddTokenLabel(userID, young) }); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.Sweep(bg, userID)
+	if err != nil || res.Closed != 0 || res.Deleted != 0 || res.Clean {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	e.fake.Advance(6 * time.Minute)
+	res, err = e.svc.Sweep(bg, userID)
+	if err != nil || res.Closed != 1 || res.Deleted != 0 || !res.Clean {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	if k := kinds(e.events(t, userID)); !strings.HasSuffix(k, "token_label_closed") {
+		t.Fatalf("audit = %s", k)
+	}
+}
+
+func TestALateLandingTokenUnderAYoungLabelIsDeletedNotFlagged(t *testing.T) {
+	e := enrolled(t)
+	young := e.svc.newLabel()
+	if err := e.st.InTx(bg, func(tx store.Tx) error { return tx.AddTokenLabel(userID, young) }); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := e.svc.Sweep(bg, userID); err != nil || res.Clean {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	cr, _ := e.svc.AppCreds(bg, userID)
+	if _, err := e.client.CreateToken(bg, cr, time.Hour, young); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.Sweep(bg, userID)
+	if err != nil || res.Deleted != 1 || res.Unknown != 0 || !res.Clean {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	if p := e.policy(t, userID); p.Paused {
+		t.Fatalf("our own late token is not an anomaly: %+v", p)
+	}
+	if labels := e.remoteLabels(); len(labels) != 1 {
+		t.Fatalf("remote = %v", labels)
 	}
 }

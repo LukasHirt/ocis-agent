@@ -5,10 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
+
+// labelGrace is how long an open label whose token does not exist remotely is
+// kept open. Client requests time out after 30s, but a create that the client
+// gave up on may still land at oCIS later; closing the label too early would
+// let that token live unseen.
+const labelGrace = 5 * time.Minute
 
 // Renewed is the outcome of a successful renewal.
 type Renewed struct {
@@ -92,31 +99,34 @@ func (s *Service) Renew(ctx context.Context, userID string) (Renewed, error) {
 	}
 
 	res := Renewed{Label: label}
-	_, res.OldCleaned = s.cleanupOrphans(ctx, userID, next, label)
+	_, _, res.OldCleaned = s.cleanupOrphans(ctx, userID, next, label)
 	return res, nil
 }
 
 // cleanupOrphans deletes every recorded, not yet deleted label other than
-// current, then confirms by listing. Labels that no longer exist remotely are
-// marked deleted. It returns how many labels it closed and whether none is
-// left open (apart from current).
-func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclient.Creds, current string) (closed int, clean bool) {
+// current, then confirms by listing. A label with a remote token is deleted
+// at once (audit token_deleted). A label without one is closed
+// (token_label_closed) only once it is older than labelGrace; younger ones
+// stay open because an in-flight create may still land. It returns how many
+// tokens it deleted, how many absent labels it closed, and whether no open
+// label is left (apart from current).
+func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclient.Creds, current string) (deleted, closed int, clean bool) {
 	var labels []store.TokenLabel
 	if err := s.d.Store.View(ctx, func(tx store.Tx) error {
 		var err error
 		labels, err = tx.ListTokenLabels(userID)
 		return err
 	}); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	open := map[string]bool{}
+	open := map[string]store.TokenLabel{}
 	for _, l := range labels {
 		if l.DeletedAt == nil && l.Label != current {
-			open[l.Label] = true
+			open[l.Label] = l
 		}
 	}
 	if len(open) == 0 {
-		return 0, true
+		return 0, 0, true
 	}
 
 	cctx, cancel := cleanupContext(ctx)
@@ -124,10 +134,12 @@ func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclie
 	clean = true
 	list, err := s.d.Client.ListTokens(cctx, cr)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
+	existed := map[string]bool{}
 	for _, ti := range list {
-		if open[ti.Label] {
+		if _, ok := open[ti.Label]; ok {
+			existed[ti.Label] = true
 			if err := s.d.Client.DeleteToken(cctx, cr, ti.Hash); err != nil {
 				clean = false
 			}
@@ -135,36 +147,49 @@ func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclie
 	}
 	list, err = s.d.Client.ListTokens(cctx, cr)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	still := map[string]bool{}
 	for _, ti := range list {
 		still[ti.Label] = true
 	}
-	for label := range open {
+	for label, l := range open {
 		if still[label] {
 			clean = false
 			continue
+		}
+		kind := "token_deleted"
+		if !existed[label] {
+			if s.now().Sub(l.CreatedAt) < labelGrace {
+				clean = false
+				continue
+			}
+			kind = "token_label_closed"
 		}
 		err := s.d.Store.InTx(cctx, func(tx store.Tx) error {
 			if err := tx.MarkTokenLabelDeleted(userID, label); err != nil {
 				return err
 			}
-			return s.audit(tx, userID, "token_deleted", "app", "ok", label)
+			return s.audit(tx, userID, kind, "app", "ok", label)
 		})
 		if err != nil {
 			clean = false
 			continue
 		}
-		closed++
+		if kind == "token_deleted" {
+			deleted++
+		} else {
+			closed++
+		}
 	}
-	return closed, clean
+	return deleted, closed, clean
 }
 
 // SweepResult is the outcome of Sweep.
 type SweepResult struct {
 	Unknown int  // tokens with our prefix that we never recorded
 	Deleted int  // orphaned labels closed
+	Closed  int  // absent labels closed (no token existed under them)
 	Clean   bool // no orphan is left open
 }
 
@@ -202,14 +227,28 @@ func (s *Service) Sweep(ctx context.Context, userID string) (SweepResult, error)
 	}); err != nil {
 		return SweepResult{}, fmt.Errorf("auth: sweep: list labels: %w", err)
 	}
-	recorded := map[string]bool{}
+	recorded := map[string]bool{} // label -> closed
 	for _, l := range labels {
-		recorded[l.Label] = true
+		recorded[l.Label] = l.DeletedAt != nil
 	}
+	// A token with our prefix is unknown when its label was never recorded, was
+	// recorded and closed (our tokens never survive under a closed label), or
+	// is a second or later token under the current label.
 	var res SweepResult
+	seenCurrent := false
 	for _, ti := range list {
-		if strings.HasPrefix(ti.Label, s.LabelPrefix()) && !recorded[ti.Label] {
+		if !strings.HasPrefix(ti.Label, s.LabelPrefix()) {
+			continue
+		}
+		closed, ok := recorded[ti.Label]
+		switch {
+		case !ok || closed:
 			res.Unknown++
+		case ti.Label == rec.Label:
+			if seenCurrent {
+				res.Unknown++
+			}
+			seenCurrent = true
 		}
 	}
 	if res.Unknown > 0 {
@@ -225,7 +264,7 @@ func (s *Service) Sweep(ctx context.Context, userID string) (SweepResult, error)
 		}
 	}
 
-	res.Deleted, res.Clean = s.cleanupOrphans(ctx, userID, cr, rec.Label)
+	res.Deleted, res.Closed, res.Clean = s.cleanupOrphans(ctx, userID, cr, rec.Label)
 	return res, nil
 }
 
