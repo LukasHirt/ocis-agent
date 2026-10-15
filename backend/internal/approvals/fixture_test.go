@@ -55,16 +55,43 @@ type probe struct {
 	run   func(tools.ExecInfo) (tools.Result, error)
 	recon func(tools.ExecInfo) (tools.Reconciled, error)
 	execs atomic.Int32
-	last  tools.ExecInfo
+
+	mu         sync.Mutex
+	last       tools.ExecInfo
+	prepared   []json.RawMessage // arguments Prepare received
+	riskParams []json.RawMessage // arguments Risk received
 }
 
-func (p *probe) Name() string                    { return p.name }
-func (p *probe) Description() string             { return "probe " + p.name }
-func (p *probe) Schema() json.RawMessage         { return json.RawMessage(`{"type":"object"}`) }
-func (p *probe) Risk(json.RawMessage) tools.Risk { return p.risk }
-func (p *probe) AutoAllowed() bool               { return p.auto }
+// lastInfo returns the ExecInfo of the latest Execute.
+func (p *probe) lastInfo() tools.ExecInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.last
+}
 
-func (p *probe) Prepare(context.Context, tools.Env, json.RawMessage) (tools.Prepared, error) {
+// seen returns copies of the arguments Prepare and Risk received.
+func (p *probe) seen() (prepare, risk []json.RawMessage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]json.RawMessage(nil), p.prepared...), append([]json.RawMessage(nil), p.riskParams...)
+}
+
+func (p *probe) Name() string            { return p.name }
+func (p *probe) Description() string     { return "probe " + p.name }
+func (p *probe) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (p *probe) AutoAllowed() bool       { return p.auto }
+
+func (p *probe) Risk(args json.RawMessage) tools.Risk {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.riskParams = append(p.riskParams, append(json.RawMessage(nil), args...))
+	return p.risk
+}
+
+func (p *probe) Prepare(_ context.Context, _ tools.Env, args json.RawMessage) (tools.Prepared, error) {
+	p.mu.Lock()
+	p.prepared = append(p.prepared, append(json.RawMessage(nil), args...))
+	p.mu.Unlock()
 	if p.prep != nil {
 		return p.prep()
 	}
@@ -73,7 +100,9 @@ func (p *probe) Prepare(context.Context, tools.Env, json.RawMessage) (tools.Prep
 
 func (p *probe) Execute(_ context.Context, _ tools.Env, _ json.RawMessage, info tools.ExecInfo) (tools.Result, error) {
 	p.execs.Add(1)
+	p.mu.Lock()
 	p.last = info
+	p.mu.Unlock()
 	if p.run != nil {
 		return p.run(info)
 	}

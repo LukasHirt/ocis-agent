@@ -123,7 +123,11 @@ func NewGate(st store.Store, reg *tools.Registry, cfg Config) (*Gate, error) {
 	if st == nil || reg == nil {
 		return nil, errors.New("approvals: a store and a tool registry are required")
 	}
-	return &Gate{st: st, reg: reg, cfg: cfg.withDefaults()}, nil
+	cfg = cfg.withDefaults()
+	if cfg.MaxActionsPerJob > maxActionsLimit {
+		return nil, fmt.Errorf("approvals: MaxActionsPerJob must be at most %d", maxActionsLimit)
+	}
+	return &Gate{st: st, reg: reg, cfg: cfg}, nil
 }
 
 // Classify decides what to do with a call. It validates, canonicalises and
@@ -182,23 +186,38 @@ func (g *Gate) Classify(ctx context.Context, claim store.Claim, env tools.Env, c
 	return d, nil
 }
 
-// countActions counts the job's approvals that still matter (rejected and
-// expired ones do not).
+// maxActionsLimit is the store's list maximum, so the largest cap the count
+// can honour.
+const maxActionsLimit = 500
+
+// liveActions counts the job's approvals that still matter: every state except
+// rejected and expired, which the query excludes so they cannot push live rows
+// out of the list window. Run it inside the transaction that decides.
+func liveActions(tx store.Tx, userID, jobID string) (int, error) {
+	list, err := tx.ListApprovals(userID, store.ApprovalFilter{
+		JobID: jobID,
+		States: []store.ApprovalState{
+			store.ApprovalPending, store.ApprovalApproved, store.ApprovalExecuting,
+			store.ApprovalExecuted, store.ApprovalFailed, store.ApprovalUnknown,
+		},
+		Limit: maxActionsLimit,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(list), nil
+}
+
+// countActions counts the job's live approvals.
 func (g *Gate) countActions(ctx context.Context, claim store.Claim) (int, error) {
-	var list []store.Approval
+	var n int
 	err := g.st.View(ctx, func(tx store.Tx) error {
 		var err error
-		list, err = tx.ListApprovals(claim.Job.UserID, store.ApprovalFilter{JobID: claim.Job.ID, Limit: 500})
+		n, err = liveActions(tx, claim.Job.UserID, claim.Job.ID)
 		return err
 	})
 	if err != nil {
 		return 0, fmt.Errorf("approvals: count actions: %w", err)
-	}
-	n := 0
-	for _, a := range list {
-		if a.State != store.ApprovalRejected && a.State != store.ApprovalExpired {
-			n++
-		}
 	}
 	return n, nil
 }

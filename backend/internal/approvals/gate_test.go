@@ -84,9 +84,11 @@ func TestOversizedArgumentsAreDeniedBeforeParsing(t *testing.T) {
 	f := newFixture(t)
 	f.gate.cfg.MaxArgsBytes = 100
 	c := f.claim()
-	big := `{"path":"/a","content":"` + strings.Repeat("x", 200) + `"}`
+	// malformed on purpose: only a size check that runs before Canonicalize
+	// can produce this reason
+	big := `{` + strings.Repeat("x", 200)
 	d := f.classify(c, call("c1", "files.write_new", big))
-	if d.Kind != KindDeny || !strings.Contains(d.Reason, "too large") {
+	if d.Kind != KindDeny || d.Reason != "the arguments are too large" {
 		t.Fatalf("decision = %+v", d)
 	}
 	// a 1 MiB write fits the default limit
@@ -100,6 +102,12 @@ func TestOversizedArgumentsAreDeniedBeforeParsing(t *testing.T) {
 func TestBadCallIDIsACallerBug(t *testing.T) {
 	f := newFixture(t)
 	c := f.claim()
+	// the id check runs before the size check and the tool lookup
+	f.gate.cfg.MaxArgsBytes = 10
+	if _, err := f.gate.Classify(bg, c, f.env, call("a:b", "no.such.tool", strings.Repeat("x", 100))); !errors.Is(err, ErrBadCall) {
+		t.Fatalf("err = %v, want ErrBadCall before any other check", err)
+	}
+	f.gate.cfg.MaxArgsBytes = 2 << 20
 	for _, id := range []string{"", "a:b", "a b", strings.Repeat("x", 65), "ü", "a/b"} {
 		if _, err := f.gate.Classify(bg, c, f.env, call(id, "files.list_spaces", `{}`)); !errors.Is(err, ErrBadCall) {
 			t.Errorf("id %q: err = %v, want ErrBadCall", id, err)
@@ -227,5 +235,143 @@ func TestClassifyNeverWritesToOCIS(t *testing.T) {
 		case "PUT", "MKCOL", "MOVE", "COPY", "DELETE":
 			t.Fatalf("Classify sent %s %s", r.Method, r.Path)
 		}
+	}
+}
+
+func TestToolSeesOnlyTheCanonicalArguments(t *testing.T) {
+	f := newFixture(t)
+	c := f.claim()
+	for i, raw := range []string{` { "b" : 2,  "a" : 1 } `, `{"a":1,"b":2}`, "\n{\"b\":2,\t\"a\":1}\n"} {
+		d := f.classify(c, call(fmt.Sprintf("c%d", i), "probe.write", raw))
+		if string(d.Args) != `{"a":1,"b":2}` {
+			t.Fatalf("args = %s", d.Args)
+		}
+	}
+	prep, risk := f.probes["probe.write"].seen()
+	if len(prep) != 3 || len(risk) != 3 {
+		t.Fatalf("prepare saw %d calls, risk %d", len(prep), len(risk))
+	}
+	for i := range prep {
+		if string(prep[i]) != `{"a":1,"b":2}` || string(risk[i]) != `{"a":1,"b":2}` {
+			t.Fatalf("call %d: prepare %s, risk %s, want the canonical bytes", i, prep[i], risk[i])
+		}
+	}
+}
+
+func TestMaxActionsPerJobAbove500IsRejected(t *testing.T) {
+	f := newFixture(t)
+	_, err := NewGate(f.st, f.reg, Config{MaxActionsPerJob: 501})
+	if err == nil || err.Error() != "approvals: MaxActionsPerJob must be at most 500" {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := NewGate(f.st, f.reg, Config{MaxActionsPerJob: 500}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedApprovals inserts n pending approvals for the claimed job and returns them.
+func (f *fixture) seedApprovals(c store.Claim, prefix string, n int) []store.Approval {
+	f.t.Helper()
+	var out []store.Approval
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		for i := 0; i < n; i++ {
+			a, err := tx.InsertApproval(store.Approval{
+				UserID: userID, JobID: c.Job.ID, CallID: fmt.Sprintf("%s%d", prefix, i), Tool: "probe.write", Risk: "write",
+				Args: json.RawMessage(`{}`), ArgsHash: "sha256:x", IdemKey: fmt.Sprintf("%s-k%d", prefix, i),
+				ExpiresAt: f.clk.Now().Add(time.Hour),
+			}, c.Fence)
+			if err != nil {
+				return err
+			}
+			out = append(out, a)
+		}
+		return nil
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	return out
+}
+
+func (f *fixture) reject(a store.Approval) {
+	f.t.Helper()
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		_, err := tx.DecideApproval(userID, a.ID, store.ApprovalRejected, userID, a.ArgsHash)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func TestActionCapBoundary(t *testing.T) {
+	f := newFixture(t)
+	f.gate.cfg.MaxActionsPerJob = 2
+	c := f.claim()
+	f.seedApprovals(c, "a", 1)
+	if d := f.classify(c, call("c1", "probe.write", `{}`)); d.Kind != KindApprove {
+		t.Fatalf("1 live approval, cap 2: %+v", d)
+	}
+	f.seedApprovals(c, "b", 1)
+	if d := f.classify(c, call("c2", "probe.write", `{}`)); d.Kind != KindDeny {
+		t.Fatalf("2 live approvals, cap 2: %+v", d)
+	}
+}
+
+func TestRejectedAndExpiredApprovalsDoNotCount(t *testing.T) {
+	f := newFixture(t)
+	f.gate.cfg.MaxActionsPerJob = 2
+	c := f.claim()
+	live := f.seedApprovals(c, "live", 1)
+	f.reject(f.seedApprovals(c, "rej", 1)[0])
+	// the last one expires: advance past its expiry, but keep the live one
+	// alive by deciding it first
+	exp := f.seedApprovals(c, "exp", 1)[0]
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		_, err := tx.DecideApproval(userID, live[0].ID, store.ApprovalApproved, userID, live[0].ArgsHash)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(2 * time.Hour)
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		refs, err := tx.ExpireApprovals()
+		if err == nil && len(refs) != 1 {
+			t.Errorf("expired %d approvals, want 1 (%s)", len(refs), exp.ID)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.classify(c, call("c1", "probe.write", `{}`)); d.Kind != KindApprove {
+		t.Fatalf("1 live + 1 rejected + 1 expired, cap 2: %+v", d)
+	}
+}
+
+func TestLiveApprovalsAreCountedBeyondTheListWindow(t *testing.T) {
+	f := newFixture(t)
+	f.gate.cfg.MaxActionsPerJob = 5
+	c := f.claim()
+	// 4 live approvals, then 505 newer rejected ones: the live rows fall out
+	// of a newest-first window of 500 unless rejected rows are filtered by the query
+	f.seedApprovals(c, "live", 4)
+	if d := f.classify(c, call("c0", "probe.write", `{}`)); d.Kind != KindApprove {
+		t.Fatalf("4 live approvals, cap 5: %+v", d)
+	}
+	rejected := f.seedApprovals(c, "rej", 505)
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		for _, a := range rejected {
+			if _, err := tx.DecideApproval(userID, a.ID, store.ApprovalRejected, userID, a.ArgsHash); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.classify(c, call("c1", "probe.write", `{}`)); d.Kind != KindApprove {
+		t.Fatalf("4 live approvals behind 505 rejected ones, cap 5: %+v", d)
+	}
+	f.seedApprovals(c, "more", 1)
+	if d := f.classify(c, call("c2", "probe.write", `{}`)); d.Kind != KindDeny {
+		t.Fatalf("5 live approvals behind 505 rejected ones, cap 5: %+v", d)
 	}
 }
