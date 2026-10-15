@@ -221,11 +221,3 @@ func (g *Gate) countActions(ctx context.Context, claim store.Claim) (int, error)
 	}
 	return n, nil
 }
-
-// Executor is implemented in a later task (TEMPORARY stub, replaced there).
-type Executor struct{}
-
-// NewExecutor is implemented in a later task (TEMPORARY stub, replaced there).
-func NewExecutor(st store.Store, reg *tools.Registry, cfg Config) (*Executor, error) {
-	return &Executor{}, nil
-}
