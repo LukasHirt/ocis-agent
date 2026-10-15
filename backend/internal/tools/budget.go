@@ -36,7 +36,7 @@ func (b *ReadBudget) Take(n int64) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if n < 0 || b.used+n > b.limit {
+	if n < 0 || n > b.limit-b.used {
 		return ErrReadBudget
 	}
 	b.used += n

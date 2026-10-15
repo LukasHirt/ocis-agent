@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -241,5 +242,72 @@ func TestReadBudget(t *testing.T) {
 	wg.Wait()
 	if len(granted) != 10 {
 		t.Fatalf("granted %d takes of 100 from 1000, want exactly 10", len(granted))
+	}
+}
+
+func TestDuplicateAndCaseVariantKeysAreRejectedEverywhere(t *testing.T) {
+	for _, raw := range []string{
+		`{"a":1,"a":2}`,
+		`{"path":"/a","PATH":"/b"}`,
+		`{"PATH":"/b","path":"/a"}`,
+		`{"x":{"path":"/a","Path":"/b"}}`,
+		`{"x":[{"k":1},{"k":1,"K":2}]}`,
+		`{"x":[{"k":1,"k":2}]}`,
+	} {
+		if _, err := Canonicalize(json.RawMessage(raw)); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("Canonicalize(%s) = %v", raw, err)
+		}
+		if _, err := ArgsHash(json.RawMessage(raw)); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("ArgsHash(%s) = %v", raw, err)
+		}
+		if _, err := parse[map[string]any](json.RawMessage(raw)); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("parse(%s) = %v", raw, err)
+		}
+	}
+	if _, err := parse[sample](json.RawMessage(`{"path":"/a","PATH":"/b"}`)); !errors.Is(err, ErrInvalidArgs) {
+		t.Errorf("parse into a struct = %v", err)
+	}
+	h1, err1 := ArgsHash(json.RawMessage(`{"a":1,"b":{"c":2,"d":3}}`))
+	h2, err2 := ArgsHash(json.RawMessage(`{"b":{"d":3,"c":2},"a":1}`))
+	if err1 != nil || err2 != nil || h1 != h2 {
+		t.Fatalf("distinct keys in another order must hash equal: %v %v", err1, err2)
+	}
+}
+
+func TestArgsHashRequiresAnObject(t *testing.T) {
+	for _, raw := range []string{`null`, `[1]`, `"s"`, `5`, `true`} {
+		if _, err := ArgsHash(json.RawMessage(raw)); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("ArgsHash(%s) = %v", raw, err)
+		}
+	}
+}
+
+func TestArgsHashUnicodeEscapes(t *testing.T) {
+	a, _ := ArgsHash(json.RawMessage(`{"p":"A"}`))
+	b, _ := ArgsHash(json.RawMessage(`{"p":"\u0041"}`))
+	c, _ := ArgsHash(json.RawMessage(`{"p":"a"}`))
+	if a == "" || a != b || a == c {
+		t.Fatalf("hashes: %s %s %s", a, b, c)
+	}
+}
+
+func TestReadBudgetOverflowAndNegative(t *testing.T) {
+	b := NewReadBudget(10)
+	if err := b.Take(5); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{math.MaxInt64, -1} {
+		if err := b.Take(n); !errors.Is(err, ErrReadBudget) {
+			t.Errorf("Take(%d) = %v", n, err)
+		}
+	}
+	if b.Remaining() != 5 {
+		t.Fatalf("remaining = %d", b.Remaining())
+	}
+}
+
+func TestParseRejectsUnicodeWhitespacePrefix(t *testing.T) {
+	if _, err := parse[sample](json.RawMessage("\u00a0{\"path\":\"/a\"}")); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("err = %v", err)
 	}
 }

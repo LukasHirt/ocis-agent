@@ -17,9 +17,12 @@ const maxPathLen = 4096
 // no drive or user can be smuggled in), nothing after it.
 func parse[T any](raw json.RawMessage) (T, error) {
 	var v T
-	trimmed := bytes.TrimSpace(raw)
+	trimmed := bytes.Trim(raw, " \t\n\r")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return v, invalid("the arguments must be a JSON object")
+	}
+	if err := checkKeys(trimmed); err != nil {
+		return v, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.DisallowUnknownFields()
@@ -36,6 +39,13 @@ func parse[T any](raw json.RawMessage) (T, error) {
 // no insignificant whitespace, numbers kept as written. The approval binds
 // the hash of this form, so the same arguments always hash the same.
 func Canonicalize(raw json.RawMessage) ([]byte, error) {
+	trimmed := bytes.Trim(raw, " \t\n\r")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, invalid("the arguments must be a JSON object")
+	}
+	if err := checkKeys(trimmed); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -46,6 +56,62 @@ func Canonicalize(raw json.RawMessage) ([]byte, error) {
 		return nil, invalid("unexpected data after the arguments")
 	}
 	return json.Marshal(v)
+}
+
+// checkKeys rejects any object, at any depth, with a duplicate key or two keys
+// that are equal under case folding. encoding/json matches struct fields
+// case-insensitively and lets the last duplicate win, so such a document could
+// execute differently from what its hash approved. Messages never echo keys.
+func checkKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := walkValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return invalid("unexpected data after the arguments")
+	}
+	return nil
+}
+
+func walkValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return invalid("malformed JSON")
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch d {
+	case '[':
+		for dec.More() {
+			if err := walkValue(dec); err != nil {
+				return err
+			}
+		}
+	case '{':
+		var seen []string
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return invalid("malformed JSON")
+			}
+			k, _ := kt.(string)
+			for _, o := range seen {
+				if strings.EqualFold(o, k) {
+					return invalid("an object has a duplicate key")
+				}
+			}
+			seen = append(seen, k)
+			if err := walkValue(dec); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return invalid("malformed JSON")
+	}
+	return nil
 }
 
 // ArgsHash is "sha256:" and the hex SHA-256 of the canonical arguments. It
