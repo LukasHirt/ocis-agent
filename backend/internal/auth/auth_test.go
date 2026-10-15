@@ -168,3 +168,23 @@ func (e env) noLeaks(t *testing.T, id string, secrets ...string) {
 		}
 	}
 }
+
+// deleteRemote deletes the token with the label on the fake oCIS (as the user's
+// OIDC credential), so the stored copy of it answers 401.
+func (e env) deleteRemote(t *testing.T, label string) {
+	t.Helper()
+	cr := ocisclient.Bearer(e.bearer)
+	toks, err := e.client.ListTokens(bg, cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tk := range toks {
+		if tk.Label == label {
+			if err := e.client.DeleteToken(bg, cr, tk.Hash); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatalf("no remote token with label %q", label)
+}

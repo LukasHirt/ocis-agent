@@ -213,17 +213,36 @@ func (s *Service) AppCreds(ctx context.Context, userID string) (ocisclient.Creds
 	return cr, err
 }
 
-// HandleUnauthorized records that oCIS rejected the user's app credentials:
-// the token becomes invalid and the agent pauses with credential_expired (the
-// expiry has passed) or credential_invalid. A stronger pause (the user's own,
-// or token_anomaly) is kept. Calling it again changes nothing.
+// HandleUnauthorized is called when oCIS answered 401 for the user's app
+// credentials. The report is only a hint: under the user lock it re-checks the
+// STORED credentials, so a stale report about a token that a renewal has since
+// replaced is harmless. Only a definitive 401/403 for the stored credentials
+// marks the token invalid and pauses the agent with credential_expired (the
+// expiry has passed) or credential_invalid; a stronger pause (the user's own,
+// or token_anomaly) is kept. Other errors are returned and nothing is marked.
 func (s *Service) HandleUnauthorized(ctx context.Context, userID string) error {
 	unlock := s.lockUser(userID)
 	defer unlock()
-	return s.markUnauthorized(ctx, userID)
+	_, _, cr, err := s.loadToken(ctx, userID)
+	if errors.Is(err, ErrCredentialInvalid) {
+		return nil // nothing stored, or already handled
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.d.Client.Me(ctx, cr)
+	switch {
+	case err == nil:
+		return nil // stale report: the stored credentials work
+	case errors.Is(err, ocisclient.ErrUnauthorized), errors.Is(err, ocisclient.ErrForbidden):
+		return s.markUnauthorized(ctx, userID)
+	default:
+		return fmt.Errorf("auth: re-check credentials: %w", err)
+	}
 }
 
-// markUnauthorized is HandleUnauthorized for callers that hold the user lock.
+// markUnauthorized marks the stored token invalid unconditionally. Callers hold
+// the user lock and have just seen a definitive 401 for the CURRENT credentials.
 func (s *Service) markUnauthorized(ctx context.Context, userID string) error {
 	return s.d.Store.InTx(ctx, func(tx store.Tx) error {
 		rec, err := tx.GetAppToken(userID)

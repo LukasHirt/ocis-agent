@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
@@ -54,7 +55,7 @@ func TestAppCredsOpensTheStoredToken(t *testing.T) {
 	if _, err := e.svc.AppCreds(bg, userID); !errors.Is(err, ErrCredentialInvalid) {
 		t.Fatalf("no token yet = %v, want ErrCredentialInvalid", err)
 	}
-	e.seed(t, e.ident, 72*time.Hour)
+	label := e.seed(t, e.ident, 72*time.Hour)
 	cr, err := e.svc.AppCreds(bg, userID)
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +67,7 @@ func TestAppCredsOpensTheStoredToken(t *testing.T) {
 		t.Fatalf("the credentials must work: %+v %v", me, err)
 	}
 	// a wiped or invalid token never yields credentials
+	e.deleteRemote(t, label)
 	if err := e.svc.HandleUnauthorized(bg, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +106,8 @@ func TestAppCredsFailsClosedForTheWrongUserSeal(t *testing.T) {
 
 func TestHandleUnauthorizedPicksInvalidOrExpired(t *testing.T) {
 	e := newEnv(t)
-	e.seed(t, e.ident, 72*time.Hour)
+	label := e.seed(t, e.ident, 72*time.Hour)
+	e.deleteRemote(t, label)
 	if err := e.svc.HandleUnauthorized(bg, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +151,8 @@ func TestHandleUnauthorizedPicksInvalidOrExpired(t *testing.T) {
 func TestHandleUnauthorizedKeepsStrongerPauses(t *testing.T) {
 	for _, reason := range []string{store.PauseUser, store.PauseTokenAnomaly} {
 		e := newEnv(t)
-		e.seed(t, e.ident, time.Hour)
+		label := e.seed(t, e.ident, time.Hour)
+		e.deleteRemote(t, label)
 		if err := e.st.InTx(bg, func(tx store.Tx) error {
 			_, err := tx.PausePolicy(userID, reason)
 			return err
@@ -293,5 +297,74 @@ func TestLockUserSerialisesPerUser(t *testing.T) {
 			t.Fatalf("%d lock entries leaked", n)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestHandleUnauthorizedIgnoresAStaleReport(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, e.ident, 72*time.Hour)
+	if err := e.svc.HandleUnauthorized(bg, userID); err != nil {
+		t.Fatal(err)
+	}
+	if e.token(t, userID).Status != store.TokenValid {
+		t.Fatal("a working token must stay valid")
+	}
+	if e.policy(t, userID).Paused {
+		t.Fatal("a stale report must not pause")
+	}
+	if k := kinds(e.events(t, userID)); k != "" {
+		t.Fatalf("audit = %q, want none", k)
+	}
+}
+
+func TestHandleUnauthorizedIgnoresAReportAboutAReplacedToken(t *testing.T) {
+	e := newEnv(t)
+	oldLabel := e.seed(t, e.ident, 72*time.Hour)
+	// a renewal-like swap: a newer working token replaces the stored one and the
+	// old one is deleted on oCIS, so requests still holding it get 401
+	label := e.svc.newLabel()
+	tok, err := e.client.CreateToken(bg, ocisclient.Bearer(e.bearer), 72*time.Hour, label)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := e.sec.Seal(bg, []byte(tok.Value.Reveal()), e.svc.aad(userID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.InTx(bg, func(tx store.Tx) error {
+		if err := tx.AddTokenLabel(userID, label); err != nil {
+			return err
+		}
+		return tx.PutAppToken(store.AppToken{
+			UserID: userID, Sealed: sealed, Label: label,
+			CreatedAt: tok.CreatedAt, ExpiresAt: tok.ExpiresAt, Status: store.TokenValid,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.deleteRemote(t, oldLabel)
+	if err := e.svc.HandleUnauthorized(bg, userID); err != nil {
+		t.Fatal(err)
+	}
+	if e.token(t, userID).Status != store.TokenValid || e.policy(t, userID).Paused {
+		t.Fatal("a report about the replaced token must change nothing")
+	}
+	if k := kinds(e.events(t, userID)); k != "" {
+		t.Fatalf("audit = %q, want none", k)
+	}
+}
+
+func TestHandleUnauthorizedMarksNothingOnATransientError(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, e.ident, 72*time.Hour)
+	e.fake.Fail("GET", "/graph/v1.0/me", 503, 1)
+	if err := e.svc.HandleUnauthorized(bg, userID); err == nil {
+		t.Fatal("a 503 while re-checking must be returned")
+	}
+	if e.token(t, userID).Status != store.TokenValid || e.policy(t, userID).Paused {
+		t.Fatal("nothing may be marked on a transient error")
+	}
+	if k := kinds(e.events(t, userID)); k != "" {
+		t.Fatalf("audit = %q, want none", k)
 	}
 }
