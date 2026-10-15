@@ -125,6 +125,14 @@ func (s *Server) Advance(d time.Duration) {
 	s.clock = s.clock.Add(d)
 }
 
+// Now returns the fake clock. Tests give it to the services under test so that
+// token expiry and the services agree on the time.
+func (s *Server) Now() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clock
+}
+
 // Fail answers matching requests with status instead of handling them, times
 // times (a negative number means forever). An empty method matches any.
 func (s *Server) Fail(method, pathPrefix string, status, times int) {
