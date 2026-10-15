@@ -176,6 +176,16 @@ func (s *Service) Read(ctx context.Context, sess Session, name string) (File, er
 	return File{Name: name, Content: string(data), ETag: etag}, nil
 }
 
+// Forget removes the cached ETag so that the next Write of an existing file
+// needs a new Read; callers use it when they read a file but could not hand its
+// content to the model.
+func (s *Service) Forget(ctx context.Context, sess Session, name string) error {
+	if _, err := ResolveName(name); err != nil {
+		return err
+	}
+	return s.dropETag(ctx, sess.UserID, name)
+}
+
 // Write replaces (or creates) a memory file. An existing file must have been
 // read first (ErrNotRead) and must not have changed since (ErrConflict). b is
 // the job's write budget; nil means no job cap.
@@ -186,6 +196,10 @@ func (s *Service) Read(ctx context.Context, sess Session, name string) (File, er
 // Creating a file stats first and then uploads without a precondition: oCIS
 // ignores If-None-Match, so a file created by someone else in that instant is
 // overwritten (an accepted residual race).
+//
+// If the returned Change has a non-empty ETag the write happened even when err
+// is non-nil (the error is then about caching the ETag); callers must treat
+// that as success.
 func (s *Service) Write(ctx context.Context, sess Session, name, content string, b *Budget) (Change, error) {
 	p, err := ResolveName(name)
 	if err != nil {
@@ -253,6 +267,10 @@ func (s *Service) Write(ctx context.Context, sess Session, name, content string,
 // A missing file (or one the user deleted) is created without a precondition,
 // so a file created at the same instant is overwritten (accepted race), and a
 // deleted file is silently recreated.
+//
+// If the returned Change has a non-empty ETag the write happened even when err
+// is non-nil (the error is then about caching the ETag); callers must treat
+// that as success.
 func (s *Service) Append(ctx context.Context, sess Session, name, section string, b *Budget) (Change, error) {
 	p, err := ResolveName(name)
 	if err != nil {
