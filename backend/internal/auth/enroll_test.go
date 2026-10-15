@@ -2,6 +2,10 @@ package auth
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -242,5 +246,83 @@ func TestConcurrentEnrolmentsAreSerialised(t *testing.T) {
 	}
 	if got := len(e.fake.Tokens()); got != 4 {
 		t.Fatalf("remote tokens = %d", got)
+	}
+}
+
+// lostResponseSvc returns a Service over the same store as e whose client
+// reaches oCIS through a proxy that lets POST /auth-app/tokens through (the
+// token IS created) but replaces its response with an empty 502.
+func lostResponseSvc(t *testing.T, e env) *Service {
+	t.Helper()
+	target, err := url.Parse(e.fake.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.ModifyResponse = func(r *http.Response) error {
+		if r.Request.Method == http.MethodPost && strings.HasPrefix(r.Request.URL.Path, "/auth-app/tokens") {
+			r.Body.Close()
+			r.StatusCode, r.Status = http.StatusBadGateway, "502 Bad Gateway"
+			r.Body = http.NoBody
+			r.ContentLength = 0
+			r.Header.Del("Content-Length")
+		}
+		return nil
+	}
+	px := httptest.NewServer(rp)
+	t.Cleanup(px.Close)
+	client, err := ocisclient.New(px.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(bg, Deps{Store: e.st, Secrets: e.sec, Client: client, Memory: e.mem, Now: e.fake.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+func TestLostCreateResponseOnFirstEnrolmentDeletesTheToken(t *testing.T) {
+	e := newEnv(t)
+	if err := lostResponseSvc(t, e).Enroll(bg, e.ident, e.bearer); err == nil {
+		t.Fatal("expected an error")
+	}
+	if left := e.fake.Tokens(); len(left) != 0 {
+		t.Fatalf("a token was left behind on oCIS: %+v", left)
+	}
+	if err := e.st.View(bg, func(tx store.Tx) error {
+		_, err := tx.GetUser(userID)
+		return err
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("user rows must be removed, got %v", err)
+	}
+	if evs := e.events(t, userID); len(evs) != 0 {
+		t.Fatalf("audit leftovers: %+v", evs)
+	}
+}
+
+func TestLostCreateResponseOnReEnrolmentDeletesTheTokenAndMarksTheLabel(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	before := e.token(t, userID)
+	if err := lostResponseSvc(t, e).Enroll(bg, e.ident, e.bearer); err == nil {
+		t.Fatal("expected an error")
+	}
+	if after := e.token(t, userID); after.Label != before.Label || after.Status != store.TokenValid {
+		t.Fatalf("the working token was replaced: %+v -> %+v", before, after)
+	}
+	if live := e.fake.Tokens(); len(live) != 1 || live[0].Label != before.Label {
+		t.Fatalf("remote tokens = %+v, want only the original", live)
+	}
+	labels := e.labels(t, userID)
+	if len(labels) != 2 {
+		t.Fatalf("labels = %+v", labels)
+	}
+	for _, l := range labels {
+		if (l.Label == before.Label) != (l.DeletedAt == nil) {
+			t.Fatalf("only the abandoned label may be marked deleted: %+v", labels)
+		}
 	}
 }

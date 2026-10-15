@@ -127,7 +127,9 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 	// 2. Create the token with the user's own credential.
 	tok, err := s.d.Client.CreateToken(ctx, oidc, s.d.TokenTTL, label)
 	if err != nil {
-		abandon(false)
+		// An error does not prove that no token was made (lost response,
+		// timeout, 5xx after creation): ask oCIS, unless it plainly refused.
+		abandon(!errors.Is(err, ocisclient.ErrUnauthorized) && !errors.Is(err, ocisclient.ErrForbidden))
 		return fmt.Errorf("auth: create the app token: %w", err)
 	}
 	app := ocisclient.AppToken(id.Username, tok.Value)
