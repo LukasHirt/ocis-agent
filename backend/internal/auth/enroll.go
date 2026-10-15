@@ -19,30 +19,32 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 
 // deleteByLabel deletes the token with exactly this label (by its listed
 // hash) and confirms by listing again. oCIS answers 500 for a hash it no
-// longer knows, so the second listing is the only reliable proof. It reports
-// whether no token with the label remains.
-func (s *Service) deleteByLabel(ctx context.Context, cr ocisclient.Creds, label string) bool {
+// longer knows, so the second listing is the only reliable proof. found says
+// a token with the label was listed at the first listing; gone says no token
+// with the label remains after the confirming listing (false on any error).
+func (s *Service) deleteByLabel(ctx context.Context, cr ocisclient.Creds, label string) (found, gone bool) {
 	list, err := s.d.Client.ListTokens(ctx, cr)
 	if err != nil {
-		return false
+		return false, false
 	}
 	for _, ti := range list {
 		if ti.Label == label {
+			found = true
 			if err := s.d.Client.DeleteToken(ctx, cr, ti.Hash); err != nil {
-				return false
+				return found, false
 			}
 		}
 	}
 	list, err = s.d.Client.ListTokens(ctx, cr)
 	if err != nil {
-		return false
+		return found, false
 	}
 	for _, ti := range list {
 		if ti.Label == label {
-			return false
+			return found, false
 		}
 	}
-	return true
+	return found, true
 }
 
 // markLabelDeleted records that the token with this label is gone. Best
@@ -105,13 +107,23 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		return fmt.Errorf("auth: record enrolment: %w", err)
 	}
 
-	// abandon undoes step 1 after a failure. created says whether the token
-	// may exist on oCIS and must be deleted first.
-	abandon := func(created bool) {
+	// abandon undoes step 1 after a failure. refused means oCIS plainly
+	// refused the create (nothing exists). uncertain means the create failed in
+	// a way that does not prove no token was made (timeout, 5xx, lost
+	// response): the request may still land at oCIS after we looked. Then the
+	// label is closed only if a token was actually found and deleted; if
+	// nothing was listed, the label stays open (and so does the user row) so
+	// that Sweep's grace path deletes a token that lands later. Otherwise
+	// (the token is known to exist) it is deleted and the label closed once
+	// confirmed gone.
+	abandon := func(refused, uncertain bool) {
 		cctx, cancel := cleanupContext(ctx)
 		defer cancel()
-		if created && !s.deleteByLabel(cctx, oidc, label) {
-			return // keep the label open: a later Sweep deletes the token
+		if !refused {
+			found, gone := s.deleteByLabel(cctx, oidc, label)
+			if !gone || (uncertain && !found) {
+				return // keep the label open: a later Sweep deletes the token
+			}
 		}
 		s.markLabelDeleted(ctx, id.UserID, label)
 		if first {
@@ -138,7 +150,8 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 	if err != nil {
 		// An error does not prove that no token was made (lost response,
 		// timeout, 5xx after creation): ask oCIS, unless it plainly refused.
-		abandon(!errors.Is(err, ocisclient.ErrUnauthorized) && !errors.Is(err, ocisclient.ErrForbidden))
+		refused := errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ocisclient.ErrForbidden)
+		abandon(refused, !refused)
 		return fmt.Errorf("auth: create the app token: %w", err)
 	}
 	app := ocisclient.AppToken(id.Username, tok.Value)
@@ -146,24 +159,24 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 	// 3. The token must work and belong to this user.
 	me, err := s.d.Client.Me(ctx, app)
 	if err != nil {
-		abandon(true)
+		abandon(false, false)
 		return fmt.Errorf("auth: verify the new token: %w", err)
 	}
 	if me.ID != id.UserID {
-		abandon(true)
+		abandon(false, false)
 		return errors.New("auth: the new token belongs to a different user")
 	}
 
 	// 4. The memory folder, with the new credential.
 	if err := s.d.Memory.Ensure(ctx, memory.Session{UserID: id.UserID, DriveID: id.DriveID, Creds: app}); err != nil {
-		abandon(true)
+		abandon(false, false)
 		return fmt.Errorf("auth: prepare the memory folder: %w", err)
 	}
 
 	// 5. Seal outside the transaction, then commit everything at once.
 	sealed, err := s.d.Secrets.Seal(ctx, []byte(tok.Value.Reveal()), s.aad(id.UserID))
 	if err != nil {
-		abandon(true)
+		abandon(false, false)
 		return fmt.Errorf("auth: seal the token: %w", err)
 	}
 	err = s.d.Store.InTx(ctx, func(tx store.Tx) error {
@@ -179,7 +192,7 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		return s.audit(tx, id.UserID, "token_created", "oidc", "ok", label)
 	})
 	if err != nil {
-		abandon(true)
+		abandon(false, false)
 		return fmt.Errorf("auth: store the token: %w", err)
 	}
 	return nil

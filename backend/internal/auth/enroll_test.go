@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -77,7 +78,6 @@ func TestEnrollRejectsIncompleteInputBeforeAnyRequest(t *testing.T) {
 
 func TestFailedFirstEnrolmentLeavesNothingBehind(t *testing.T) {
 	cases := map[string]func(e env){
-		"create fails":       func(e env) { e.fake.Fail("POST", "/auth-app/", 503, 1) },
 		"verification fails": func(e env) { e.fake.Fail("GET", "/graph/v1.0/me", 401, 1) },
 		"memory fails":       func(e env) { e.fake.Fail("MKCOL", "/remote.php/", 500, 1) },
 	}
@@ -105,6 +105,64 @@ func TestFailedFirstEnrolmentLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// An uncertain create failure (503) that finds no token must NOT close the
+// label: the request may still land, and Sweep's grace path handles it.
+func TestUncertainCreateFailureKeepsTheLabelOpenAndTheUser(t *testing.T) {
+	e := newEnv(t)
+	e.fake.Fail("POST", "/auth-app/", 503, 1)
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err == nil {
+		t.Fatal("expected an error")
+	}
+	if left := e.fake.Tokens(); len(left) != 0 {
+		t.Fatalf("a token was left behind on oCIS: %+v", left)
+	}
+	if err := e.st.View(bg, func(tx store.Tx) error {
+		_, err := tx.GetUser(userID)
+		return err
+	}); err != nil {
+		t.Fatalf("the user row must be kept, got %v", err)
+	}
+	labels := e.labels(t, userID)
+	if len(labels) != 1 || labels[0].DeletedAt != nil {
+		t.Fatalf("the label must stay open: %+v", labels)
+	}
+}
+
+func TestATokenLandingAfterAnUncertainReEnrolmentFailureIsDeletedBySweep(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.Fail("POST", "/auth-app/", 503, 1)
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err == nil {
+		t.Fatal("expected an error")
+	}
+	var open string
+	for _, l := range e.labels(t, userID) {
+		if l.DeletedAt == nil && l.Label != e.token(t, userID).Label {
+			open = l.Label
+		}
+	}
+	if open == "" {
+		t.Fatal("the attempted label must stay open")
+	}
+	// the in-flight create lands late
+	if _, err := e.client.CreateToken(bg, ocisclient.Bearer(e.bearer), time.Hour, open); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.Advance(time.Minute)
+	res, err := e.svc.Sweep(bg, userID)
+	if err != nil || res.Deleted != 1 || res.Unknown != 0 || !res.Clean {
+		t.Fatalf("sweep = %+v %v", res, err)
+	}
+	if p := e.policy(t, userID); p.Paused {
+		t.Fatalf("a late landing token is not an anomaly: %+v", p)
+	}
+	if n := len(e.fake.Tokens()); n != 1 {
+		t.Fatalf("remote tokens = %d, want only the current one", n)
+	}
+}
+
 func TestFailedReEnrolmentKeepsTheWorkingToken(t *testing.T) {
 	e := newEnv(t)
 	if err := e.svc.Enroll(bg, e.ident, e.bearer); err != nil {
@@ -127,8 +185,8 @@ func TestFailedReEnrolmentKeepsTheWorkingToken(t *testing.T) {
 		t.Fatalf("labels = %+v", labels)
 	}
 	for _, l := range labels {
-		if (l.Label == before.Label) != (l.DeletedAt == nil) {
-			t.Fatalf("only the abandoned label may be marked deleted: %+v", labels)
+		if l.DeletedAt != nil {
+			t.Fatalf("the uncertain attempt's label must stay open: %+v", labels)
 		}
 	}
 }

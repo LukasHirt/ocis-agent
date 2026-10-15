@@ -20,7 +20,7 @@ const labelGrace = 5 * time.Minute
 // Renewed is the outcome of a successful renewal.
 type Renewed struct {
 	Label      string // label of the new token
-	OldCleaned bool   // every superseded token is gone from oCIS
+	OldCleaned bool   // every superseded token is gone and no young absent label is still open
 }
 
 // Renew replaces the user's app token with a fresh one, using the agent's own
@@ -65,7 +65,7 @@ func (s *Service) Renew(ctx context.Context, userID string) (Renewed, error) {
 	discard := func() {
 		cctx, cancel := cleanupContext(ctx)
 		defer cancel()
-		if s.deleteByLabel(cctx, cur, label) {
+		if _, gone := s.deleteByLabel(cctx, cur, label); gone {
 			s.markLabelDeleted(ctx, userID, label)
 		}
 	}
@@ -187,19 +187,22 @@ func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclie
 
 // SweepResult is the outcome of Sweep.
 type SweepResult struct {
-	Unknown int  // tokens with our prefix that we never recorded
-	Deleted int  // orphaned labels closed
+	Unknown int  // tokens with our prefix that are unrecorded, survive under a closed label, or duplicate the current label
+	Deleted int  // orphan tokens deleted and confirmed gone
 	Closed  int  // absent labels closed (no token existed under them)
 	Clean   bool // no orphan is left open
 }
 
 // Sweep checks the user's tokens with the agent's own credentials. A token
-// with our label prefix that the sidecar never recorded is an anomaly: the
-// agent pauses (token_anomaly) and the audit log gets the COUNT, never the
-// label, because the label was chosen by whoever created the token. Orphaned
-// labels (a crash between create and swap, a failed delete, a superseded
-// enrolment) are deleted. Tokens the sidecar cannot attribute are never
-// deleted automatically.
+// with our label prefix is an anomaly when (1) its label was never recorded,
+// (2) its label was recorded and closed (our tokens never survive under a
+// closed label), or (3) it is a second or later token under the current
+// label. Then the agent pauses (token_anomaly) and the audit log gets the
+// COUNT, never a label, because the label may have been chosen by whoever
+// created the token. Orphaned open labels (a crash between create and swap,
+// a failed delete, a superseded enrolment) are deleted; an open label with no
+// token is closed only after labelGrace. Tokens the sidecar cannot attribute
+// are never deleted automatically.
 func (s *Service) Sweep(ctx context.Context, userID string) (SweepResult, error) {
 	unlock := s.lockUser(userID)
 	defer unlock()
