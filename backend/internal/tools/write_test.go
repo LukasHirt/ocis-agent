@@ -44,6 +44,9 @@ func TestWriteToolsRefuseReservedAndRootPathsBeforeAnyWrite(t *testing.T) {
 		{NewCreateFolder(), `{"path":"/.ocis-agent/x"}`},
 		{NewCreateFolder(), `{"path":"/.OCIS-Agent/x"}`},
 		{NewCreateFolder(), `{"path":"/"}`},
+		{NewCreateFolder(), `{"path":"//.ocis-agent/x"}`},
+		{NewCreateFolder(), `{"path":"/.ocis-agent/"}`},
+		{NewWriteNew(), `{"path":"/.OCIS-agent/memory","content":"x"}`},
 		{NewWriteNew(), `{"path":"/.ocis-agent/memory/new.md","content":"x"}`},
 		{NewWriteNew(), `{"path":"/.OCIS-AGENT","content":"x"}`},
 		{NewWriteNew(), `{"path":"/","content":"x"}`},
@@ -346,5 +349,28 @@ func TestWriteToolsKeepTheOutcomeMessagesFreeOfNames(t *testing.T) {
 	_, err = f.run(t, NewWriteNew(), `{"path":"`+name+`","content":"c"}`)
 	if !errors.Is(err, ErrRefused) {
 		t.Fatalf("err = %v", err)
+	}
+	// the refusal repeats the path the model gave, nothing it was not given
+	if strings.Contains(err.Error(), "c\"") || strings.Contains(err.Error(), "content") || strings.Contains(strings.ReplaceAll(err.Error(), name, ""), "IGNORE") {
+		t.Fatalf("the refusal leaks more than the supplied path: %q", err)
+	}
+}
+
+func TestMoveAndCopyExecuteRefusesSamePathAndIntoItselfWithoutSendingAnything(t *testing.T) {
+	f := newFixture(t)
+	f.put("/a/x.md", "x")
+	f.fake.ResetRequests()
+	for _, tool := range []Tool{NewMove(), NewCopy()} {
+		for name, args := range map[string]string{
+			"same path":   `{"from":"/a/x.md","to":"/a/x.md"}`,
+			"into itself": `{"from":"/a","to":"/a/inside"}`,
+		} {
+			if _, err := tool.Execute(bg, f.env, json.RawMessage(args), ExecInfo{}); !errors.Is(err, ErrRefused) {
+				t.Errorf("%s %s: err = %v, want ErrRefused", tool.Name(), name, err)
+			}
+		}
+	}
+	if w := writeRequests(f.fake); len(w) != 0 {
+		t.Fatalf("write requests: %v", w)
 	}
 }

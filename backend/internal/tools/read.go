@@ -42,7 +42,9 @@ func parsePath(raw json.RawMessage) (string, error) {
 }
 
 // fmtEntry renders one entry as kind, size, modified, etag and path, separated
-// by tabs. It goes into a Block: names are untrusted.
+// by tabs. It goes into a Block: names are untrusted. Control characters in
+// names (newline, tab) are rejected upstream by ocisclient (hrefToPath), so a
+// name cannot forge extra lines or columns inside the Block.
 func fmtEntry(e ocisclient.Entry) string {
 	kind := "f"
 	if e.Dir {
@@ -121,11 +123,11 @@ func (listTool) Execute(ctx context.Context, env Env, raw json.RawMessage, _ Exe
 		return Result{}, mapErr(err, p)
 	}
 	total := len(entries)
-	max := env.limits().MaxItems
+	limit := env.limits().MaxItems
 	summary := fmt.Sprintf("%d item(s)", total)
-	if total > max {
-		entries = entries[:max]
-		summary = fmt.Sprintf("%d item(s), truncated (%d in total)", max, total)
+	if total > limit {
+		entries = entries[:limit]
+		summary = fmt.Sprintf("%d item(s), truncated (%d in total)", limit, total)
 	}
 	lines := make([]string, len(entries))
 	for i, e := range entries {

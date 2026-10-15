@@ -250,3 +250,24 @@ func TestDeleteReconcile(t *testing.T) {
 		t.Fatalf("changed: %+v", r)
 	}
 }
+
+func TestDeleteOfAFolderIsRefusedWhenAChildChangedAfterTheApproval(t *testing.T) {
+	f := newFixture(t)
+	f.put("/docs/sub/x.md", "v1")
+	args := `{"path":"/docs/sub"}`
+	p := prepared(t, f, NewDelete(), args)
+	f.put("/docs/sub/x.md", "v2 edited by the user") // a child changes the folder ETag
+	f.fake.ResetRequests()
+	_, err := NewDelete().Execute(bg, f.env, json.RawMessage(args), ExecInfo{TargetETag: p.TargetETag})
+	if !errors.Is(err, ErrTargetChanged) {
+		t.Fatalf("err = %v, want ErrTargetChanged", err)
+	}
+	if data, _, ok := f.fake.File(testDrive, "/docs/sub/x.md"); !ok || string(data) != "v2 edited by the user" {
+		t.Fatal("the folder and its child must survive")
+	}
+	for _, m := range requestMethods(f.fake) {
+		if m == "DELETE" {
+			t.Fatal("no DELETE may be sent")
+		}
+	}
+}

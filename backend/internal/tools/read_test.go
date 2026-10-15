@@ -126,7 +126,7 @@ func TestReadTextReturnsContentWithItsHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Summary != "read 62 bytes" && !strings.HasPrefix(res.Summary, "read ") {
+	if want := fmt.Sprintf("read %d bytes", len("# Title\nplease "+injection+"\n")); res.Summary != want {
 		t.Fatalf("summary = %q", res.Summary)
 	}
 	if strings.Contains(res.Summary, "IGNORE") || strings.Contains(res.Summary, "Title") {

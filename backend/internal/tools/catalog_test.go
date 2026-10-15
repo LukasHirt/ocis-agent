@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 )
 
 func defaultRegistry(t *testing.T) *Registry {
@@ -120,5 +122,75 @@ func TestSpecsAreSortedAndCarryTheRisk(t *testing.T) {
 	}
 	if !sort.StringsAreSorted(names) {
 		t.Fatalf("specs not sorted: %v", names)
+	}
+}
+
+// With rejected credentials every tool that talks to oCIS must surface
+// ErrUnauthorized (so the runner can report it), never a refusal the model
+// would read or an invalid-arguments error.
+func TestEveryToolSurfacesAnUnauthorizedAnswer(t *testing.T) {
+	f := newFixture(t)
+	f.put("/docs/a.md", "content")
+	f.put("/docs/sub/x.md", "x")
+	f.env.Creds = ocisclient.AppToken("einstein", "wrong")
+	info := ExecInfo{IdemKey: "k", TargetETag: "\"etag\""}
+	type row struct {
+		prepare, exec, rec string // arguments; rec empty: the tool does not reconcile
+		prepareCalls       bool   // Prepare talks to oCIS
+		execCalls          bool
+	}
+	table := map[string]row{
+		"files.list_spaces":   {prepare: `{}`, exec: `{}`},
+		"files.list":          {prepare: `{"path":"/docs"}`, exec: `{"path":"/docs"}`, execCalls: true},
+		"files.stat":          {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
+		"files.read_text":     {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
+		"files.create_folder": {prepare: `{"path":"/docs/new"}`, exec: `{"path":"/docs/new"}`, rec: `{"path":"/docs/new"}`, prepareCalls: true, execCalls: true},
+		"files.write_new":     {prepare: `{"path":"/docs/n.md","content":"c"}`, exec: `{"path":"/docs/n.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
+		"files.overwrite":     {prepare: `{"path":"/docs/a.md","content":"c"}`, exec: `{"path":"/docs/a.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
+		"files.move":          {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
+		"files.copy":          {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
+		"files.delete":        {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, rec: `{"path":"/docs/a.md"}`, prepareCalls: true, execCalls: true},
+		"memory.list":         {prepare: `{}`, exec: `{}`, execCalls: true},
+		"memory.read":         {prepare: `{"name":"profile.md"}`, exec: `{"name":"profile.md"}`, execCalls: true},
+		"memory.write":        {prepare: `{"name":"profile.md","content":"c","mode":"append"}`, exec: `{"name":"profile.md","content":"c","mode":"append"}`, rec: `{"name":"profile.md","content":"c","mode":"replace"}`, execCalls: true},
+	}
+	r := defaultRegistry(t)
+	if len(table) != len(r.Names()) {
+		t.Fatalf("the table covers %d tools, the catalog has %d", len(table), len(r.Names()))
+	}
+	check := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ErrRefused) || errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("%s = %v, want ErrUnauthorized only", what, err)
+		}
+	}
+	for _, name := range r.Names() {
+		tool, _ := r.Get(name)
+		row, ok := table[name]
+		if !ok {
+			t.Errorf("%s: no sample arguments", name)
+			continue
+		}
+		_, perr := tool.Prepare(bg, f.env, json.RawMessage(row.prepare))
+		if row.prepareCalls {
+			check(name+" Prepare", perr)
+		} else if perr != nil {
+			t.Errorf("%s Prepare needs no oCIS call but failed: %v", name, perr)
+		}
+		_, eerr := tool.Execute(bg, f.env, json.RawMessage(row.exec), info)
+		if row.execCalls {
+			check(name+" Execute", eerr)
+		} else if eerr != nil {
+			t.Errorf("%s Execute needs no oCIS call but failed: %v", name, eerr)
+		}
+		if tool.Risk(nil) != RiskRead {
+			rc, isRec := tool.(Reconciler)
+			if !isRec || row.rec == "" {
+				t.Errorf("%s: a side-effect tool needs a reconcile row", name)
+				continue
+			}
+			_, rerr := rc.Reconcile(bg, f.env, json.RawMessage(row.rec), info)
+			check(name+" Reconcile", rerr)
+		}
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var bg = context.Background()
@@ -309,5 +311,87 @@ func TestReadBudgetOverflowAndNegative(t *testing.T) {
 func TestParseRejectsUnicodeWhitespacePrefix(t *testing.T) {
 	if _, err := parse[sample](json.RawMessage("\u00a0{\"path\":\"/a\"}")); !errors.Is(err, ErrInvalidArgs) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func nested(depth int) string {
+	// the top-level object counts as depth 1
+	return `{"a":` + strings.Repeat("[", depth-1) + "1" + strings.Repeat("]", depth-1) + "}"
+}
+
+func TestNestingDepthIsLimitedTo32(t *testing.T) {
+	if _, err := Canonicalize(json.RawMessage(nested(32))); err != nil {
+		t.Fatalf("depth 32: %v", err)
+	}
+	for name, f := range map[string]func(json.RawMessage) error{
+		"Canonicalize": func(r json.RawMessage) error { _, err := Canonicalize(r); return err },
+		"ArgsHash":     func(r json.RawMessage) error { _, err := ArgsHash(r); return err },
+		"parse":        func(r json.RawMessage) error { _, err := parse[map[string]any](r); return err },
+	} {
+		if err := f(json.RawMessage(nested(33))); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("%s depth 33 = %v", name, err)
+		}
+	}
+	if _, err := parse[map[string]any](json.RawMessage(nested(32))); err != nil {
+		t.Fatalf("parse depth 32: %v", err)
+	}
+}
+
+func TestObjectsAreLimitedTo256Keys(t *testing.T) {
+	obj := func(n int) string {
+		var parts []string
+		for i := 0; i < n; i++ {
+			parts = append(parts, fmt.Sprintf(`"k%d":%d`, i, i))
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	}
+	if _, err := Canonicalize(json.RawMessage(obj(256))); err != nil {
+		t.Fatalf("256 keys: %v", err)
+	}
+	if _, err := ArgsHash(json.RawMessage(obj(257))); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("257 keys: %v", err)
+	}
+	if _, err := parse[map[string]any](json.RawMessage(obj(257))); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("parse 257 keys: %v", err)
+	}
+}
+
+func TestADeeplyNestedDocumentIsRejectedQuickly(t *testing.T) {
+	raw := json.RawMessage(`{"a":` + strings.Repeat("[", 1_000_000))
+	start := time.Now()
+	if _, err := Canonicalize(raw); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := parse[map[string]any](raw); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("parse err = %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v", d)
+	}
+}
+
+func TestEscapedDuplicateKeysAreRejected(t *testing.T) {
+	raw := json.RawMessage(`{"path":"/a","\u0070ath":"/b"}`)
+	if _, err := Canonicalize(raw); !errors.Is(err, ErrInvalidArgs) {
+		t.Errorf("Canonicalize = %v", err)
+	}
+	if _, err := ArgsHash(raw); !errors.Is(err, ErrInvalidArgs) {
+		t.Errorf("ArgsHash = %v", err)
+	}
+	if _, err := parse[sample](raw); !errors.Is(err, ErrInvalidArgs) {
+		t.Errorf("parse = %v", err)
+	}
+}
+
+func TestCleanPathRejectsInvisibleControlsButKeepsEmoji(t *testing.T) {
+	for _, r := range []rune{0x80, 0x9f, 0x2028, 0x2029, 0x200e, 0x200f, 0x061c, 0x202a, 0x202e, 0x2066, 0x2069} {
+		if _, err := cleanPath("/a" + string(r) + "b"); !errors.Is(err, ErrInvalidArgs) {
+			t.Errorf("U+%04X accepted: %v", r, err)
+		}
+	}
+	for _, ok := range []string{"/family \U0001F468\u200D\U0001F469.md", "/日本語/ünï.md", "/a\u200Cb"} {
+		if _, err := cleanPath(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
 	}
 }

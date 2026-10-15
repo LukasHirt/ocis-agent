@@ -8,10 +8,15 @@ import (
 	"io"
 	"path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-const maxPathLen = 4096
+const (
+	maxPathLen = 4096
+	maxDepth   = 32  // nesting levels of arrays and objects
+	maxKeys    = 256 // keys of one object
+)
 
 // parse decodes the arguments strictly: a JSON object, no unknown fields (so
 // no drive or user can be smuggled in), nothing after it.
@@ -64,7 +69,7 @@ func Canonicalize(raw json.RawMessage) ([]byte, error) {
 // execute differently from what its hash approved. Messages never echo keys.
 func checkKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := walkValue(dec); err != nil {
+	if err := walkValue(dec, 1); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -73,7 +78,26 @@ func checkKeys(raw []byte) error {
 	return nil
 }
 
-func walkValue(dec *json.Decoder) error {
+// foldKey maps a key to a form that is equal for exactly the keys that are
+// equal under strings.EqualFold: every rune becomes the smallest member of its
+// Unicode simple-folding orbit.
+func foldKey(k string) string {
+	var b strings.Builder
+	for _, r := range k {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < m {
+				m = f
+			}
+		}
+		b.WriteRune(m)
+	}
+	return b.String()
+}
+
+// walkValue checks one value; depth is the nesting level of the value if it
+// is a container (the top-level object is level 1).
+func walkValue(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return invalid("malformed JSON")
@@ -82,28 +106,33 @@ func walkValue(dec *json.Decoder) error {
 	if !ok {
 		return nil
 	}
+	if depth > maxDepth {
+		return invalid("the arguments are nested too deeply")
+	}
 	switch d {
 	case '[':
 		for dec.More() {
-			if err := walkValue(dec); err != nil {
+			if err := walkValue(dec, depth+1); err != nil {
 				return err
 			}
 		}
 	case '{':
-		var seen []string
+		seen := make(map[string]struct{})
 		for dec.More() {
 			kt, err := dec.Token()
 			if err != nil {
 				return invalid("malformed JSON")
 			}
 			k, _ := kt.(string)
-			for _, o := range seen {
-				if strings.EqualFold(o, k) {
-					return invalid("an object has a duplicate key")
-				}
+			if len(seen) >= maxKeys {
+				return invalid("an object has too many keys")
 			}
-			seen = append(seen, k)
-			if err := walkValue(dec); err != nil {
+			f := foldKey(k)
+			if _, dup := seen[f]; dup {
+				return invalid("an object has a duplicate key")
+			}
+			seen[f] = struct{}{}
+			if err := walkValue(dec, depth+1); err != nil {
 				return err
 			}
 		}
@@ -150,8 +179,8 @@ func cleanPath(p string) (string, error) {
 		return "", invalid("the path is not valid UTF-8")
 	}
 	for _, r := range p {
-		if r < 0x20 || r == 0x7f {
-			return "", invalid("the path contains control characters")
+		if isControl(r) {
+			return "", invalid("the path contains control or direction-override characters")
 		}
 	}
 	for _, seg := range strings.Split(p, "/") {
@@ -160,4 +189,18 @@ func cleanPath(p string) (string, error) {
 		}
 	}
 	return path.Clean(p), nil
+}
+
+// isControl reports C0 and C1 control characters, line and paragraph
+// separators and bidirectional controls. ZWJ and ZWNJ stay allowed (emoji).
+func isControl(r rune) bool {
+	switch {
+	case r < 0x20, r >= 0x7f && r <= 0x9f:
+		return true
+	case r == 0x2028, r == 0x2029, r == 0x200e, r == 0x200f, r == 0x061c:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }

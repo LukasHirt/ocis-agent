@@ -82,9 +82,9 @@ func (memoryList) Execute(ctx context.Context, env Env, raw json.RawMessage, _ E
 	}
 	total := len(infos)
 	summary := fmt.Sprintf("%d memory file(s)", total)
-	if max := env.limits().MaxItems; total > max {
-		infos = infos[:max]
-		summary = fmt.Sprintf("%d memory file(s), truncated (%d in total)", max, total)
+	if limit := env.limits().MaxItems; total > limit {
+		infos = infos[:limit]
+		summary = fmt.Sprintf("%d memory file(s), truncated (%d in total)", limit, total)
 	}
 	lines := make([]string, len(infos))
 	for i, in := range infos {
@@ -136,6 +136,9 @@ func (memoryRead) Execute(ctx context.Context, env Env, raw json.RawMessage, _ E
 		return Result{}, refuse("the job's read budget is used up")
 	}
 	f, err := env.Memory.Read(ctx, env.session(), name)
+	if errors.Is(err, memory.ErrTooLarge) {
+		return Result{}, refuse("the memory file is larger than the read limit")
+	}
 	if err != nil {
 		return Result{}, memErr(err, name)
 	}

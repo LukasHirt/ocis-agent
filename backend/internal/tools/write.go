@@ -347,7 +347,7 @@ func (t moveCopy) Execute(ctx context.Context, env Env, raw json.RawMessage, _ E
 	case errors.Is(err, ocisclient.ErrNotFound):
 		return Result{}, refuse("the source or the destination folder does not exist")
 	default:
-		return Result{}, mapErr(err, a.From)
+		return Result{}, mapErr(err, "the source or the destination")
 	}
 }
 
@@ -376,6 +376,8 @@ func (t moveCopy) Reconcile(ctx context.Context, env Env, raw json.RawMessage, _
 		}
 		return Reconciled{State: ReconFailed, Reason: "neither the source nor the destination exists"}, nil
 	}
+	// A matching type (folder) or size (file) is a weak signal for Done: it
+	// cannot detect a partial folder copy or a different file of equal size.
 	switch {
 	case !dstOK:
 		return Reconciled{State: ReconRetry}, nil
