@@ -178,9 +178,30 @@ func TestCacheStaysBounded(t *testing.T) {
 	}
 	// the suffixed tokens are invalid and never cached; valid ones are
 	for i := 0; i < 10; i++ {
-		v.store(fmt.Sprint("k", i), Identity{UserID: "u"}, time.Now().Add(time.Hour))
+		v.store([32]byte{byte(i)}, Identity{UserID: "u"}, time.Now().Add(time.Hour))
 	}
 	if n := v.size(); n > 3 {
 		t.Fatalf("cache holds %d entries, want at most 3", n)
+	}
+}
+
+func TestValidateKeepsTwoUsersApart(t *testing.T) {
+	s, c := fakeClient(t)
+	s.AddUser("marie", "pw", "7a7a", "drive2")
+	v := NewValidator(c)
+	einstein := ocisclient.Secret(fakeocis.OIDCToken("einstein"))
+	marie := ocisclient.Secret(fakeocis.OIDCToken("marie"))
+	for i := 0; i < 2; i++ { // the second round is served from the cache
+		a, err := v.Validate(bg, einstein)
+		if err != nil || a.UserID != "4c51" {
+			t.Fatalf("einstein = %+v %v", a, err)
+		}
+		b, err := v.Validate(bg, marie)
+		if err != nil || b.UserID != "7a7a" || b.DriveID != "drive2" {
+			t.Fatalf("marie = %+v %v", b, err)
+		}
+	}
+	if v.size() != 2 {
+		t.Fatalf("cache entries = %d", v.size())
 	}
 }

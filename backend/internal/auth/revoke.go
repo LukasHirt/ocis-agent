@@ -72,6 +72,15 @@ func (s *Service) revokeLocked(ctx context.Context, userID string, bearer ociscl
 		return 0, ocisclient.ErrNoCredentials
 	}
 	oidc := ocisclient.Bearer(bearer)
+	// The caller derives userID from the bearer, but the pairing is checked
+	// here too: a wrong pair must delete nothing.
+	me, err := s.d.Client.Me(ctx, oidc)
+	if err != nil {
+		return 0, fmt.Errorf("auth: revoke: verify the bearer: %w", err)
+	}
+	if me.ID != userID {
+		return 0, errors.New("auth: the bearer token does not belong to this user")
+	}
 	list, err := s.d.Client.ListTokens(ctx, oidc)
 	if err != nil {
 		return 0, fmt.Errorf("auth: revoke: list tokens: %w", err)
@@ -96,9 +105,16 @@ func (s *Service) revokeLocked(ctx context.Context, userID string, bearer ociscl
 		}
 	}
 
-	err = s.d.Store.InTx(ctx, func(tx store.Tx) error {
+	// The remote deletes are done: a cancelled request must not skip the
+	// local update and audit.
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
+	detail := fmt.Sprintf("tokens=%d", deleted)
+	err = s.d.Store.InTx(cctx, func(tx store.Tx) error {
 		if _, err := tx.GetUser(userID); errors.Is(err, store.ErrNotFound) {
-			return nil // never enrolled here: the remote cleanup was all there was
+			// never enrolled here: no local state to change, but the action is
+			// still audited
+			return s.audit(tx, userID, kind, "oidc", "ok", detail)
 		} else if err != nil {
 			return err
 		}
@@ -116,10 +132,15 @@ func (s *Service) revokeLocked(ctx context.Context, userID string, bearer ociscl
 		if err := tx.WipeAppToken(userID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		if _, err := tx.PausePolicy(userID, store.PauseCredentialRevoked); err != nil {
+		changed, err := tx.PausePolicy(userID, store.PauseCredentialRevoked)
+		if err != nil {
 			return err
 		}
-		return s.audit(tx, userID, kind, "oidc", "ok", fmt.Sprintf("tokens=%d", deleted))
+		outcome := "paused"
+		if !changed {
+			outcome = "kept_pause" // a stronger pause was kept
+		}
+		return s.audit(tx, userID, kind, "oidc", outcome, detail)
 	})
 	if err != nil {
 		return deleted, fmt.Errorf("auth: revoke: update local state: %w", err)
@@ -155,10 +176,13 @@ func (s *Service) Unenroll(ctx context.Context, userID string, bearer ocisclient
 			return fmt.Errorf("auth: unenroll: %w", err)
 		}
 	}
-	return s.d.Store.InTx(ctx, func(tx store.Tx) error {
+	if err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
 		if err := s.audit(tx, userID, "unenrolled", "oidc", "ok", ""); err != nil {
 			return err
 		}
 		return tx.DeleteUser(userID)
-	})
+	}); err != nil {
+		return fmt.Errorf("auth: unenroll: %w", err)
+	}
+	return nil
 }

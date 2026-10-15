@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -283,5 +284,90 @@ func TestFailedMemoryPurgeKeepsTheUserSoUnenrollCanBeRetried(t *testing.T) {
 	}
 	if err := e.svc.Unenroll(bg, userID, e.bearer, true); err != nil {
 		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestRevokeRefusesABearerThatDoesNotBelongToTheUser(t *testing.T) {
+	e := enrolled(t)
+	e.fake.AddUser("marie", "pw", "7a7a", "drive2")
+	marie := Identity{UserID: "7a7a", Username: "marie", DriveID: "drive2"}
+	e.seed(t, marie, time.Hour)
+	withForeignTokens(t, e)
+	before := len(e.fake.Tokens())
+	// einstein's bearer, marie's user id
+	for _, f := range []func() error{
+		func() error { _, err := e.svc.Revoke(bg, marie.UserID, e.bearer); return err },
+		func() error { _, err := e.svc.RevokeAll(bg, marie.UserID, e.bearer, true); return err },
+		func() error { return e.svc.Unenroll(bg, marie.UserID, e.bearer, true) },
+	} {
+		if err := f(); err == nil || errors.Is(err, ocisclient.ErrUnauthorized) {
+			t.Fatalf("err = %v, want a plain pairing error", err)
+		}
+	}
+	if len(e.fake.Tokens()) != before {
+		t.Fatal("a mismatched pair must delete nothing")
+	}
+	if e.token(t, marie.UserID).Status != store.TokenValid || e.token(t, userID).Status != store.TokenValid {
+		t.Fatal("a mismatched pair must change nothing locally")
+	}
+	if len(e.events(t, marie.UserID)) != 0 {
+		t.Fatalf("audit = %s", kinds(e.events(t, marie.UserID)))
+	}
+}
+
+func TestRevokeOfAnUnenrolledUserStillWritesTheAudit(t *testing.T) {
+	e := newEnv(t)
+	withForeignTokens(t, e)
+	n, err := e.svc.RevokeAll(bg, userID, e.bearer, true)
+	if err != nil || n != 2 {
+		t.Fatalf("n = %d, err = %v", n, err)
+	}
+	evs := e.events(t, userID)
+	if len(evs) != 1 || evs[0].Kind != "token_revoked_all" || evs[0].Cred != "oidc" || evs[0].Detail != "tokens=2" {
+		t.Fatalf("audit = %+v", evs)
+	}
+}
+
+// cancelStore cancels the caller's context just before every transaction, as
+// a request cancelled right after the remote deletes would.
+type cancelStore struct {
+	store.Store
+	cancel *context.CancelFunc // armed after construction
+}
+
+func (c cancelStore) InTx(ctx context.Context, fn func(tx store.Tx) error) error {
+	if *c.cancel != nil {
+		(*c.cancel)()
+	}
+	return c.Store.InTx(ctx, fn)
+}
+
+func TestRevokeFinishesLocallyEvenIfTheRequestIsCancelledAfterTheDeletes(t *testing.T) {
+	e := enrolled(t)
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	var arm context.CancelFunc
+	svc, err := New(bg, Deps{Store: cancelStore{e.st, &arm}, Secrets: e.sec, Client: e.client, Memory: e.mem, Now: e.fake.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm = cancel
+	if _, err := svc.Revoke(ctx, userID, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	assertRevokedLocally(t, e)
+}
+
+func TestRevokeAuditOutcomeShowsAKeptPause(t *testing.T) {
+	e := enrolled(t)
+	if err := e.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(userID, store.PauseUser); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Revoke(bg, userID, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	evs := e.events(t, userID)
+	if last := evs[len(evs)-1]; last.Outcome != "kept_pause" {
+		t.Fatalf("outcome = %q", last.Outcome)
 	}
 }

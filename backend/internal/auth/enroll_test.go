@@ -303,8 +303,40 @@ func TestConcurrentEnrolmentsAreSerialised(t *testing.T) {
 	if got := len(e.labels(t, userID)); got != 4 {
 		t.Fatalf("labels = %d, want one per enrolment", got)
 	}
-	if got := len(e.fake.Tokens()); got != 4 {
-		t.Fatalf("remote tokens = %d", got)
+	if live := e.fake.Tokens(); len(live) != 1 || live[0].Label != rec.Label {
+		t.Fatalf("remote tokens = %+v, want only the final one", live)
+	}
+	open := 0
+	for _, l := range e.labels(t, userID) {
+		if l.DeletedAt == nil {
+			open++
+			if l.Label != rec.Label {
+				t.Fatalf("only the current label may stay open: %+v", l)
+			}
+		}
+	}
+	if open != 1 {
+		t.Fatalf("open labels = %d", open)
+	}
+}
+
+func TestReEnrolDeletesTheSupersededTokenAtOnce(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	old := e.token(t, userID).Label
+	if err := e.svc.Enroll(bg, e.ident, e.bearer); err != nil {
+		t.Fatal(err)
+	}
+	cur := e.token(t, userID).Label
+	if live := e.fake.Tokens(); len(live) != 1 || live[0].Label != cur {
+		t.Fatalf("remote tokens = %+v, want only the new one", live)
+	}
+	for _, l := range e.labels(t, userID) {
+		if (l.Label == old) != (l.DeletedAt != nil) {
+			t.Fatalf("only the old label may be closed: %+v", l)
+		}
 	}
 }
 

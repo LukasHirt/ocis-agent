@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -168,6 +169,48 @@ func TestHandleUnauthorizedKeepsStrongerPauses(t *testing.T) {
 		if e.token(t, userID).Status != store.TokenInvalid {
 			t.Fatal("the token must still be marked invalid")
 		}
+		evs := e.events(t, userID)
+		if last := evs[len(evs)-1]; last.Outcome != "kept_pause" {
+			t.Fatalf("audit outcome = %q, want kept_pause", last.Outcome)
+		}
+	}
+}
+
+type ghostStore struct{ store.Store }
+type ghostTx struct{ store.Tx }
+
+func (ghostTx) ListDormantUsers(time.Time, int) ([]string, error) {
+	return []string{"ghost", userID}, nil
+}
+
+func (g ghostTx) PausePolicy(id, reason string) (bool, error) {
+	if id == "ghost" {
+		return false, store.ErrNotFound
+	}
+	return g.Tx.PausePolicy(id, reason)
+}
+
+func (g ghostStore) View(ctx context.Context, fn func(tx store.Tx) error) error {
+	return g.Store.View(ctx, func(tx store.Tx) error { return fn(ghostTx{tx}) })
+}
+
+func (g ghostStore) InTx(ctx context.Context, fn func(tx store.Tx) error) error {
+	return g.Store.InTx(ctx, func(tx store.Tx) error { return fn(ghostTx{tx}) })
+}
+
+func TestPauseDormantSkipsAUserWhosePolicyDisappeared(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, e.ident, time.Hour)
+	svc, err := New(bg, Deps{Store: ghostStore{e.st}, Secrets: e.sec, Client: e.client, Memory: e.mem, Now: e.fake.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := svc.PauseDormant(bg, 10)
+	if err != nil || n != 1 {
+		t.Fatalf("paused = %d, err = %v", n, err)
+	}
+	if p := e.policy(t, userID); p.PauseReason != store.PauseDormant {
+		t.Fatalf("policy = %+v", p)
 	}
 }
 

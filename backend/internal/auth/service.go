@@ -262,10 +262,15 @@ func (s *Service) markUnauthorized(ctx context.Context, userID string) error {
 		if !s.now().Before(rec.ExpiresAt) {
 			reason, kind = store.PauseCredentialExpired, "token_expired"
 		}
-		if _, err := tx.PausePolicy(userID, reason); err != nil {
+		changed, err := tx.PausePolicy(userID, reason)
+		if err != nil {
 			return err
 		}
-		return s.audit(tx, userID, kind, "app", "paused", "")
+		outcome := "paused"
+		if !changed {
+			outcome = "kept_pause" // a stronger pause was kept
+		}
+		return s.audit(tx, userID, kind, "app", outcome, "")
 	})
 }
 
@@ -301,16 +306,23 @@ func (s *Service) PauseDormant(ctx context.Context, limit int) (int, error) {
 	}
 	paused := 0
 	for _, id := range ids {
+		changed := false
 		err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
-			changed, err := tx.PausePolicy(id, store.PauseDormant)
+			var err error
+			changed, err = tx.PausePolicy(id, store.PauseDormant)
 			if err != nil || !changed {
 				return err
 			}
-			paused++
 			return s.audit(tx, id, "agent_dormant", "app", "paused", "")
 		})
+		if errors.Is(err, store.ErrNotFound) {
+			continue // the user's policy disappeared meanwhile
+		}
 		if err != nil {
 			return paused, fmt.Errorf("auth: pause dormant user: %w", err)
+		}
+		if changed {
+			paused++
 		}
 	}
 	return paused, nil

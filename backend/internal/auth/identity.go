@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -91,7 +90,7 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 	me, err := v.c.Me(ctx, cr)
 	if err != nil {
 		if errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ocisclient.ErrForbidden) {
-			return Identity{}, fmt.Errorf("%w", ErrUnauthenticated)
+			return Identity{}, ErrUnauthenticated
 		}
 		return Identity{}, err
 	}
@@ -109,15 +108,13 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 		until = exp
 	}
 	if until.After(now) {
-		v.store(string(key[:]), id, until)
+		v.store(key, id, until)
 	}
 	return id, nil
 }
 
 // store caches id until the given time, keeping the cache bounded.
-func (v *Validator) store(rawKey string, id Identity, until time.Time) {
-	var key [32]byte
-	copy(key[:], rawKey)
+func (v *Validator) store(key [32]byte, id Identity, until time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.cache) >= v.maxEntries {

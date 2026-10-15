@@ -112,9 +112,12 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 	// a way that does not prove no token was made (timeout, 5xx, lost
 	// response): the request may still land at oCIS after we looked. Then the
 	// label is closed only if a token was actually found and deleted; if
-	// nothing was listed, the label stays open (and so does the user row) so
-	// that Sweep's grace path deletes a token that lands later. Otherwise
-	// (the token is known to exist) it is deleted and the label closed once
+	// nothing was listed, the label stays open (and so does the user row).
+	// With a stored token (re-enrolment) Sweep's grace path deletes a token
+	// that lands later. A first-time user has no stored token, so Sweep
+	// cannot run (loadToken fails): a late token is cleaned by the NEXT
+	// successful Enroll, and until then it is neither attributed nor flagged.
+	// If the token is known to exist, it is deleted and the label closed once
 	// confirmed gone.
 	abandon := func(refused, uncertain bool) {
 		cctx, cancel := cleanupContext(ctx)
@@ -129,7 +132,7 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		if first {
 			// When cleanup cannot be confirmed (deleteByLabel false above, or a
 			// non-NotFound store error here) the label stays open and the user
-			// row stays, so a later Sweep deletes the token and attributes it.
+			// row stays, so the next successful Enroll deletes the token.
 			// A later Enroll then sees first=false and does not apply
 			// Deps.DormancyDays (accepted trade-off).
 			_ = s.d.Store.InTx(cctx, func(tx store.Tx) error {
@@ -195,5 +198,8 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		abandon(false, false)
 		return fmt.Errorf("auth: store the token: %w", err)
 	}
+	// Best effort: delete the superseded token (re-enrolment) and anything an
+	// earlier failed enrolment left, right away instead of waiting for a sweep.
+	s.cleanupOrphans(ctx, id.UserID, app, label)
 	return nil
 }
