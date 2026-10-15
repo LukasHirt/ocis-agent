@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -77,8 +78,14 @@ type response struct {
 
 // newRequest builds a request for the escaped URL path escPath.
 func (c *Client) newRequest(ctx context.Context, cr Creds, method, escPath string, query url.Values, hdr map[string]string, body []byte) (*http.Request, error) {
+	if !strings.HasPrefix(escPath, "/") || strings.HasPrefix(escPath, "//") || strings.ContainsAny(escPath, "?#") {
+		return nil, ErrInvalidPath
+	}
 	u, err := url.Parse(c.base + escPath)
 	if err != nil {
+		return nil, ErrInvalidPath
+	}
+	if b, err := url.Parse(c.base); err != nil || u.Scheme != b.Scheme || u.Host != b.Host || u.User != nil {
 		return nil, ErrInvalidPath
 	}
 	if len(query) > 0 {

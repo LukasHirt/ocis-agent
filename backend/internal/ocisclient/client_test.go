@@ -263,3 +263,46 @@ func TestPersonalDriveID(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoPersonalDrive", err)
 	}
 }
+
+type holder struct {
+	name  string
+	creds Creds
+}
+
+func TestCredsInUnexportedFieldsNeverPrint(t *testing.T) {
+	h := holder{name: "j", creds: AppToken("einstein", Secret(secretValue))}
+	var text, js bytes.Buffer
+	slog.New(slog.NewTextHandler(&text, nil)).Info("x", "h", h, "hp", &h)
+	slog.New(slog.NewJSONHandler(&js, nil)).Info("x", "h", h, "hp", &h)
+	outputs := []string{
+		fmt.Sprintf("%v %+v %#v", h, h, h),
+		fmt.Sprintf("%v %+v %#v", &h, &h, &h),
+		text.String(),
+		js.String(),
+	}
+	for i, out := range outputs {
+		if strings.Contains(out, secretValue) {
+			t.Fatalf("output %d leaks the secret: %s", i, out)
+		}
+	}
+	if (Creds{}).valid() || !h.creds.valid() {
+		t.Fatal("validity broken")
+	}
+}
+
+func TestPathsCannotRedirectCredentials(t *testing.T) {
+	var hits atomic.Int32
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { hits.Add(1) })
+	for _, p := range []string{"@evil.com/x", "//evil.com/x", "x", "", "/ok?x=1", "/ok#f"} {
+		_, err := c.do(context.Background(), Bearer(secretValue), http.MethodGet, p, nil, nil, nil, maxBody)
+		if !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("%q: err = %v, want ErrInvalidPath", p, err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatal("a request was sent for an invalid path")
+	}
+	if _, err := c.do(context.Background(), Bearer(secretValue), http.MethodGet, "/graph/v1.0/me", nil, nil, nil, maxBody); err != nil || hits.Load() != 1 {
+		t.Fatalf("normal path: %v hits %d", err, hits.Load())
+	}
+}

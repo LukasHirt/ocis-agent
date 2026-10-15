@@ -10,6 +10,11 @@ const redacted = "[redacted]"
 // Secret is a credential value: an app token, a token hash or an OIDC token.
 // It never prints itself, so a secret that reaches a log line, an error or a
 // JSON body shows as [redacted]. Call Reveal where the raw value is needed.
+//
+// Caution: fmt cannot call String on an unexported struct field, so a bare
+// Secret held in an unexported field prints in clear when the struct is
+// printed. Hold credentials as Creds (which keeps the value behind a pointer)
+// and never print structs with unexported Secret fields.
 type Secret string
 
 func (Secret) String() string               { return redacted }
@@ -33,17 +38,17 @@ const (
 type Creds struct {
 	kind   credKind
 	user   string
-	secret Secret
+	secret *Secret // behind a pointer so a nested print shows an address, not the value
 }
 
 // AppToken returns credentials for an app token. user is the login name
 // (Graph /me onPremisesSamAccountName), not the user id.
 func AppToken(user string, token Secret) Creds {
-	return Creds{kind: credApp, user: user, secret: token}
+	return Creds{kind: credApp, user: user, secret: &token}
 }
 
 // Bearer returns credentials for the user's OIDC access token.
-func Bearer(token Secret) Creds { return Creds{kind: credBearer, secret: token} }
+func Bearer(token Secret) Creds { return Creds{kind: credBearer, secret: &token} }
 
 // Kind names the credential for the audit log: "app", "oidc" or "".
 func (c Creds) Kind() string {
@@ -59,9 +64,9 @@ func (c Creds) Kind() string {
 func (c Creds) valid() bool {
 	switch c.kind {
 	case credApp:
-		return c.user != "" && c.secret != ""
+		return c.user != "" && c.secret != nil && *c.secret != ""
 	case credBearer:
-		return c.secret != ""
+		return c.secret != nil && *c.secret != ""
 	}
 	return false
 }
