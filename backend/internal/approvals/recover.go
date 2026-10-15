@@ -37,8 +37,8 @@ const notRetried = "the job ended before the action could be retried; it was not
 // worker), so a sweep never touches it. Pass a cut-off of at least the longest
 // call duration plus RetrySettle.
 func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderThan time.Time, limit int) (ReconcileSummary, error) {
-	if limit := x.cfg.Now().Add(-x.cfg.RetrySettle); olderThan.After(limit) {
-		olderThan = limit
+	if settled := x.cfg.Now().Add(-x.cfg.RetrySettle); olderThan.After(settled) {
+		olderThan = settled
 	}
 	var recs []store.IdemRecord
 	if err := x.st.View(ctx, func(tx store.Tx) error {
