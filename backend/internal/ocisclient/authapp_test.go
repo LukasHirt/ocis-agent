@@ -113,8 +113,8 @@ func TestDeleteTokenNeedsTheListedHash(t *testing.T) {
 	if _, err := f.c.Me(bg, cr); err != nil {
 		t.Fatalf("other tokens stay valid: %v", err)
 	}
-	if err := f.c.DeleteToken(bg, cr, hash); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("delete twice = %v, want ErrNotFound", err)
+	if err := f.c.DeleteToken(bg, cr, hash); !errors.As(err, &se) || se.Status != 500 || errors.Is(err, ErrNotFound) || containsStr(err.Error(), hash.Reveal()) {
+		t.Fatalf("delete twice = %v, want a 500 StatusError", err)
 	}
 	if err := f.c.DeleteToken(bg, cr, ""); err == nil {
 		t.Fatal("an empty hash must be refused")

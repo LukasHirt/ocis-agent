@@ -305,8 +305,11 @@ func TestAuthAppQuirks(t *testing.T) {
 	if st := status(t, s, "GET", "/graph/v1.0/me", cr{user: "einstein", secret: t2["token"]}, nil, ""); st != 200 {
 		t.Fatalf("remaining token = %d", st)
 	}
-	if st := status(t, s, "DELETE", "/auth-app/tokens?token=unknown", einstein, nil, ""); st != 404 {
-		t.Fatalf("delete unknown = %d", st)
+	if st := status(t, s, "DELETE", "/auth-app/tokens?token=unknown", einstein, nil, ""); st != 500 {
+		t.Fatalf("delete unknown = %d, want 500", st)
+	}
+	if st := status(t, s, "DELETE", "/auth-app/tokens?token="+firstHash, cr{user: "einstein", secret: t2["token"]}, nil, ""); st != 500 {
+		t.Fatalf("delete the same hash twice = %d, want 500", st)
 	}
 	live := s.Tokens()
 	if len(live) != 1 || live[0].Label != "second" || live[0].User != "einstein" {

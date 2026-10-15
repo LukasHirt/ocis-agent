@@ -49,6 +49,17 @@ func TestReadSSEStopsWhenTheHandlerFails(t *testing.T) {
 	}
 }
 
+func TestReadSSERejectsAnOversizedEvent(t *testing.T) {
+	line := "data: " + strings.Repeat("x", 100*1024) + "\n"
+	err := readSSE(strings.NewReader(strings.Repeat(line, 11)+"\n"), func(Event) error {
+		t.Fatal("an oversized event must not be delivered")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want event too large", err)
+	}
+}
+
 type stream struct {
 	cancel context.CancelFunc
 	events chan Event

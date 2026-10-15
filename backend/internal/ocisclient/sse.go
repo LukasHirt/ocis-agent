@@ -3,12 +3,16 @@ package ocisclient
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 )
+
+// maxEventData caps the accumulated data of one event.
+const maxEventData = 1 << 20
 
 const ssePath = "/ocs/v2.php/apps/notifications/api/v1/notifications/sse"
 
@@ -29,10 +33,11 @@ func readSSE(r io.Reader, emit func(Event) error) error {
 	var (
 		ev      Event
 		data    []string
+		size    int
 		started bool
 	)
 	flush := func() error {
-		defer func() { ev, data, started = Event{}, nil, false }()
+		defer func() { ev, data, size, started = Event{}, nil, 0, false }()
 		if !started {
 			return nil
 		}
@@ -59,6 +64,9 @@ func readSSE(r io.Reader, emit func(Event) error) error {
 			case "event":
 				ev.Name, started = value, true
 			case "data":
+				if size += len(value) + 1; size > maxEventData {
+					return errors.New("ocisclient: event stream: event too large")
+				}
 				data, started = append(data, value), true
 			case "id":
 				ev.ID, started = value, true
@@ -100,6 +108,10 @@ func (i *idleReader) Read(p []byte) (int, error) {
 // ErrStreamClosed when the server closes the stream, ErrIdleTimeout when
 // nothing (not even a heartbeat) arrives within the idle timeout, the
 // handler's error, or a *StatusError for a non-200 answer.
+//
+// Time spent inside handle counts against the idle timeout (no bytes are read
+// meanwhile), so handlers must be fast and non-blocking. readSSE does not carry
+// IDs forward: the caller must remember the last non-empty event ID itself.
 func (c *Client) StreamEvents(ctx context.Context, cr Creds, lastEventID string, handle func(Event) error) error {
 	if !cr.valid() {
 		return ErrNoCredentials

@@ -77,8 +77,12 @@ func (c *Client) ListTokens(ctx context.Context, cr Creds) ([]TokenInfo, error) 
 }
 
 // DeleteToken deletes the token with the given listed hash (from ListTokens).
-// oCIS answers 500 to the plaintext token. The hash travels in the query
-// string, which no error or log line ever includes.
+// oCIS answers 500 for a value it does not know (already deleted, never
+// existed, or the plaintext token), which is indistinguishable from a server
+// error, so there is no ErrNotFound: any answer other than 200/204 is a
+// *StatusError. Confirm a delete by calling ListTokens and checking that the
+// label is gone. The hash travels in the query string, which no error or log
+// line ever includes.
 func (c *Client) DeleteToken(ctx context.Context, cr Creds, hash Secret) error {
 	if hash == "" {
 		return errors.New("ocisclient: a token hash is required")

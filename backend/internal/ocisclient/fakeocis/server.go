@@ -419,13 +419,8 @@ func (s *Server) authApp(w http.ResponseWriter, r *http.Request, a *account) {
 				return
 			}
 		}
-		for _, t := range s.tokens {
-			if !t.deleted && t.user == a.username && t.value == q {
-				w.WriteHeader(http.StatusInternalServerError) // plaintext is not accepted
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
+		// measured on oCIS: an unknown, already deleted or plaintext value all answer 500
+		w.WriteHeader(http.StatusInternalServerError)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}

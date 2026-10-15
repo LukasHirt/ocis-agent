@@ -63,7 +63,7 @@ everything a contributor needs.
   and pauses the agent (`token_anomaly`) on an unknown token with our prefix; the agent pauses itself (`dormant`) when
   the user has not been seen for `AGENT_DORMANCY_DAYS` (default 30). Never log or audit token or hash values.
 - `DELETE /auth-app/tokens?token=` needs the hash returned in the `token` field of `GET /auth-app/tokens` (find it by
-  label and created date), not the plaintext token (plaintext gives 500); with the hash it returns 200 and the token then gets 401.
+  label and created date), not the plaintext token (plaintext gives 500); with the hash it returns 200 and the token then gets 401. An already-deleted or unknown hash also returns 500 (not 404), so confirm a delete via the token list.
 - The SSE endpoint `/ocs/v2.php/apps/notifications/api/v1/notifications/sse` accepts app-token Basic auth and emits
   `folder-created`, `postprocessing-finished` (upload), `item-renamed` (move) and `item-trashed` (delete) for the
   user's file operations; the data carries ids and etag but no path. Polling is the primary file-change trigger in v1; SSE only speeds it up.
