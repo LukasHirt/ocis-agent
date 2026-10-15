@@ -15,7 +15,7 @@ import (
 
 func TestConfigDefaults(t *testing.T) {
 	c := Config{}.withDefaults()
-	if c.ApprovalTTL != 168*time.Hour || c.MaxArgsBytes != 2<<20 || c.MaxActionsPerJob != 50 || c.RationaleMax != 1000 || c.Now == nil {
+	if c.ApprovalTTL != 168*time.Hour || c.MaxArgsBytes != 2<<20 || c.MaxActionsPerJob != 50 || c.RationaleMax != 1000 || c.RetrySettle != 2*time.Minute || c.Now == nil {
 		t.Fatalf("defaults = %+v", c)
 	}
 	if _, err := NewGate(nil, nil, Config{}); err == nil {

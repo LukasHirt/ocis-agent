@@ -23,6 +23,9 @@ var (
 	ErrTampered = errors.New("approvals: the stored approval does not match its hash, key or risk")
 )
 
+// maxReason caps every model-visible reason, in bytes.
+const maxReason = 500
+
 const expiredReason = "the approval expired before the action could be executed"
 
 // OutcomeState is how a call ended.
@@ -238,8 +241,14 @@ func (x *Executor) RunAuto(ctx context.Context, claim store.Claim, env tools.Env
 	if d.IdemKey != tools.IdemKey(claim.Job.ID, call.ID, d.ArgsHash) {
 		return Outcome{}, fmt.Errorf("%w: the decision was not made for this job and call", ErrBadCall)
 	}
+	if t, ok := x.reg.Get(call.Tool); !ok || t.Name() != d.Tool.Name() {
+		return Outcome{}, fmt.Errorf("%w: the decision is for another tool than the call", ErrBadCall)
+	}
 	if h, err := tools.ArgsHash(d.Args); err != nil || h != d.ArgsHash {
 		return Outcome{}, fmt.Errorf("%w: arguments hash", ErrTampered)
+	}
+	if d.Tool.Risk(d.Args) != tools.RiskWrite {
+		return Outcome{}, fmt.Errorf("%w: the risk is not write", ErrBadCall)
 	}
 	return x.exec(ctx, claim, env, job{
 		tool: d.Tool, callID: call.ID, args: d.Args, argsHash: d.ArgsHash, idemKey: d.IdemKey, risk: d.Risk,
@@ -256,13 +265,16 @@ func (x *Executor) RunRead(ctx context.Context, claim store.Claim, env tools.Env
 	if d.IdemKey != tools.IdemKey(claim.Job.ID, call.ID, d.ArgsHash) {
 		return Outcome{}, fmt.Errorf("%w: the decision was not made for this job and call", ErrBadCall)
 	}
+	if h, err := tools.ArgsHash(d.Args); err != nil || h != d.ArgsHash {
+		return Outcome{}, fmt.Errorf("%w: arguments hash", ErrTampered)
+	}
 	res, err := d.Tool.Execute(ctx, env, d.Args, tools.ExecInfo{IdemKey: d.IdemKey})
 	var out Outcome
 	switch {
 	case err == nil:
 		out = Outcome{State: OutcomeDone, Result: res}
 	case isDefinitive(err):
-		out = Outcome{State: OutcomeFailed, Reason: err.Error()}
+		out = Outcome{State: OutcomeFailed, Reason: cutRationale(err.Error(), maxReason)}
 	default:
 		return Outcome{}, err
 	}
@@ -305,7 +317,11 @@ func isDefinitive(err error) bool {
 
 var errUnfinished = errors.New("approvals: a previous attempt did not finish")
 
-// exec runs transaction A, the external call and transaction B.
+// exec runs transaction A, the external call and transaction B. If B fails
+// for a reason other than a lost lease, the computed Outcome is returned
+// together with the error so that the runner still sees Err (for example a
+// 401). An interrupted call (the context ended) returns an error only and
+// records nothing: the record stays started for the next Run to reconcile.
 func (x *Executor) exec(ctx context.Context, claim store.Claim, env tools.Env, j job) (Outcome, error) {
 	existing, err := x.begin(ctx, claim, j)
 	if err != nil {
@@ -320,7 +336,8 @@ func (x *Executor) exec(ctx context.Context, claim store.Claim, env tools.Env, j
 		// a finished record: B already committed (the approval is final too)
 		return decodeOutcome(existing.Result), nil
 	case existing != nil:
-		out, err = x.resolve(ctx, env, j, errUnfinished, false)
+		retried := x.cfg.Now().Sub(existing.StartedAt) < x.cfg.RetrySettle
+		out, err = x.resolve(ctx, env, j, errUnfinished, retried)
 	default:
 		out, err = x.attempt(ctx, env, j, false)
 	}
@@ -328,7 +345,7 @@ func (x *Executor) exec(ctx context.Context, claim store.Claim, env tools.Env, j
 		return Outcome{}, err
 	}
 	if err := x.finish(ctx, claim, env, j, out); err != nil {
-		return Outcome{}, err
+		return out, err
 	}
 	return out, nil
 }
@@ -342,16 +359,36 @@ func (x *Executor) begin(ctx context.Context, claim store.Claim, j job) (*store.
 		if err := tx.AssertLease(user, jobID, claim.Fence); err != nil {
 			return err
 		}
-		if j.approval != nil && j.approval.State == store.ApprovalApproved {
-			_, err := tx.TransitionApproval(user, j.approval.ID, store.ApprovalApproved, store.ApprovalExecuting, store.ApprovalPatch{})
-			// ErrConflict: a previous attempt already moved it; recover below
-			if err != nil && !errors.Is(err, store.ErrConflict) {
+		// mustExist: the approval was already executing, so a previous attempt
+		// wrote the idempotency record in its transaction A.
+		mustExist := false
+		if j.approval != nil {
+			if j.approval.State == store.ApprovalApproved {
+				_, err := tx.TransitionApproval(user, j.approval.ID, store.ApprovalApproved, store.ApprovalExecuting, store.ApprovalPatch{})
+				// ErrConflict: a previous attempt already moved it; recover below
+				if err != nil {
+					if !errors.Is(err, store.ErrConflict) {
+						return err
+					}
+					mustExist = true
+				}
+			} else {
+				mustExist = true
+			}
+			cur, err := tx.GetApproval(user, j.approval.ID)
+			if err != nil {
 				return err
+			}
+			if cur.State != store.ApprovalExecuting {
+				return fmt.Errorf("%w: it is %s", ErrNotApproved, cur.State)
 			}
 		}
 		rec, err := tx.BeginIdempotent(store.IdemRecord{Key: j.idemKey, UserID: user, Tool: j.tool.Name()})
 		if err != nil {
 			return err
+		}
+		if mustExist && rec == nil {
+			return fmt.Errorf("%w: an executing approval has no idempotency record", ErrTampered)
 		}
 		existing = rec
 		return nil
@@ -372,7 +409,10 @@ func (x *Executor) attempt(ctx context.Context, env tools.Env, j job, retried bo
 	case err == nil:
 		return Outcome{State: OutcomeDone, Result: res}, nil
 	case isDefinitive(err):
-		return Outcome{State: OutcomeFailed, Reason: err.Error()}, nil
+		return Outcome{State: OutcomeFailed, Reason: cutRationale(err.Error(), maxReason)}, nil
+	}
+	if ctx.Err() != nil {
+		return Outcome{}, fmt.Errorf("approvals: interrupted: %w", ctx.Err())
 	}
 	return x.resolve(ctx, env, j, err, retried)
 }
@@ -381,6 +421,9 @@ func (x *Executor) attempt(ctx context.Context, env tools.Env, j job, retried bo
 // what happened. At most one retry is made, and only when the tool says the
 // call certainly did not happen.
 func (x *Executor) resolve(ctx context.Context, env tools.Env, j job, cause error, retried bool) (Outcome, error) {
+	if ctx.Err() != nil {
+		return Outcome{}, fmt.Errorf("approvals: interrupted: %w", ctx.Err())
+	}
 	unknown := Outcome{State: OutcomeUnknown, Reason: "the outcome of the action is unknown; please verify it", Err: cause}
 	rc, ok := j.tool.(tools.Reconciler)
 	if !ok {
@@ -388,6 +431,9 @@ func (x *Executor) resolve(ctx context.Context, env tools.Env, j job, cause erro
 	}
 	r, err := rc.Reconcile(ctx, env, j.args, j.info())
 	if err != nil {
+		if ctx.Err() != nil {
+			return Outcome{}, fmt.Errorf("approvals: interrupted: %w", ctx.Err())
+		}
 		unknown.Err = errors.Join(cause, err)
 		return unknown, nil
 	}
@@ -395,7 +441,7 @@ func (x *Executor) resolve(ctx context.Context, env tools.Env, j job, cause erro
 	case tools.ReconDone:
 		return Outcome{State: OutcomeDone, Result: r.Result, Reconciled: true}, nil
 	case tools.ReconFailed:
-		return Outcome{State: OutcomeFailed, Reason: r.Reason, Reconciled: true}, nil
+		return Outcome{State: OutcomeFailed, Reason: cutRationale(r.Reason, maxReason), Reconciled: true}, nil
 	case tools.ReconRetry:
 		if retried {
 			return unknown, nil

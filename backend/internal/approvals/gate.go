@@ -36,6 +36,10 @@ type Config struct {
 	MaxActionsPerJob int
 	// RationaleMax caps the stored model explanation, in bytes (default 1000).
 	RationaleMax int
+	// RetrySettle is how long after an attempt started a reconcile verdict
+	// "retry" is honoured; before that the previous holder's request may
+	// still be in flight and the outcome is unknown (default 2 minutes).
+	RetrySettle time.Duration
 	// Now is the clock (default time.Now).
 	Now func() time.Time
 }
@@ -52,6 +56,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RationaleMax <= 0 {
 		c.RationaleMax = 1000
+	}
+	if c.RetrySettle <= 0 {
+		c.RetrySettle = 2 * time.Minute
 	}
 	if c.Now == nil {
 		c.Now = time.Now
