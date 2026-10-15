@@ -73,6 +73,9 @@ func (g *Gate) Request(ctx context.Context, claim store.Claim, pending []Pending
 		if h, err := tools.ArgsHash(d.Args); err != nil || h != d.ArgsHash {
 			return nil, fmt.Errorf("%w: the arguments no longer match their hash", ErrBadCall)
 		}
+		if d.Tool.Risk(d.Args) != d.Risk {
+			return nil, fmt.Errorf("%w: the risk does not match the tool", ErrBadCall)
+		}
 		if d.IdemKey != tools.IdemKey(claim.Job.ID, p.Call.ID, d.ArgsHash) {
 			return nil, fmt.Errorf("%w: the decision was not made for this job and call", ErrBadCall)
 		}

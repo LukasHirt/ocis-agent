@@ -165,6 +165,7 @@ func TestRequestRechecksTheDecisionAgainstItsHashAndTool(t *testing.T) {
 		"invalid args": func(p *Pending) { p.Decision.Args = json.RawMessage(`{`) },
 		"other tool":   func(p *Pending) { p.Call.Tool = "files.overwrite" },
 		"nil tool":     func(p *Pending) { p.Decision.Tool = nil },
+		"forged risk":  func(p *Pending) { p.Decision.Risk = tools.RiskRead },
 	} {
 		p := f.pending(c, call("c1", "files.create_folder", `{"path":"/a"}`))
 		mut(&p[0])

@@ -197,11 +197,12 @@ func TestAnUnknownErrorIsRetriedAtMostOnceAndOnlyWhenTheToolSaysSo(t *testing.T)
 	// a reconcile that itself fails means unknown, with both causes kept for the runner
 	f4 := newFixture(t)
 	p4 := f4.probes["probe.write"]
-	p4.run = func(tools.ExecInfo) (tools.Result, error) { return tools.Result{}, errors.New("boom") }
-	p4.recon = func(tools.ExecInfo) (tools.Reconciled, error) { return tools.Reconciled{}, errors.New("cannot check") }
+	boom, cannot := errors.New("boom"), errors.New("cannot check")
+	p4.run = func(tools.ExecInfo) (tools.Result, error) { return tools.Result{}, boom }
+	p4.recon = func(tools.ExecInfo) (tools.Reconciled, error) { return tools.Reconciled{}, cannot }
 	c4, a4 := approvedWrite(t, f4, p4)
 	out, err = f4.ex.Run(bg, c4, f4.env, a4.ID)
-	if err != nil || out.State != OutcomeUnknown || out.Err == nil || p4.execs.Load() != 1 {
+	if err != nil || out.State != OutcomeUnknown || !errors.Is(out.Err, boom) || !errors.Is(out.Err, cannot) || p4.execs.Load() != 1 {
 		t.Fatalf("outcome = %+v %v", out, err)
 	}
 }

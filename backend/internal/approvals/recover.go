@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
@@ -30,7 +31,15 @@ const notRetried = "the job ended before the action could be retried; it was not
 // still active it reconciles its own records when it runs again, so those
 // are skipped. An ended job is never resumed: a "retry" verdict is recorded
 // as a failure, not executed.
+//
+// olderThan is clamped to Now()-RetrySettle: a call that started within the
+// settle window may still be in flight (cancelling a job does not stop its
+// worker), so a sweep never touches it. Pass a cut-off of at least the longest
+// call duration plus RetrySettle.
 func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderThan time.Time, limit int) (ReconcileSummary, error) {
+	if limit := x.cfg.Now().Add(-x.cfg.RetrySettle); olderThan.After(limit) {
+		olderThan = limit
+	}
 	var recs []store.IdemRecord
 	if err := x.st.View(ctx, func(tx store.Tx) error {
 		var err error
@@ -72,7 +81,7 @@ func (x *Executor) reconcileOne(ctx context.Context, envFor EnvFunc, rec store.I
 		case !errors.Is(err, store.ErrNotFound):
 			return err
 		}
-		as, err := tx.ListApprovals(rec.UserID, store.ApprovalFilter{States: []store.ApprovalState{store.ApprovalExecuting}, Limit: 500})
+		as, err := tx.ListApprovals(rec.UserID, store.ApprovalFilter{JobID: jobID, States: []store.ApprovalState{store.ApprovalExecuting}, Limit: 500})
 		if err != nil {
 			return err
 		}
@@ -101,12 +110,15 @@ func (x *Executor) reconcileOne(ctx context.Context, envFor EnvFunc, rec store.I
 				}
 				meta.cred = env.Creds.Kind()
 				r, err := rc.Reconcile(ctx, env, approval.Args, tools.ExecInfo{IdemKey: approval.IdemKey, TargetETag: approval.TargetETag})
+				if err != nil && errors.Is(err, ocisclient.ErrUnauthorized) {
+					return false, fmt.Errorf("approvals: reconcile: %w", err)
+				}
 				if err == nil {
 					switch r.State {
 					case tools.ReconDone:
 						out = Outcome{State: OutcomeDone, Result: r.Result, Reconciled: true}
 					case tools.ReconFailed:
-						out = Outcome{State: OutcomeFailed, Reason: r.Reason, Reconciled: true}
+						out = Outcome{State: OutcomeFailed, Reason: cutRationale(r.Reason, maxReason), Reconciled: true}
 					case tools.ReconRetry:
 						out = Outcome{State: OutcomeFailed, Reason: notRetried, Reconciled: true}
 					}

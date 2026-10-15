@@ -31,6 +31,14 @@ func (g *Gate) Decide(ctx context.Context, userID, decidedBy string, items []Dec
 	if len(items) == 0 {
 		return nil, store.Invalid("no decisions given")
 	}
+	if decidedBy == "" {
+		return nil, store.Invalid("decidedBy is required")
+	}
+	for _, it := range items {
+		if it.Decision != store.ApprovalApproved && it.Decision != store.ApprovalRejected {
+			return nil, store.Invalid("a decision must be approved or rejected")
+		}
+	}
 	var out []store.Approval
 	err := g.st.InTx(ctx, func(tx store.Tx) error {
 		out = out[:0]

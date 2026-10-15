@@ -265,8 +265,14 @@ func (x *Executor) RunRead(ctx context.Context, claim store.Claim, env tools.Env
 	if d.IdemKey != tools.IdemKey(claim.Job.ID, call.ID, d.ArgsHash) {
 		return Outcome{}, fmt.Errorf("%w: the decision was not made for this job and call", ErrBadCall)
 	}
+	if t, ok := x.reg.Get(call.Tool); !ok || t != d.Tool {
+		return Outcome{}, fmt.Errorf("%w: the decision is for another tool than the call", ErrBadCall)
+	}
 	if h, err := tools.ArgsHash(d.Args); err != nil || h != d.ArgsHash {
 		return Outcome{}, fmt.Errorf("%w: arguments hash", ErrTampered)
+	}
+	if d.Tool.Risk(d.Args) != tools.RiskRead {
+		return Outcome{}, fmt.Errorf("%w: the risk is not read", ErrBadCall)
 	}
 	res, err := d.Tool.Execute(ctx, env, d.Args, tools.ExecInfo{IdemKey: d.IdemKey})
 	var out Outcome
@@ -389,6 +395,9 @@ func (x *Executor) begin(ctx context.Context, claim store.Claim, j job) (*store.
 		}
 		if mustExist && rec == nil {
 			return fmt.Errorf("%w: an executing approval has no idempotency record", ErrTampered)
+		}
+		if rec != nil && (rec.Tool != j.tool.Name() || (j.approval != nil && !mustExist)) {
+			return fmt.Errorf("%w: the idempotency record does not belong to this call", ErrTampered)
 		}
 		existing = rec
 		return nil

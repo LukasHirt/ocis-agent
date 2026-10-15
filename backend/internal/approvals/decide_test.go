@@ -141,7 +141,7 @@ func TestDecideRefusals(t *testing.T) {
 
 func TestDecideAfterExpiryIsRefusedAndAfterTheJobEnded(t *testing.T) {
 	f := newFixture(t)
-	c, as := f.requested(call("c1", "files.create_folder", `{"path":"/a"}`))
+	_, as := f.requested(call("c1", "files.create_folder", `{"path":"/a"}`))
 	f.clk.Advance(169 * time.Hour)
 	if _, err := f.gate.Decide(bg, userID, userID, []DecisionItem{item(as[0], store.ApprovalApproved)}); !errors.Is(err, store.ErrExpired) {
 		t.Fatalf("late decision = %v, want ErrExpired", err)
@@ -161,7 +161,6 @@ func TestDecideAfterExpiryIsRefusedAndAfterTheJobEnded(t *testing.T) {
 	if f2.approvalState(as2[0].ID) != store.ApprovalPending {
 		t.Fatal("an ended job's approval must stay untouched")
 	}
-	_ = c
 }
 
 func TestExpireAndResume(t *testing.T) {
@@ -209,5 +208,51 @@ func TestExpireResumesEachJobOnlyWhenSettled(t *testing.T) {
 		if f.approvalState(a.ID) != store.ApprovalExpired {
 			t.Fatalf("approval %s not expired", a.ID)
 		}
+	}
+}
+
+func TestDecideValidatesItsInputBeforeAnyLookup(t *testing.T) {
+	f := newFixture(t)
+	ghost := DecisionItem{ApprovalID: "nope", Decision: store.ApprovalApproved, ArgsHash: "h"}
+	if _, err := f.gate.Decide(bg, userID, "", []DecisionItem{ghost}); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("empty decidedBy = %v, want ErrInvalid", err)
+	}
+	ghost.Decision = store.ApprovalExecuted
+	if _, err := f.gate.Decide(bg, userID, userID, []DecisionItem{ghost}); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("bad decision = %v, want ErrInvalid", err)
+	}
+}
+
+func TestAMixedUserBatchIsRefusedAndLeavesTheOwnApprovalPending(t *testing.T) {
+	f := newFixture(t)
+	_, own := f.requested(call("c1", "files.create_folder", `{"path":"/a"}`))
+	var c2 store.Claim
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		if err := tx.PutUser(store.User{ID: "u2", Name: "marie", PersonalDriveID: "drive2"}); err != nil {
+			return err
+		}
+		if _, err := tx.InsertJob(store.Job{UserID: "u2", TriggerKind: "chat", Goal: "g"}); err != nil {
+			return err
+		}
+		var ok bool
+		var err error
+		c2, ok, err = tx.ClaimNextJob("w3", 2*time.Minute)
+		if err == nil && !ok {
+			t.Fatal("nothing to claim")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := f.gate.Request(bg, c2, f.pending(c2, call("c1", "files.create_folder", `{"path":"/b"}`)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.gate.Decide(bg, userID, userID, []DecisionItem{item(own[0], store.ApprovalApproved), item(foreign[0], store.ApprovalApproved)})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("mixed batch = %v, want ErrNotFound", err)
+	}
+	if f.approvalState(own[0].ID) != store.ApprovalPending {
+		t.Fatal("the own approval must stay pending")
 	}
 }

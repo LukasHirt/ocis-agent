@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -194,5 +193,113 @@ func TestReasonsShownToTheModelAreCapped(t *testing.T) {
 	if err != nil || out.State != OutcomeFailed || len(out.Reason) > 500 || !utf8.ValidString(out.Reason) {
 		t.Fatalf("reconciled reason len %d err %v", len(out.Reason), err)
 	}
-	_ = time.Second
+}
+
+func TestRunReadRefusesAForgedRiskAndAForeignTool(t *testing.T) {
+	f := newFixture(t)
+	c := f.claim()
+	cl := call("c1", "probe.destroy", `{}`)
+	d := f.classify(c, cl)
+	d.Kind, d.Risk = KindAllow, tools.RiskRead
+	if _, err := f.ex.RunRead(bg, c, f.env, d, cl); !errors.Is(err, ErrBadCall) {
+		t.Fatalf("forged risk: %v, want ErrBadCall", err)
+	}
+	cl2 := call("c2", "probe.read", `{}`)
+	d2 := f.classify(c, cl2)
+	cl2.Tool = "probe.auto"
+	if _, err := f.ex.RunRead(bg, c, f.env, d2, cl2); !errors.Is(err, ErrBadCall) {
+		t.Fatalf("foreign tool: %v, want ErrBadCall", err)
+	}
+	for _, p := range f.probes {
+		if p.execs.Load() != 0 {
+			t.Fatalf("%s executed", p.name)
+		}
+	}
+}
+
+func (f *fixture) seedRecord(key, tool string) {
+	f.t.Helper()
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		_, err := tx.BeginIdempotent(store.IdemRecord{Key: key, UserID: userID, Tool: tool})
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func TestBeginRefusesACollidingOrForeignRecord(t *testing.T) {
+	f := newFixture(t)
+	_, as := f.requested(call("c1", "probe.write", `{}`))
+	c := f.approve(as[0])
+	snap := f.approvalOf(as[0].ID) // approved: no record may exist yet
+	f.seedRecord(snap.IdemKey, "probe.write")
+	if _, err := f.ex.begin(bg, c, f.jobOf(snap)); !errors.Is(err, ErrTampered) {
+		t.Fatalf("record before a first begin: %v, want ErrTampered", err)
+	}
+	if f.approvalOf(snap.ID).State != store.ApprovalApproved {
+		t.Fatal("transaction A must roll back")
+	}
+
+	f2 := newFixture(t)
+	_, as2 := f2.requested(call("c1", "probe.write", `{}`))
+	c2 := f2.approve(as2[0])
+	snap2 := f2.approvalOf(as2[0].ID)
+	f2.move(snap2, store.ApprovalApproved, store.ApprovalExecuting)
+	snap2.State = store.ApprovalExecuting
+	f2.seedRecord(snap2.IdemKey, "probe.read")
+	if _, err := f2.ex.begin(bg, c2, f2.jobOf(snap2)); !errors.Is(err, ErrTampered) {
+		t.Fatalf("record of another tool: %v, want ErrTampered", err)
+	}
+}
+
+func TestExecuteThatSucceededThenACancelledContextStillRecordsTheOutcome(t *testing.T) {
+	f := newFixture(t)
+	p := f.probes["probe.write"]
+	ctx, cancel := context.WithCancel(bg)
+	p.run = func(tools.ExecInfo) (tools.Result, error) { cancel(); return tools.Result{Summary: "ok"}, nil }
+	_, as := f.requested(call("c1", "probe.write", `{}`))
+	c := f.approve(as[0])
+	out, err := f.ex.Run(ctx, c, f.env, as[0].ID)
+	if err != nil || out.State != OutcomeDone {
+		t.Fatalf("outcome = %+v %v", out, err)
+	}
+	if f.approvalOf(as[0].ID).State != store.ApprovalExecuted {
+		t.Fatal("transaction B must still record the executed call")
+	}
+	if rec, _ := f.idem(as[0].IdemKey); rec.State != store.IdemDone {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func TestRunAutoRefusesAToolWhoseRiskIsNoLongerWrite(t *testing.T) {
+	f := newFixture(t)
+	c := f.claim()
+	cl := call("c1", "probe.auto", `{"n":1}`)
+	d := f.classify(c, cl)
+	f.probes["probe.auto"].risk = tools.RiskRead
+	if _, err := f.ex.RunAuto(bg, c, f.env, d, cl); !errors.Is(err, ErrBadCall) {
+		t.Fatalf("err = %v, want ErrBadCall", err)
+	}
+	if f.probes["probe.auto"].execs.Load() != 0 {
+		t.Fatal("nothing may run")
+	}
+}
+
+func TestRunAutoReplaysAStoredFailureWithoutRunningAgain(t *testing.T) {
+	f := newFixture(t)
+	p := f.probes["probe.auto"]
+	p.run = func(tools.ExecInfo) (tools.Result, error) {
+		return tools.Result{}, fmt.Errorf("exists: %w", tools.ErrRefused)
+	}
+	c := f.claim()
+	cl := call("c1", "probe.auto", `{"n":1}`)
+	d := f.classify(c, cl)
+	first, err := f.ex.RunAuto(bg, c, f.env, d, cl)
+	if err != nil || first.State != OutcomeFailed {
+		t.Fatalf("first = %+v %v", first, err)
+	}
+	again, err := f.ex.RunAuto(bg, c, f.env, d, cl)
+	if err != nil || again.State != OutcomeFailed || !again.Reconciled || again.Reason != first.Reason || p.execs.Load() != 1 {
+		t.Fatalf("replay = %+v %v (execs %d)", again, err, p.execs.Load())
+	}
 }
