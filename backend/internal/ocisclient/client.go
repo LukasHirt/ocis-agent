@@ -31,8 +31,19 @@ type Client struct {
 // Option configures New.
 type Option func(*Client)
 
-// WithHTTPClient replaces the default HTTP client (see NewHTTPClient).
-func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
+// WithHTTPClient replaces the default HTTP client (see NewHTTPClient). A nil
+// client is ignored. The client is copied and the copy never follows redirects,
+// so credentials cannot be forwarded; the caller's client is not modified.
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Client) {
+		if hc == nil {
+			return
+		}
+		h := *hc
+		h.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		c.hc = &h
+	}
+}
 
 // WithSSEIdleTimeout sets how long StreamEvents waits without receiving any
 // bytes (heartbeats count) before it gives up. The default is two minutes.

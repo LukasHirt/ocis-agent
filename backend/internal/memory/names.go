@@ -46,6 +46,11 @@ func ResolveName(name string) (string, error) {
 // doubled slashes and a different spelling of the folder name do not escape
 // the check. Every file tool other than memory.* must refuse to write where
 // this returns true.
+//
+// The check is path-only. Callers must address the personal drive by its plain
+// Graph id, never a node-relative "<space>!<nodeid>" id (oCIS resolves the path
+// relative to that node, which would bypass the check), and must check both the
+// source and the destination of MOVE and COPY.
 func IsReserved(p string) bool {
 	c := strings.ToLower(path.Clean("/" + p))
 	root := strings.ToLower(Root)

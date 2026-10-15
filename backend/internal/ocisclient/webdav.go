@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
@@ -215,7 +216,9 @@ func etagFrom(h http.Header) string {
 }
 
 // Get downloads a file of at most maxBytes and returns its content and ETag.
-// A larger file fails with ErrTooLarge without being read to the end.
+// A larger file fails with ErrTooLarge without being read to the end. It fails
+// closed when the response carries no ETag (a Stat could return a newer one
+// than the content).
 func (c *Client) Get(ctx context.Context, cr Creds, drive, p string, maxBytes int64) ([]byte, string, error) {
 	tg, err := davTarget(drive, p)
 	if err != nil {
@@ -233,18 +236,15 @@ func (c *Client) Get(ctx context.Context, cr Creds, drive, p string, maxBytes in
 	}
 	etag := etagFrom(resp.header)
 	if etag == "" {
-		st, err := c.Stat(ctx, cr, drive, p)
-		if err != nil {
-			return nil, "", err
-		}
-		etag = st.ETag
+		return nil, "", fmt.Errorf("ocisclient: GET %s: no ETag in the response", tg.log)
 	}
 	return resp.body, etag, nil
 }
 
 // Put uploads data to p and returns the new ETag. With a non-empty ifMatch the
 // upload only replaces the file if it still has that ETag; otherwise it fails
-// with ErrPrecondition (oCIS answers 409 for this, 412 is accepted too). With
+// with ErrPrecondition (oCIS answers 409 for this, 412 is accepted too). It
+// fails closed when the response carries no ETag. With
 // an empty ifMatch it overwrites unconditionally: oCIS ignores If-None-Match,
 // so callers that must not overwrite stat first and accept the small race.
 func (c *Client) Put(ctx context.Context, cr Creds, drive, p string, data []byte, ifMatch string) (string, error) {
@@ -280,14 +280,11 @@ func (c *Client) Put(ctx context.Context, cr Creds, drive, p string, data []byte
 	default:
 		return "", statusError(http.MethodPut, tg.log, resp.status, nil)
 	}
-	if etag := etagFrom(resp.header); etag != "" {
-		return etag, nil
+	etag := etagFrom(resp.header)
+	if etag == "" {
+		return "", fmt.Errorf("ocisclient: PUT %s: no ETag in the response", tg.log)
 	}
-	st, err := c.Stat(ctx, cr, drive, p)
-	if err != nil {
-		return "", err
-	}
-	return st.ETag, nil
+	return etag, nil
 }
 
 // Mkcol creates a folder. ErrExists if p exists, ErrNotFound if the parent is

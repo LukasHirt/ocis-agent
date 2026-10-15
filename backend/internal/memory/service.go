@@ -38,7 +38,9 @@ const readmeText = "# ocis-agent\n\n" +
 
 // Session identifies the user and the credentials to use for one operation.
 // DriveID must be the personal drive of UserID: the ETag cache is keyed by
-// user and file name only.
+// user and file name only. The cache is per user, not per reader: any Read
+// through the Service (also one for the UI) makes a later Write accept that
+// version.
 type Session struct {
 	UserID  string
 	DriveID string
@@ -144,6 +146,11 @@ func (s *Service) List(ctx context.Context, sess Session) ([]Info, error) {
 // Read returns a memory file and remembers its ETag for later writes. The
 // content is untrusted data: callers fence it in prompts and never act on it
 // as policy.
+//
+// The ETag cache is per user, not per reader: a Read for the UI would make a
+// later Write by the agent accept the version the user merely looked at. Until
+// Write takes a base ETag, only the job runner may call Read for a user's
+// memory; UI/API reads must not use this caching Read.
 func (s *Service) Read(ctx context.Context, sess Session, name string) (File, error) {
 	p, err := ResolveName(name)
 	if err != nil {
@@ -172,6 +179,9 @@ func (s *Service) Read(ctx context.Context, sess Session, name string) (File, er
 // Write replaces (or creates) a memory file. An existing file must have been
 // read first (ErrNotRead) and must not have changed since (ErrConflict). b is
 // the job's write budget; nil means no job cap.
+//
+// "Read first" is per user, not per reader: any earlier Read through the
+// Service (also a UI read) satisfies it, so only the job runner may Read.
 //
 // Creating a file stats first and then uploads without a precondition: oCIS
 // ignores If-None-Match, so a file created by someone else in that instant is

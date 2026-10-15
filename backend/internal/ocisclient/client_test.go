@@ -306,3 +306,35 @@ func TestPathsCannotRedirectCredentials(t *testing.T) {
 		t.Fatalf("normal path: %v hits %d", err, hits.Load())
 	}
 }
+
+func TestWithHTTPClientStillDoesNotFollowRedirects(t *testing.T) {
+	var otherHits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { otherHits.Add(1) }))
+	t.Cleanup(other.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	supplied := &http.Client{} // would follow redirects
+	c, err := New(srv.URL, WithHTTPClient(supplied))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.do(context.Background(), Bearer(secretValue), http.MethodGet, "/x", nil, nil, nil, maxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.status != http.StatusFound || otherHits.Load() != 0 {
+		t.Fatalf("status = %d, other hits = %d", resp.status, otherHits.Load())
+	}
+	if supplied.CheckRedirect != nil {
+		t.Fatal("the caller's client was modified")
+	}
+}
+
+func TestWithHTTPClientNilKeepsDefault(t *testing.T) {
+	c, err := New("https://example.test", WithHTTPClient(nil))
+	if err != nil || c.hc == nil {
+		t.Fatalf("client = %v err = %v", c, err)
+	}
+}

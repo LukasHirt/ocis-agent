@@ -235,22 +235,20 @@ func TestPut(t *testing.T) {
 	}
 }
 
-func TestPutFallsBackToStatWhenNoETagHeader(t *testing.T) {
+func TestPutFailsClosedWhenNoETagHeader(t *testing.T) {
 	var propfinds int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPut:
-			w.WriteHeader(http.StatusCreated) // no ETag header
-		case "PROPFIND":
+		if r.Method == "PROPFIND" {
 			propfinds++
-			w.WriteHeader(http.StatusMultiStatus)
-			_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:"><d:response><d:href>/remote.php/dav/spaces/dr/a.md</d:href><d:propstat><d:prop><d:getetag>"from-stat"</d:getetag><d:getcontentlength>1</d:getcontentlength><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`))
+		}
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusCreated) // no ETag header
 		}
 	}))
 	t.Cleanup(srv.Close)
 	c, _ := New(srv.URL)
 	etag, err := c.Put(bg, AppToken("u", "t"), "dr", "/a.md", []byte("x"), "")
-	if err != nil || etag != `"from-stat"` || propfinds != 1 {
+	if err == nil || etag != "" || propfinds != 0 {
 		t.Fatalf("etag = %q err = %v propfinds = %d", etag, err, propfinds)
 	}
 }
@@ -474,21 +472,19 @@ func TestPutRejectsIfMatchWithNewline(t *testing.T) {
 	}
 }
 
-func TestGetFallsBackToStatWhenNoETagHeader(t *testing.T) {
+func TestGetFailsClosedWhenNoETagHeader(t *testing.T) {
 	var propfinds int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			_, _ = w.Write([]byte("hi"))
-		case "PROPFIND":
+		if r.Method == "PROPFIND" {
 			propfinds++
-			w.WriteHeader(http.StatusMultiStatus)
-			_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:"><d:response><d:href>/remote.php/dav/spaces/dr/a.md</d:href><d:propstat><d:prop><d:getetag>"from-stat"</d:getetag></d:prop></d:propstat></d:response></d:multistatus>`))
+		}
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("hi"))
 		}
 	}))
 	t.Cleanup(srv.Close)
 	data, etag, err := mustClient(t, srv.URL).Get(bg, AppToken("u", "t"), "dr", "/a.md", 10)
-	if err != nil || string(data) != "hi" || etag != `"from-stat"` || propfinds != 1 {
+	if err == nil || data != nil || etag != "" || propfinds != 0 {
 		t.Fatalf("%q %q %v %d", data, etag, err, propfinds)
 	}
 }
