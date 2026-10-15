@@ -46,7 +46,9 @@ func memErr(err error, name string) error {
 		return refuse("the memory file would exceed its size limit")
 	case errors.Is(err, memory.ErrNotFound):
 		return refuse("the memory file or folder does not exist")
-	case errors.Is(err, memory.ErrNotText), errors.Is(err, memory.ErrEmpty):
+	case errors.Is(err, memory.ErrNotText):
+		return refuse("the memory file is not text")
+	case errors.Is(err, memory.ErrEmpty):
 		return invalid("the memory content must be non-empty text")
 	}
 	return fmt.Errorf("tools: memory %s: %w", name, err)
@@ -78,12 +80,18 @@ func (memoryList) Execute(ctx context.Context, env Env, raw json.RawMessage, _ E
 	if err != nil {
 		return Result{}, memErr(err, "list")
 	}
+	total := len(infos)
+	summary := fmt.Sprintf("%d memory file(s)", total)
+	if max := env.limits().MaxItems; total > max {
+		infos = infos[:max]
+		summary = fmt.Sprintf("%d memory file(s), truncated (%d in total)", max, total)
+	}
 	lines := make([]string, len(infos))
 	for i, in := range infos {
 		lines[i] = fmt.Sprintf("%s\t%d\t%s\t%s", in.Name, in.Size, in.ModTime.UTC().Format(time.RFC3339), in.ETag)
 	}
 	return Result{
-		Summary: fmt.Sprintf("%d memory file(s)", len(infos)),
+		Summary: summary,
 		Blocks:  []Block{{Source: "memory", Path: "memory/", Content: strings.Join(lines, "\n")}},
 	}, nil
 }
@@ -111,20 +119,46 @@ func (memoryRead) Execute(ctx context.Context, env Env, raw json.RawMessage, _ E
 	if err != nil {
 		return Result{}, err
 	}
-	if env.Reads.Remaining() <= 0 {
+	// Check the budget against the size first: Memory.Read caches the ETag,
+	// which must only happen when the model really gets the content.
+	p, err := memory.ResolveName(name)
+	if err != nil {
+		return Result{}, invalid("bad memory file name")
+	}
+	st, err := env.Files.Stat(ctx, env.Creds, env.DriveID, p)
+	if err != nil {
+		if errors.Is(err, ocisclient.ErrNotFound) {
+			return Result{}, memErr(memory.ErrNotFound, name)
+		}
+		return Result{}, mapErr(err, name)
+	}
+	if st.Size > env.Reads.Remaining() {
 		return Result{}, refuse("the job's read budget is used up")
 	}
 	f, err := env.Memory.Read(ctx, env.session(), name)
 	if err != nil {
 		return Result{}, memErr(err, name)
 	}
-	if err := env.Reads.Take(int64(len(f.Content))); err != nil {
-		return Result{}, refuse("the job's read budget is used up")
+	if err := takeReadOrForget(ctx, env, name, int64(len(f.Content))); err != nil {
+		return Result{}, err
 	}
 	return Result{
 		Summary: fmt.Sprintf("read %d bytes", len(f.Content)),
 		Blocks:  []Block{{Source: "memory", Path: name, SHA256: sha256Hex([]byte(f.Content)), Content: f.Content}},
 	}, nil
+}
+
+// takeReadOrForget charges n bytes to the read budget. If that fails (the file
+// grew after the size check) the content never reaches the model, so the ETag
+// that Memory.Read cached is dropped again: a later replace must need a read.
+func takeReadOrForget(ctx context.Context, env Env, name string, n int64) error {
+	if err := env.Reads.Take(n); err == nil {
+		return nil
+	}
+	if err := env.Memory.Forget(ctx, env.session(), name); err != nil {
+		return fmt.Errorf("tools: memory %s: forget cached ETag: %w", name, err)
+	}
+	return refuse("the job's read budget is used up")
 }
 
 // --- memory.write ---
@@ -234,6 +268,8 @@ func (memoryWrite) Reconcile(ctx context.Context, env Env, raw json.RawMessage, 
 		return Reconciled{State: ReconDone, Result: Result{Summary: fmt.Sprintf("wrote the memory file (%d bytes)", len(a.Content))}}, nil
 	}
 	// A retry goes through Write again, which re-checks the cached ETag, so it
-	// cannot overwrite a user edit.
+	// cannot overwrite a user edit. Known limit: the ETag cache is per user, so
+	// an ETag cached by another job's read could let a retry replace an edit
+	// that job's read had seen.
 	return Reconciled{State: ReconRetry}, nil
 }

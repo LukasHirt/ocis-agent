@@ -516,3 +516,30 @@ func TestReadOfANeverCachedMissingFileIsAPlainNotFound(t *testing.T) {
 		t.Fatalf("cache entry %q appeared", got)
 	}
 }
+
+func TestForgetMakesTheNextReplaceNeedARead(t *testing.T) {
+	e := ready(t, Limits{})
+	e.fake.PutFile("drive1", profile, []byte("user wrote this\n"))
+	if _, err := e.svc.Read(bg, e.sess, "profile.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Forget(bg, e.sess, "profile.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Write(bg, e.sess, "profile.md", "overwrite\n", nil); !errors.Is(err, ErrNotRead) {
+		t.Fatalf("err = %v, want ErrNotRead", err)
+	}
+	if got := e.content(t, profile); got != "user wrote this\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestForgetValidatesTheNameAndIsANoOpWhenUncached(t *testing.T) {
+	e := ready(t, Limits{})
+	if err := e.svc.Forget(bg, e.sess, "../x.md"); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("err = %v, want ErrInvalidName", err)
+	}
+	if err := e.svc.Forget(bg, e.sess, "projects.md"); err != nil {
+		t.Fatalf("uncached: %v", err)
+	}
+}

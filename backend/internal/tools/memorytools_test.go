@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
+	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
 func memFixture(t *testing.T) fixture {
@@ -187,5 +188,79 @@ func TestMemoryWriteReconcile(t *testing.T) {
 	}
 	if r := rec(`{"name":"profile.md","content":"x","mode":"append"}`); r.State != ReconUnknown {
 		t.Fatalf("append: %+v, want unknown (it may or may not have been appended)", r)
+	}
+}
+
+func cachedMemETags(t *testing.T, f fixture) map[string]string {
+	t.Helper()
+	var m map[string]string
+	if err := f.st.View(bg, func(tx store.Tx) error {
+		c, err := tx.GetCursor("u1")
+		m = c.MemoryETags
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestRefusedMemoryReadDoesNotUnlockAReplace(t *testing.T) {
+	f := memFixture(t)
+	f.put("/.ocis-agent/memory/profile.md", "user secret edit\n")
+	f.env.Reads = NewReadBudget(1)
+	if _, err := f.run(t, NewMemoryRead(), `{"name":"profile.md"}`); !errors.Is(err, ErrRefused) {
+		t.Fatalf("read = %v, want ErrRefused", err)
+	}
+	if len(cachedMemETags(t, f)) != 0 {
+		t.Fatalf("a refused read cached an ETag: %v", cachedMemETags(t, f))
+	}
+	_, err := f.run(t, NewMemoryWrite(), `{"name":"profile.md","content":"blind"}`)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "memory.read") {
+		t.Fatalf("write = %v, want a refusal pointing at memory.read", err)
+	}
+	if data, _, _ := f.fake.File(testDrive, "/.ocis-agent/memory/profile.md"); string(data) != "user secret edit\n" {
+		t.Fatalf("content = %q", data)
+	}
+}
+
+func TestTakeReadOrForgetDropsTheCachedETag(t *testing.T) {
+	f := memFixture(t)
+	f.put("/.ocis-agent/memory/profile.md", "user secret edit\n")
+	if _, err := f.env.Memory.Read(bg, f.env.session(), "profile.md"); err != nil {
+		t.Fatal(err)
+	}
+	f.env.Reads = NewReadBudget(1)
+	if err := takeReadOrForget(bg, f.env, "profile.md", 17); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if len(cachedMemETags(t, f)) != 0 {
+		t.Fatal("the ETag must be forgotten when the content could not be handed over")
+	}
+	f.env.Reads = NewReadBudget(100)
+	if err := takeReadOrForget(bg, f.env, "profile.md", 17); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryListIsCapped(t *testing.T) {
+	f := memFixture(t)
+	f.env.Limits.MaxItems = 2
+	for _, n := range []string{"profile.md", "projects.md", "notes/a.md"} {
+		f.put("/.ocis-agent/memory/"+n, "x\n")
+	}
+	res, err := f.run(t, NewMemoryList(), `{}`)
+	if err != nil || !strings.Contains(res.Summary, "truncated") || strings.Count(res.Blocks[0].Content, "\n") != 1 {
+		t.Fatalf("res = %+v %v", res, err)
+	}
+}
+
+func TestMemoryNotTextIsARefusal(t *testing.T) {
+	f := memFixture(t)
+	f.put("/.ocis-agent/memory/profile.md", "a\x00b")
+	if _, err := f.run(t, NewMemoryRead(), `{"name":"profile.md"}`); !errors.Is(err, ErrRefused) {
+		t.Fatalf("read = %v, want ErrRefused", err)
+	}
+	if _, err := f.run(t, NewMemoryWrite(), `{"name":"profile.md","content":"x","mode":"append"}`); !errors.Is(err, ErrRefused) {
+		t.Fatalf("append = %v, want ErrRefused", err)
 	}
 }
