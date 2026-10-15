@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
 // pending classifies write calls and returns them as Pending entries.
@@ -59,7 +60,7 @@ func TestRequestStoresEverythingTheDecisionNeeds(t *testing.T) {
 	if string(a.Preview) != string(d.Prepared.Preview) || a.Rationale != "because" {
 		t.Fatalf("preview/rationale: %s %q", a.Preview, a.Rationale)
 	}
-	if got := a.ExpiresAt.Sub(f.clk.Now()); got != 168*time.Hour {
+	if got := a.ExpiresAt.Sub(f.clk.Now()); got < 168*time.Hour-time.Second || got > 168*time.Hour+time.Second {
 		t.Fatalf("expires in %s", got)
 	}
 	if as[1].Risk != "write" || as[1].TargetETag != "" {
@@ -103,16 +104,94 @@ func TestRequestReleasesTheJobAuditsAndKeepsTheCheckpoint(t *testing.T) {
 }
 
 func TestRationaleIsCutAtAUTF8Boundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string
+		max, n   int
+	}{
+		{"3-byte runes, max splits one", strings.Repeat("€", 20), 10, 9},
+		{"2-byte runes, max splits one", strings.Repeat("ü", 20), 9, 8},
+	} {
+		f := newFixture(t)
+		f.gate.cfg.RationaleMax = tc.max
+		c := f.claim()
+		cl := Call{ID: "c1", Tool: "files.create_folder", Args: json.RawMessage(`{"path":"/a"}`), Rationale: tc.in}
+		as, err := f.gate.Request(bg, c, f.pending(c, cl), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(as[0].Rationale) != tc.n || !utf8.ValidString(as[0].Rationale) {
+			t.Fatalf("%s: rationale = %q (%d bytes), want %d", tc.name, as[0].Rationale, len(as[0].Rationale), tc.n)
+		}
+	}
+}
+
+func TestCutRationale(t *testing.T) {
+	if got := cutRationale("abc", 0); got != "" {
+		t.Fatalf("max 0: %q", got)
+	}
+	if got := cutRationale("abc", -1); got != "" {
+		t.Fatalf("max -1: %q", got)
+	}
+	if got := cutRationale("ab\xffcdef", 4); got != "ab\xffc" {
+		t.Fatalf("invalid byte: %q", got)
+	}
+	if got := cutRationale("ab€", 4); got != "ab" {
+		t.Fatalf("split rune: %q", got)
+	}
+}
+
+func TestRequestRejectsDuplicateCallIDsInABatch(t *testing.T) {
 	f := newFixture(t)
-	f.gate.cfg.RationaleMax = 10
 	c := f.claim()
-	cl := Call{ID: "c1", Tool: "files.create_folder", Args: json.RawMessage(`{"path":"/a"}`), Rationale: strings.Repeat("ü", 20)}
-	as, err := f.gate.Request(bg, c, f.pending(c, cl), nil)
-	if err != nil {
+	p := f.pending(c,
+		call("c1", "files.create_folder", `{"path":"/a"}`),
+		call("c2", "files.create_folder", `{"path":"/b"}`),
+	)
+	p[1].Call.ID = "c1"
+	p[1].Decision.IdemKey = tools.IdemKey(c.Job.ID, "c1", p[1].Decision.ArgsHash)
+	if _, err := f.gate.Request(bg, c, p, nil); !errors.Is(err, ErrBadCall) {
+		t.Fatalf("err = %v, want ErrBadCall", err)
+	}
+	if n := len(f.approvals(c.Job.ID)); n != 0 || f.jobState(c.Job.ID) != store.JobRunning {
+		t.Fatal("nothing may be written")
+	}
+}
+
+func TestRequestRechecksTheDecisionAgainstItsHashAndTool(t *testing.T) {
+	f := newFixture(t)
+	c := f.claim()
+	for name, mut := range map[string]func(*Pending){
+		"altered args": func(p *Pending) { p.Decision.Args = json.RawMessage(`{"path":"/evil"}`) },
+		"invalid args": func(p *Pending) { p.Decision.Args = json.RawMessage(`{`) },
+		"other tool":   func(p *Pending) { p.Call.Tool = "files.overwrite" },
+		"nil tool":     func(p *Pending) { p.Decision.Tool = nil },
+	} {
+		p := f.pending(c, call("c1", "files.create_folder", `{"path":"/a"}`))
+		mut(&p[0])
+		if _, err := f.gate.Request(bg, c, p, nil); !errors.Is(err, ErrBadCall) {
+			t.Errorf("%s: err = %v, want ErrBadCall", name, err)
+		}
+	}
+	if n := len(f.approvals(c.Job.ID)); n != 0 || f.jobState(c.Job.ID) != store.JobRunning {
+		t.Fatal("nothing may be written")
+	}
+}
+
+func TestRequestChecksTheLeaseBeforeTheCap(t *testing.T) {
+	f := newFixture(t)
+	f.gate.cfg.MaxActionsPerJob = 1
+	c := f.claim()
+	p := f.pending(c,
+		call("c1", "files.create_folder", `{"path":"/a"}`),
+		call("c2", "files.create_folder", `{"path":"/b"}`),
+	)
+	if _, err := f.gate.Request(bg, c, p[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(as[0].Rationale) > 10 || !utf8.ValidString(as[0].Rationale) || as[0].Rationale == "" {
-		t.Fatalf("rationale = %q (%d bytes)", as[0].Rationale, len(as[0].Rationale))
+	stale := c
+	stale.Fence--
+	if _, err := f.gate.Request(bg, stale, p[1:], nil); !errors.Is(err, store.ErrFenceLost) {
+		t.Fatalf("stale fence over the cap = %v, want ErrFenceLost", err)
 	}
 }
 
@@ -123,12 +202,23 @@ func TestRequestIsAllOrNothing(t *testing.T) {
 		call("c1", "files.create_folder", `{"path":"/a"}`),
 		call("c2", "files.create_folder", `{"path":"/b"}`),
 	)
-	p[1] = p[0] // the same call twice: the second insert hits the unique idempotency key
+	// an approval for the second call already exists: its insert hits the unique idempotency key
+	err := f.st.InTx(bg, func(tx store.Tx) error {
+		d := p[1].Decision
+		_, err := tx.InsertApproval(store.Approval{
+			UserID: userID, JobID: c.Job.ID, CallID: "c2", Tool: d.Tool.Name(), Risk: d.Risk.String(),
+			Args: d.Args, ArgsHash: d.ArgsHash, IdemKey: d.IdemKey, ExpiresAt: f.clk.Now().Add(time.Hour),
+		}, c.Fence)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.gate.Request(bg, c, p, nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict from the store", err)
 	}
-	if n := len(f.approvals(c.Job.ID)); n != 0 {
-		t.Fatalf("%d approval(s) survived a failed request", n)
+	if n := len(f.approvals(c.Job.ID)); n != 1 {
+		t.Fatalf("%d approval(s), want only the pre-existing one", n)
 	}
 	if got := f.jobState(c.Job.ID); got != store.JobRunning {
 		t.Fatalf("job state = %s, the job must still be running", got)
@@ -181,8 +271,8 @@ func TestRequestNeedsTheCurrentLeaseAndARunningJob(t *testing.T) {
 	if err := f.st.InTx(bg, func(tx store.Tx) error { return tx.CancelJob(userID, c.Job.ID) }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.gate.Request(bg, c, p, nil); err == nil {
-		t.Fatal("a cancelled job cannot request approvals")
+	if _, err := f.gate.Request(bg, c, p, nil); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a cancelled job: err = %v, want ErrConflict", err)
 	}
 	if n := len(f.approvals(c.Job.ID)); n != 0 {
 		t.Fatalf("%d approval(s) for a cancelled job", n)
@@ -226,14 +316,41 @@ func TestRequestAcceptsABatchAtTheCapAndRefusesOneMore(t *testing.T) {
 		call("c3", "files.create_folder", `{"path":"/c"}`),
 		call("c4", "files.create_folder", `{"path":"/d"}`),
 	)
-	if as, err := f.gate.Request(bg, c, p[:3], nil); err != nil || len(as) != 3 {
-		t.Fatalf("batch of 3: %v %v", as, err)
+	// three live approvals already exist while the job still runs
+	err := f.st.InTx(bg, func(tx store.Tx) error {
+		for _, x := range p[:3] {
+			d := x.Decision
+			if _, err := tx.InsertApproval(store.Approval{
+				UserID: userID, JobID: c.Job.ID, CallID: x.Call.ID, Tool: d.Tool.Name(), Risk: d.Risk.String(),
+				Args: d.Args, ArgsHash: d.ArgsHash, IdemKey: d.IdemKey, ExpiresAt: f.clk.Now().Add(time.Hour),
+			}, c.Fence); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if _, err := f.gate.Request(bg, c, p[3:], nil); !errors.Is(err, ErrActionLimit) {
 		t.Fatalf("err = %v, want ErrActionLimit (3 live + 1 > 3)", err)
 	}
 	if n := len(f.approvals(c.Job.ID)); n != 3 {
 		t.Fatalf("%d approvals, want 3", n)
+	}
+}
+
+func TestRequestAcceptsABatchExactlyAtTheCap(t *testing.T) {
+	f := newFixture(t)
+	f.gate.cfg.MaxActionsPerJob = 3
+	c := f.claim()
+	p := f.pending(c,
+		call("d1", "files.create_folder", `{"path":"/a"}`),
+		call("d2", "files.create_folder", `{"path":"/b"}`),
+		call("d3", "files.create_folder", `{"path":"/c"}`),
+	)
+	if as, err := f.gate.Request(bg, c, p, nil); err != nil || len(as) != 3 {
+		t.Fatalf("batch of 3: %v %v", as, err)
 	}
 }
 

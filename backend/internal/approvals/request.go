@@ -35,14 +35,17 @@ func (g *Gate) event(tx store.Tx, ev audit.Event) error {
 
 // cutRationale shortens s to at most max bytes without splitting a rune.
 func cutRationale(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	if len(s) <= max {
 		return s
 	}
-	s = s[:max]
-	for len(s) > 0 && !utf8.ValidString(s) {
-		s = s[:len(s)-1]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s
+	return s[:cut]
 }
 
 // Request records the approvals for the calls and puts the job to sleep, in
@@ -54,10 +57,21 @@ func (g *Gate) Request(ctx context.Context, claim store.Claim, pending []Pending
 	if len(pending) == 0 {
 		return nil, fmt.Errorf("%w: nothing to request", ErrBadCall)
 	}
+	seen := make(map[string]bool, len(pending))
 	for _, p := range pending {
 		d := p.Decision
 		if d.Kind != KindApprove || d.Tool == nil {
 			return nil, fmt.Errorf("%w: only calls that need an approval can be requested", ErrBadCall)
+		}
+		if seen[p.Call.ID] {
+			return nil, fmt.Errorf("%w: the call id %q appears twice in one request", ErrBadCall, p.Call.ID)
+		}
+		seen[p.Call.ID] = true
+		if p.Call.Tool != d.Tool.Name() {
+			return nil, fmt.Errorf("%w: the decision is for another tool", ErrBadCall)
+		}
+		if h, err := tools.ArgsHash(d.Args); err != nil || h != d.ArgsHash {
+			return nil, fmt.Errorf("%w: the arguments no longer match their hash", ErrBadCall)
 		}
 		if d.IdemKey != tools.IdemKey(claim.Job.ID, p.Call.ID, d.ArgsHash) {
 			return nil, fmt.Errorf("%w: the decision was not made for this job and call", ErrBadCall)
@@ -68,6 +82,9 @@ func (g *Gate) Request(ctx context.Context, claim store.Claim, pending []Pending
 	var out []store.Approval
 	err := g.st.InTx(ctx, func(tx store.Tx) error {
 		out = out[:0]
+		if err := tx.AssertLease(userID, jobID, claim.Fence); err != nil {
+			return err
+		}
 		live, err := liveActions(tx, userID, jobID)
 		if err != nil {
 			return err
