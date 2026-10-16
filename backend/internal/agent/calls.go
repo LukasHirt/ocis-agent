@@ -166,6 +166,17 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 			return true, r.backoff(ctx, claim)
 		}
 		out, err := r.d.Executor.Run(ctx, claim, env, a.ID)
+		if err == nil && a.State == store.ApprovalExpired && a.DecidedBy == "" {
+			// expired while pending (ExpireAndResume writes no step); an
+			// approval that expired after the decision got its step from
+			// the executor
+			text, _ := RenderResult(a.Tool, out.State.String(), tools.Result{}, out.Reason)
+			step := store.JobStep{
+				JobID: claim.Job.ID, Kind: "tool", Tool: a.Tool, CallID: c.ID, Status: out.State.String(),
+				Summary: out.Reason, ApprovalID: a.ID,
+			}
+			return r.record(ctx, claim, cp, c.ID, text, &step, nil)
+		}
 		if !errors.Is(err, approvals.ErrNotApproved) {
 			return r.applyOutcome(ctx, claim, env, cp, a.Tool, c.ID, out, err, false)
 		}

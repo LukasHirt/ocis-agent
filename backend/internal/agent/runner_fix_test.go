@@ -241,3 +241,53 @@ func TestACrashAfterTheLimitTurnDoesNotRunItsCalls(t *testing.T) {
 		t.Error("no tool result and no model call past the limit")
 	}
 }
+
+// expiredSteps counts the expired tool steps of call c0.
+func expiredSteps(f *fixture, approvalID string) int {
+	n := 0
+	for _, s := range f.steps() {
+		if s.Kind == "tool" && s.CallID == "c0" && s.Status == "expired" && s.ApprovalID == approvalID {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAnExpiredApprovalGetsExactlyOneStep(t *testing.T) {
+	t.Run("expired while pending", func(t *testing.T) {
+		f := newFixture(t)
+		f.provider = llmtest.New(llmtest.Calls(1, 1, tc("w", "files.write_new", `{"path":"/a.txt","content":"hi"}`)), llmtest.Say("ok", 1, 1))
+		f.enqueue("g")
+		f.runOnce()
+		a := f.approvals()[0]
+		f.clk.Advance(169 * time.Hour)
+		if _, err := f.gate.ExpireAndResume(bg); err != nil {
+			t.Fatal(err)
+		}
+		f.runOnce()
+		if n := expiredSteps(f, a.ID); n != 1 {
+			t.Errorf("%d expired steps, want 1: %+v", n, f.steps())
+		}
+	})
+	t.Run("approved but overdue", func(t *testing.T) {
+		f := newFixture(t)
+		f.provider = llmtest.New(llmtest.Calls(1, 1, tc("w", "files.write_new", `{"path":"/a.txt","content":"hi"}`)), llmtest.Say("ok", 1, 1))
+		f.enqueue("g")
+		f.runOnce()
+		a := f.approvals()[0]
+		f.decide(a, store.ApprovalApproved)
+		f.clk.Advance(169 * time.Hour)
+		// the executor expires it and records the step; a crash before the
+		// tool message is saved must not add a second one
+		f.faults.failAt("SaveCheckpoint", 1)
+		c := f.claim()
+		if err := f.runner().Run(bg, c); !errors.Is(err, errInjected) {
+			t.Fatalf("err = %v", err)
+		}
+		f.requeueNow(c)
+		f.runOnce()
+		if n := expiredSteps(f, a.ID); n != 1 {
+			t.Errorf("%d expired steps, want 1: %+v", n, f.steps())
+		}
+	})
+}
