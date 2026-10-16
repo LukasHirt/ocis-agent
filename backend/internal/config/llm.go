@@ -50,7 +50,7 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	}
 
 	u, err := url.Parse(baseRaw)
-	if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil || u.Host == "" || u.Hostname() == "" || strings.Contains(u.Host, "%") || (u.Scheme != "http" && u.Scheme != "https") {
 		return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL must be an http(s) URL with a host")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {

@@ -146,6 +146,7 @@ func TestLLMRefusals(t *testing.T) {
 		{"key file alone", map[string]string{"AGENT_LLM_API_KEY_FILE": "/k"}, "AGENT_LLM_BASE_URL"},
 		{"allowed hosts alone", map[string]string{"AGENT_LLM_ALLOWED_HOSTS": "a.example.com"}, "AGENT_LLM_BASE_URL"},
 		{"not a url", with(map[string]string{"AGENT_LLM_BASE_URL": "api.example.com"}), "AGENT_LLM_BASE_URL"},
+		{"ipv6 zone id", with(map[string]string{"AGENT_LLM_BASE_URL": "https://[fe80::1%25en0]:443/v1"}), "AGENT_LLM_BASE_URL"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
