@@ -202,7 +202,7 @@ func (w *Worker) settle(ctx, jobCtx context.Context, claim store.Claim, panicked
 	case ctx.Err() != nil:
 		rctx, done := context.WithTimeout(context.WithoutCancel(ctx), shutdownRequeueTimeout)
 		defer done()
-		if err := w.r.requeue(rctx, claim, 0); err != nil {
+		if err := w.r.requeue(rctx, claim, w.r.cfg.ShutdownRequeueDelay); err != nil {
 			w.log.Warn("agent worker: shutdown requeue failed", "worker", w.id, "job_id", claim.Job.ID, "outcome", "release_failed")
 		}
 		return outcomeShutdown

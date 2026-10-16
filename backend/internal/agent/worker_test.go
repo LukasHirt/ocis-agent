@@ -402,7 +402,9 @@ func TestShutdownRequeuesTheJob(t *testing.T) {
 	waitFor(t, b.entered, "the model call")
 	stop()
 	f.expect(id, "shutdown")
-	assertRequeued(t, f.fixture, 0)
+	// not before the approvals' retry settle window: an approved write cut
+	// off by the shutdown is reconciled, not reported unknown
+	assertRequeued(t, f.fixture, 2*time.Minute)
 	j := f.job()
 	if j.Runs != 1 || j.Attempt != 0 {
 		t.Errorf("runs %d attempt %d, want 1 and a refunded attempt", j.Runs, j.Attempt)
@@ -410,6 +412,19 @@ func TestShutdownRequeuesTheJob(t *testing.T) {
 	if len(f.steps()) != 0 {
 		t.Error("no step for a shutdown")
 	}
+}
+
+func TestTheShutdownRequeueDelayIsConfigurable(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.cfg.ShutdownRequeueDelay = 3 * time.Minute
+	b := newBlocking()
+	f.provider = b
+	id := f.enqueue("g")
+	stop := f.start(f.worker("w1"))
+	waitFor(t, b.entered, "the model call")
+	stop()
+	f.expect(id, "shutdown")
+	assertRequeued(t, f.fixture, 3*time.Minute)
 }
 
 func TestAPanicInTheRunnerRequeuesTheJob(t *testing.T) {

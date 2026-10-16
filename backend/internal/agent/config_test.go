@@ -27,6 +27,7 @@ func TestValidateRejectsNegative(t *testing.T) {
 	}
 	for _, c := range []Config{
 		{MaxSteps: -1}, {MaxRuns: -1}, {MaxTokens: -1}, {RequeueDelay: -1}, {PausedDelay: -1},
+		{ShutdownRequeueDelay: -1},
 	} {
 		if err := c.validate(); err == nil {
 			t.Errorf("%+v: want error", c)
@@ -34,5 +35,14 @@ func TestValidateRejectsNegative(t *testing.T) {
 	}
 	if err := (Config{}).validate(); err != nil {
 		t.Errorf("zero config must validate: %v", err)
+	}
+}
+
+func TestTheShutdownRequeueDelayDefaultsToTheRetrySettleWindow(t *testing.T) {
+	if d := DefaultConfig().ShutdownRequeueDelay; d != 2*time.Minute {
+		t.Fatalf("default = %v, want 2m (approvals.Config.RetrySettle)", d)
+	}
+	if d := (Config{}).withDefaults().ShutdownRequeueDelay; d != 2*time.Minute {
+		t.Fatalf("zero becomes %v", d)
 	}
 }
