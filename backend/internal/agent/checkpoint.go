@@ -128,11 +128,15 @@ func (c *Checkpoint) Note(key string) int {
 }
 
 // NoteCall counts key for the call callID once: a call id already counted
-// returns the current count of key without counting again. At most
-// MaxSeenKeys call ids are remembered.
+// returns the current count of key without counting again (MaxSeenKeys if
+// key was not stored because Seen was full). At most MaxSeenKeys call ids
+// are remembered.
 func (c *Checkpoint) NoteCall(callID, key string) int {
 	if c.Counted[callID] {
-		return c.Seen[key]
+		if n, ok := c.Seen[key]; ok {
+			return n
+		}
+		return MaxSeenKeys // Seen was full when the call was counted
 	}
 	if c.Counted == nil {
 		c.Counted = map[string]bool{}

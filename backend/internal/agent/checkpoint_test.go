@@ -194,3 +194,16 @@ func TestNoteCallIsBounded(t *testing.T) {
 		t.Fatalf("%d counted ids", len(cp.Counted))
 	}
 }
+
+func TestNoteCallStaysSaturatedForACallCountedWhileSeenWasFull(t *testing.T) {
+	cp, _ := ParseCheckpoint(nil)
+	for i := 0; i < MaxSeenKeys; i++ {
+		cp.Note(fmt.Sprintf("k%d", i))
+	}
+	if n := cp.NoteCall("c1", "new"); n != MaxSeenKeys {
+		t.Fatalf("first NoteCall = %d, want %d", n, MaxSeenKeys)
+	}
+	if n := cp.NoteCall("c1", "new"); n != MaxSeenKeys {
+		t.Errorf("NoteCall again = %d, want the saturated count %d", n, MaxSeenKeys)
+	}
+}
