@@ -189,7 +189,9 @@ type Tx interface {
 	GetIdempotent(userID, key string) (IdemRecord, error)
 	// ListStartedIdempotent returns started records with started_at <=
 	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
-	// means 100; the maximum is 1000.
+	// means 100; the maximum is 1000. No production code calls it (the
+	// scheduler reconciles via ListStartedIdempotentOfEndedJobs); it serves
+	// diagnostics and tests.
 	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
 	// ListStartedIdempotentOfEndedJobs returns the same records as
 	// ListStartedIdempotent, but only those whose job (the key's prefix before

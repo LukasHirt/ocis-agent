@@ -80,6 +80,7 @@ func runIdempotencyOfEndedJobs(t *testing.T, f Factory) {
 			{"u2", failed.ID + ":c1:h"},
 			{"u1", "ghost-job:c1:h"},       // the job no longer exists
 			{"u2", succeeded.ID + ":c2:h"}, // another user's job id: not this user's job
+			{"u2", running.ID + ":c4:h"},   // another user's ACTIVE job: not this user's job either
 			{"u1", succeeded.ID + ":c1:h"}, // finished below
 			{"u1", succeeded.ID + ":c3:h"}, // started after the cut-off
 		}
@@ -96,7 +97,7 @@ func runIdempotencyOfEndedJobs(t *testing.T, f Factory) {
 		cut := clk.Now().Add(-30 * time.Minute)
 
 		got := idemKeys(listEndedIdem(t, st, cut, 0))
-		want := []string{cancelled.ID + ":c1:h", failed.ID + ":c1:h", "ghost-job:c1:h", succeeded.ID + ":c2:h"}
+		want := []string{cancelled.ID + ":c1:h", failed.ID + ":c1:h", "ghost-job:c1:h", succeeded.ID + ":c2:h", running.ID + ":c4:h"}
 		if fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Fatalf("keys = %v, want %v", got, want)
 		}
@@ -104,7 +105,7 @@ func runIdempotencyOfEndedJobs(t *testing.T, f Factory) {
 		if len(recs) != 1 || recs[0].Key != want[0] || recs[0].UserID != "u1" || recs[0].State != store.IdemStarted || recs[0].Tool != "files.delete" {
 			t.Fatalf("limit 1 = %+v", recs)
 		}
-		if all := idemKeys(listEndedIdem(t, st, clk.Now(), 0)); len(all) != 5 || all[4] != succeeded.ID+":c3:h" {
+		if all := idemKeys(listEndedIdem(t, st, clk.Now(), 0)); len(all) != 6 || all[5] != succeeded.ID+":c3:h" {
 			t.Fatalf("with a later cut-off = %v", all)
 		}
 	})
