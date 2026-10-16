@@ -91,11 +91,17 @@ type Tx interface {
 	// AppendStep adds a step to a running job's timeline and assigns its N.
 	// Fenced like SaveCheckpoint.
 	AppendStep(step JobStep, fence int64) (JobStep, error)
+	// SumJobTokens returns the input and output tokens of all steps (llm and
+	// tool) of all of the user's jobs, finished ones included, whose step
+	// created_at is at or after since (zero means from the beginning). An
+	// unknown user gives 0, 0, nil.
+	SumJobTokens(userID string, since time.Time) (in, out int64, err error)
 	// ListSteps returns the job's steps in order (empty for another user's job).
 	ListSteps(userID, jobID string) ([]JobStep, error)
 
 	// ClaimNextJob claims the oldest runnable job whose user has no active
-	// lease. The bool is false when nothing is runnable.
+	// lease and is not paused (a job already running is not touched). The
+	// bool is false when nothing is runnable.
 	ClaimNextJob(worker string, ttl time.Duration) (Claim, bool, error)
 	// RenewLease extends the lease. ErrFenceLost if it is no longer ours.
 	RenewLease(c Claim, ttl time.Duration) (Claim, error)

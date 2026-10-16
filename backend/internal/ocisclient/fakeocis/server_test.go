@@ -366,6 +366,53 @@ func TestFaultInjection(t *testing.T) {
 	}
 }
 
+// lostPut sends a PUT whose response the fake withholds and cancels it once
+// the fake signals that the request took effect.
+func lostPut(t *testing.T, s *Server, p, body string, lost <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-lost:
+		case <-time.After(5 * time.Second): // a missing signal fails below
+		}
+		cancel()
+	}()
+	req, _ := http.NewRequestWithContext(ctx, "PUT", s.URL+p, strings.NewReader(body))
+	req.SetBasicAuth("einstein", pass)
+	start := time.Now()
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("a lost response must not reach the client")
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatal("the fake did not signal the lost response")
+	}
+}
+
+func TestALostResponseStillAppliesTheRequest(t *testing.T) {
+	s := newFake(t)
+	lostPut(t, s, dav+"/a.md", "x", s.LoseResponse("PUT", dav+"/a.md", 1))
+	if data, _, ok := s.File(drv, "/a.md"); !ok || string(data) != "x" {
+		t.Fatalf("the PUT must land: %q %v", data, ok)
+	}
+	if st := status(t, s, "PUT", dav+"/a.md", einstein, nil, "y"); st != 204 {
+		t.Fatalf("after the fault is used up = %d", st)
+	}
+	// a request that fails (missing parent) loses its response too and
+	// changes nothing
+	lostPut(t, s, dav+"/missing/b.md", "x", s.LoseResponse("PUT", dav+"/missing/b.md", 1))
+	if _, _, ok := s.File(drv, "/missing/b.md"); ok {
+		t.Fatal("a failed PUT must not create the file")
+	}
+	if st := status(t, s, "PROPFIND", dav+"/missing", einstein, map[string]string{"Depth": "0"}, ""); st != 404 {
+		t.Fatalf("a failed PUT must not create the parent: PROPFIND = %d", st)
+	}
+	if data, _, _ := s.File(drv, "/a.md"); string(data) != "y" {
+		t.Fatalf("other files must be unchanged: %q", data)
+	}
+}
+
 func TestRequestsAreRecordedWithoutQueries(t *testing.T) {
 	s := newFake(t)
 	call(t, s, "DELETE", "/auth-app/tokens?token=abc", einstein, map[string]string{"Last-Event-ID": "7"}, "")

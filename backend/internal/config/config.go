@@ -22,6 +22,7 @@ type Config struct {
 	Insecure      bool
 	MasterKey     []byte
 	LLM           LLMConfig
+	Agent         AgentConfig
 }
 
 // Load reads and validates the configuration. getenv is os.Getenv in
@@ -75,6 +76,10 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.MasterKey = key
 
 	if cfg.LLM, err = loadLLM(getenv); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.Agent, err = loadAgent(getenv); err != nil {
 		return Config{}, err
 	}
 
