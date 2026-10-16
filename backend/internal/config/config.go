@@ -21,6 +21,7 @@ type Config struct {
 	SQLitePath    string
 	Insecure      bool
 	MasterKey     []byte
+	LLM           LLMConfig
 }
 
 // Load reads and validates the configuration. getenv is os.Getenv in
@@ -72,6 +73,10 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("AGENT_MASTER_KEY must decode to %d bytes, got %d", masterKeyLen, len(key))
 	}
 	cfg.MasterKey = key
+
+	if cfg.LLM, err = loadLLM(getenv); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
 }

@@ -90,14 +90,14 @@ func (t *tx) DeleteUser(id string) error {
 func (t *tx) GetPolicy(userID string) (store.Policy, error) {
 	var p store.Policy
 	var paused, auto, proactive int
-	var watch string
+	var watch, models string
 	var sweepS, updated int64
 	err := t.q.QueryRowContext(t.ctx,
 		`SELECT user_id, paused, pause_reason, auto_approve_write, proactive_enabled, watch,
-		        sweep_interval_s, quiet_hours, daily_tokens, dormancy_days, updated_at
+		        sweep_interval_s, quiet_hours, daily_tokens, dormancy_days, models, updated_at
 		 FROM policies WHERE user_id = ?`, userID).
 		Scan(&p.UserID, &paused, &p.PauseReason, &auto, &proactive, &watch,
-			&sweepS, &p.QuietHours, &p.DailyTokens, &p.DormancyDays, &updated)
+			&sweepS, &p.QuietHours, &p.DailyTokens, &p.DormancyDays, &models, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.Policy{}, store.ErrNotFound
 	}
@@ -110,6 +110,9 @@ func (t *tx) GetPolicy(userID string) (store.Policy, error) {
 	p.Watch = []string{}
 	if err := json.Unmarshal([]byte(watch), &p.Watch); err != nil || p.Watch == nil {
 		p.Watch = []string{}
+	}
+	if err := json.Unmarshal([]byte(models), &p.Models); err != nil || p.Models == nil {
+		p.Models = map[string]string{}
 	}
 	return p, nil
 }
@@ -127,12 +130,20 @@ func (t *tx) PutPolicy(p store.Policy) error {
 	if err != nil {
 		return err
 	}
+	models := p.Models
+	if models == nil {
+		models = map[string]string{}
+	}
+	rawModels, err := json.Marshal(models)
+	if err != nil {
+		return err
+	}
 	res, err := t.q.ExecContext(t.ctx,
 		`UPDATE policies SET paused = ?, pause_reason = ?, auto_approve_write = ?, proactive_enabled = ?,
-		        watch = ?, sweep_interval_s = ?, quiet_hours = ?, daily_tokens = ?, dormancy_days = ?, updated_at = ?
+		        watch = ?, sweep_interval_s = ?, quiet_hours = ?, daily_tokens = ?, dormancy_days = ?, models = ?, updated_at = ?
 		 WHERE user_id = ?`,
 		boolInt(p.Paused), p.PauseReason, boolInt(p.AutoApproveWrite), boolInt(p.ProactiveEnabled),
-		string(raw), int64(p.SweepInterval/time.Second), p.QuietHours, p.DailyTokens, p.DormancyDays, ms(t.now()), p.UserID)
+		string(raw), int64(p.SweepInterval/time.Second), p.QuietHours, p.DailyTokens, p.DormancyDays, string(rawModels), ms(t.now()), p.UserID)
 	if err != nil {
 		return fmt.Errorf("sqlite: put policy: %w", err)
 	}
