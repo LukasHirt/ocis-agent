@@ -40,6 +40,10 @@ type Config struct {
 	// "retry" is honoured; before that the previous holder's request may
 	// still be in flight and the outcome is unknown (default 2 minutes).
 	RetrySettle time.Duration
+	// OrphanGiveUp is the age after which ReconcileOrphans settles a record
+	// it still cannot check (failing environment, 401 from the tool) as
+	// unknown instead of leaving it open (default 24h).
+	OrphanGiveUp time.Duration
 	// Now is the clock (default time.Now).
 	Now func() time.Time
 }
@@ -59,6 +63,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RetrySettle <= 0 {
 		c.RetrySettle = 2 * time.Minute
+	}
+	if c.OrphanGiveUp <= 0 {
+		c.OrphanGiveUp = 24 * time.Hour
 	}
 	if c.Now == nil {
 		c.Now = time.Now

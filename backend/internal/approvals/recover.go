@@ -8,31 +8,53 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
+	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
 // EnvFunc builds the tool environment for a user (credentials, clients). The
-// scheduler supplies it; errors leave the user's records for the next pass.
+// scheduler supplies it. An error matching auth.ErrCredentialInvalid or
+// store.ErrNotFound settles the user's records as unknown; any other error
+// leaves them for the next pass (until Config.OrphanGiveUp).
 type EnvFunc func(ctx context.Context, userID string) (tools.Env, error)
 
 // ReconcileSummary counts what ReconcileOrphans did.
 type ReconcileSummary struct {
 	Resolved int
-	Skipped  int
-	Errors   []error
+	// Skipped counts listed records whose job was still active. The listing
+	// leaves those out, so it is 0 in practice (a defence only).
+	Skipped int
+	Errors  []error
 }
 
-const notRetried = "the job ended before the action could be retried; it was not run"
+const (
+	notRetried          = "the job ended before the action could be retried; it was not run"
+	reasonNoCredentials = "the job ended before the outcome was recorded, and it could not be verified because the user's credentials were unavailable; please verify the action"
+	reasonGaveUp        = "the job ended before the outcome was recorded, and it could not be verified in time; please verify the action"
+)
+
+// noCredentials reports an environment error that will not heal by
+// retrying: the user has no usable app credential or no longer exists.
+func noCredentials(err error) bool {
+	return errors.Is(err, auth.ErrCredentialInvalid) || errors.Is(err, store.ErrNotFound)
+}
+
+// givenUp reports whether a record is older than Config.OrphanGiveUp: then
+// a check that keeps failing settles it as unknown instead of leaving it open.
+func (x *Executor) givenUp(rec store.IdemRecord) bool {
+	return x.cfg.Now().Sub(rec.StartedAt) >= x.cfg.OrphanGiveUp
+}
 
 // ReconcileOrphans resolves calls whose outcome was never recorded (an
 // idempotency record still started) and whose job has ENDED (or no longer
 // exists). While a job is still active it reconciles its own records when it
 // runs again, so those are not listed at all (they cannot fill limit and
-// starve the records of ended jobs behind them; Skipped counts only a record
-// whose job turned out active anyway). An ended job is never resumed: a
-// "retry" verdict is recorded as a failure, not executed.
+// starve the records of ended jobs behind them). An ended job is never
+// resumed: a "retry" verdict is recorded as a failure, not executed. A user
+// without usable credentials, or a check still failing after OrphanGiveUp,
+// settles the record as unknown, so no record stays open forever.
 //
 // olderThan is clamped to Now()-RetrySettle: a call that started within the
 // settle window may still be in flight (cancelling a job does not stop its
@@ -106,24 +128,13 @@ func (x *Executor) reconcileOne(ctx context.Context, envFor EnvFunc, rec store.I
 		meta = orphanMeta{tool: approval.Tool, argsHash: approval.ArgsHash, risk: approval.Risk}
 		if tool, ok := x.reg.Get(approval.Tool); ok {
 			if rc, ok := tool.(tools.Reconciler); ok {
-				env, err := envFor(ctx, rec.UserID)
+				checked, cred, err := x.checkOrphan(ctx, envFor, rc, rec, approval)
 				if err != nil {
-					return false, fmt.Errorf("approvals: environment for user: %w", err)
+					return false, err
 				}
-				meta.cred = env.Creds.Kind()
-				r, err := rc.Reconcile(ctx, env, approval.Args, tools.ExecInfo{IdemKey: approval.IdemKey, TargetETag: approval.TargetETag})
-				if err != nil && errors.Is(err, ocisclient.ErrUnauthorized) {
-					return false, fmt.Errorf("approvals: reconcile: %w", err)
-				}
-				if err == nil {
-					switch r.State {
-					case tools.ReconDone:
-						out = Outcome{State: OutcomeDone, Result: r.Result, Reconciled: true}
-					case tools.ReconFailed:
-						out = Outcome{State: OutcomeFailed, Reason: cutRationale(r.Reason, maxReason), Reconciled: true}
-					case tools.ReconRetry:
-						out = Outcome{State: OutcomeFailed, Reason: notRetried, Reconciled: true}
-					}
+				meta.cred = cred
+				if checked != nil {
+					out = *checked
 				}
 			}
 		}
@@ -132,6 +143,45 @@ func (x *Executor) reconcileOne(ctx context.Context, envFor EnvFunc, rec store.I
 		return false, err
 	}
 	return true, nil
+}
+
+// checkOrphan asks the tool what became of the call. It returns the outcome
+// to record (nil: the default unknown) and the credential kind used, or an
+// error to leave the record open for the next pass. A user without usable
+// credentials, or a check that still fails once the record is older than
+// OrphanGiveUp, yields unknown with a fixed reason; nothing is executed.
+func (x *Executor) checkOrphan(ctx context.Context, envFor EnvFunc, rc tools.Reconciler, rec store.IdemRecord, a *store.Approval) (*Outcome, string, error) {
+	unknown := func(reason string) *Outcome {
+		return &Outcome{State: OutcomeUnknown, Reason: reason, Reconciled: true}
+	}
+	env, err := envFor(ctx, rec.UserID)
+	switch {
+	case err != nil && noCredentials(err):
+		return unknown(reasonNoCredentials), "", nil
+	case err != nil && x.givenUp(rec):
+		return unknown(reasonGaveUp), "", nil
+	case err != nil:
+		return nil, "", fmt.Errorf("approvals: environment for user: %w", err)
+	}
+	cred := env.Creds.Kind()
+	r, err := rc.Reconcile(ctx, env, a.Args, tools.ExecInfo{IdemKey: a.IdemKey, TargetETag: a.TargetETag})
+	switch {
+	case err != nil && errors.Is(err, ocisclient.ErrUnauthorized) && x.givenUp(rec):
+		return unknown(reasonGaveUp), cred, nil
+	case err != nil && errors.Is(err, ocisclient.ErrUnauthorized):
+		return nil, cred, fmt.Errorf("approvals: reconcile: %w", err)
+	case err != nil:
+		return nil, cred, nil
+	}
+	switch r.State {
+	case tools.ReconDone:
+		return &Outcome{State: OutcomeDone, Result: r.Result, Reconciled: true}, cred, nil
+	case tools.ReconFailed:
+		return &Outcome{State: OutcomeFailed, Reason: cutRationale(r.Reason, maxReason), Reconciled: true}, cred, nil
+	case tools.ReconRetry:
+		return &Outcome{State: OutcomeFailed, Reason: notRetried, Reconciled: true}, cred, nil
+	}
+	return nil, cred, nil
 }
 
 // finishOrphan records the outcome without a lease and without a step: the
