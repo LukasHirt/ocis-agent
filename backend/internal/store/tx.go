@@ -154,6 +154,15 @@ type Tx interface {
 	// ResumeJobIfSettled for every returned ref: the refs are never returned
 	// again, so a split would strand the job in waiting_approval.
 	ExpireApprovals() ([]ApprovalRef, error)
+	// ExpireEndedJobApprovals moves the pending and approved approvals of
+	// jobs that have ended (succeeded, failed, cancelled) to expired, oldest
+	// first (requested_at, then id), at most limit rows (limit <= 0 means
+	// 100, the maximum is 1000), and returns what it changed. An approved
+	// row keeps its decided_by and decided_at. It never touches executing
+	// approvals (their outcome is open and is reconciled instead), settled
+	// ones, or the approvals of a job that has not ended. Run it in the same
+	// transaction as the approval_expired audit event for every returned ref.
+	ExpireEndedJobApprovals(limit int) ([]ApprovalRef, error)
 	// ResumeJobIfSettled moves a job from waiting_approval back to queued
 	// (claimable now) when none of its approvals is still pending. It returns
 	// false if the job is not waiting or something is still pending. Call it
