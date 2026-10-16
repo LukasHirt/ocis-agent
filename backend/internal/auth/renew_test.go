@@ -123,6 +123,18 @@ func TestRenewDueSelectsOnlyTokensPastHalfTheirLifetime(t *testing.T) {
 	}
 }
 
+func TestDueForRenewalListsWhatRenewDueWouldRenew(t *testing.T) {
+	e := enrolled(t)
+	e.fake.Advance(30 * time.Hour)
+	if ids, err := e.svc.DueForRenewal(bg, 100); err != nil || len(ids) != 0 {
+		t.Fatalf("at 30h of 72h nothing is due: %v %v", ids, err)
+	}
+	e.fake.Advance(10 * time.Hour)
+	if ids, err := e.svc.DueForRenewal(bg, 100); err != nil || len(ids) != 1 || ids[0] != userID {
+		t.Fatalf("at 40h the token is due: %v %v", ids, err)
+	}
+}
+
 func TestRenewKeepsRenewingWhileThePolicyIsPaused(t *testing.T) {
 	e := enrolled(t)
 	for _, reason := range []string{store.PauseUser, store.PauseDormant} {

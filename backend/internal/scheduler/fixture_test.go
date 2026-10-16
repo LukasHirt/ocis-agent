@@ -52,13 +52,15 @@ type fakes struct {
 	limits    map[string]int
 	maxAtt    int
 	recon     approvals.ReconcileSummary
-	renew     []auth.RenewOutcome
+	renew     []auth.RenewOutcome // users due for renewal and their errors
+	renewed   []string
+	hung      map[string]bool
 	sweepRes  auth.SweepResult
 	onCall    func(task string)
 }
 
 func newFakes() *fakes {
-	return &fakes{calls: map[string]int{}, fail: map[string]error{}, panics: map[string]any{}, sweepErr: map[string]error{}, limits: map[string]int{}}
+	return &fakes{calls: map[string]int{}, fail: map[string]error{}, panics: map[string]any{}, sweepErr: map[string]error{}, limits: map[string]int{}, hung: map[string]bool{}}
 }
 
 func (f *fakes) enter(task string, limit int) error {
@@ -123,7 +125,7 @@ func (f *fakes) SettleEnded(_ context.Context, limit int) (int, error) {
 	return 1, nil
 }
 
-func (f *fakes) ReconcileOrphans(_ context.Context, _ approvals.EnvFunc, olderThan time.Time, limit int) (approvals.ReconcileSummary, error) {
+func (f *fakes) ReconcileOrphans(ctx context.Context, _ approvals.EnvFunc, olderThan time.Time, limit int) (approvals.ReconcileSummary, error) {
 	f.mu.Lock()
 	f.olderThan = olderThan
 	sum := f.recon
@@ -131,20 +133,42 @@ func (f *fakes) ReconcileOrphans(_ context.Context, _ approvals.EnvFunc, olderTh
 	if err := f.enter("reconcile", limit); err != nil {
 		return approvals.ReconcileSummary{}, err
 	}
+	if err := f.blockIfHung(ctx, "reconcile"); err != nil {
+		return approvals.ReconcileSummary{}, err
+	}
 	return sum, nil
 }
 
-func (f *fakes) RenewDue(_ context.Context, limit int) ([]auth.RenewOutcome, error) {
+func (f *fakes) DueForRenewal(_ context.Context, limit int) ([]string, error) {
 	f.mu.Lock()
-	out := f.renew
+	var ids []string
+	for _, o := range f.renew {
+		ids = append(ids, o.UserID)
+	}
 	f.mu.Unlock()
 	if err := f.enter("renew", limit); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return ids, nil
 }
 
-func (f *fakes) Sweep(_ context.Context, userID string) (auth.SweepResult, error) {
+func (f *fakes) Renew(ctx context.Context, userID string) (auth.Renewed, error) {
+	f.mu.Lock()
+	var err error
+	for _, o := range f.renew {
+		if o.UserID == userID {
+			err = o.Err
+		}
+	}
+	f.renewed = append(f.renewed, userID)
+	f.mu.Unlock()
+	if herr := f.blockIfHung(ctx, "renew.user"); herr != nil {
+		return auth.Renewed{}, herr
+	}
+	return auth.Renewed{}, err
+}
+
+func (f *fakes) Sweep(ctx context.Context, userID string) (auth.SweepResult, error) {
 	f.mu.Lock()
 	f.swept = append(f.swept, userID)
 	err, res := f.sweepErr[userID], f.sweepRes
@@ -152,7 +176,23 @@ func (f *fakes) Sweep(_ context.Context, userID string) (auth.SweepResult, error
 	if ferr := f.enter("sweep", 0); ferr != nil {
 		return auth.SweepResult{}, ferr
 	}
+	if herr := f.blockIfHung(ctx, "sweep"); herr != nil {
+		return auth.SweepResult{}, herr
+	}
 	return res, err
+}
+
+// blockIfHung blocks until ctx ends when task is marked hung, like a call to
+// an oCIS that never answers.
+func (f *fakes) blockIfHung(ctx context.Context, task string) error {
+	f.mu.Lock()
+	hung := f.hung[task]
+	f.mu.Unlock()
+	if !hung {
+		return nil
+	}
+	<-ctx.Done()
+	return fmt.Errorf("hung call: %w", ctx.Err())
 }
 
 func (f *fakes) PauseDormant(_ context.Context, limit int) (int, error) {

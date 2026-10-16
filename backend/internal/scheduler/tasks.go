@@ -69,30 +69,46 @@ func (s *Scheduler) settle(ctx context.Context, _ time.Time) (int, int, error) {
 // reconcile resolves the open calls of ended jobs that started before
 // now - CallTimeout - RetrySettle (no call can still be in flight). An
 // unauthorized error cannot be attributed to a user here; the owning token is
-// handled by the next renewal or sweep, so only its category is logged.
+// handled by the next renewal or sweep, so only its category is logged. The
+// executor stops when the run's deadline ends (its circuit break).
 func (s *Scheduler) reconcile(ctx context.Context, now time.Time) (int, int, error) {
 	cut := now.Add(-s.c.CallTimeout - s.c.RetrySettle)
 	sum, err := s.d.Executor.ReconcileOrphans(ctx, s.d.Env, cut, s.c.Batch)
-	if err != nil {
-		return 0, 0, err
-	}
 	s.itemLog(ctx, TaskReconcile, sum.Errors)
-	return sum.Resolved, len(sum.Errors), nil
+	return sum.Resolved, len(sum.Errors), err
 }
 
+// renew renews the due users one by one and stops at the first one that
+// finds oCIS unavailable (or the run's deadline): the others wait for the
+// next run instead of each waiting for their own timeout.
 func (s *Scheduler) renew(ctx context.Context, _ time.Time) (int, int, error) {
-	out, err := s.d.Auth.RenewDue(ctx, s.c.Batch)
+	ids, err := s.d.Auth.DueForRenewal(ctx, s.c.Batch)
 	if err != nil {
 		return 0, 0, err
 	}
+	renewed := 0
 	var errs []error
-	for _, o := range out {
-		if o.Err != nil {
-			errs = append(errs, o.Err)
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
 		}
+		if _, err := s.d.Auth.Renew(ctx, id); err != nil {
+			errs = append(errs, err)
+			if unavailable(ctx, err) {
+				break
+			}
+			continue
+		}
+		renewed++
 	}
 	s.itemLog(ctx, TaskRenew, errs)
-	return len(out) - len(errs), len(errs), nil
+	return renewed, len(errs), nil
+}
+
+// unavailable reports an item error that means oCIS (or the run's time) is
+// gone, so the rest of the batch would fail the same way.
+func unavailable(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || category(err) == CategoryUnavailable
 }
 
 func (s *Scheduler) dormant(ctx context.Context, _ time.Time) (int, int, error) {
@@ -100,9 +116,12 @@ func (s *Scheduler) dormant(ctx context.Context, _ time.Time) (int, int, error) 
 	return n, 0, err
 }
 
-// sweepState is the in-memory cursor of the token sweep: the last user id of
-// the previous page, when each user was last swept, and which users the
-// current pass has seen (to forget users that are gone when it wraps).
+// maxSweepPages bounds the user pages one sweep run reads.
+const maxSweepPages = 10
+
+// sweepState is the in-memory cursor of the token sweep: the last user id
+// visited, when each user was last swept, and which users the current pass
+// has seen (to forget users that are gone when it wraps).
 type sweepState struct {
 	after string
 	last  map[string]time.Time
@@ -113,59 +132,77 @@ func newSweepState() sweepState {
 	return sweepState{last: map[string]time.Time{}, seen: map[string]bool{}}
 }
 
-// sweepPage visits the next page of users in id order and sweeps each one
+// sweepRun visits users in id order from the cursor and sweeps each one
 // whose last sweep is at least SweepInterval ago; the others are skipped
-// without a call. After the last page the cursor wraps. A user without a
+// without a call. A run ends after Batch sweep calls, at the end of the user
+// list (the cursor wraps), after maxSweepPages pages, or at the first user
+// that finds oCIS unavailable or is cut off by the run's deadline: that user
+// is not counted as swept and the next run starts with it. A user without a
 // valid credential is skipped (enrolment or the renewal deals with it). The
-// sweep time is recorded before the call, so a failing user is retried after
-// the interval, not on every page.
-func (s *Scheduler) sweepPage(ctx context.Context, now time.Time) (int, int, error) {
-	var users []store.User
-	if err := s.d.Store.View(ctx, func(tx store.Tx) error {
-		var err error
-		users, err = tx.ListUsers(s.sweep.after, s.c.Batch)
-		return err
-	}); err != nil {
-		return 0, 0, fmt.Errorf("scheduler: list users: %w", err)
-	}
+// sweep time is recorded before the call, so a user that fails otherwise is
+// retried after the interval, not on every run.
+func (s *Scheduler) sweepRun(ctx context.Context, now time.Time) (int, int, error) {
 	st := &s.sweep
-	swept, skipped, noCred := 0, 0, 0
+	calls, swept, skipped, noCred := 0, 0, 0, 0
 	var errs []error
-	for i, u := range users {
-		if err := ctx.Err(); err != nil {
-			if i > 0 {
-				st.after = users[i-1].ID // resume after the last visited user
+	defer func() {
+		s.itemLog(ctx, TaskSweep, errs)
+		if calls > 0 {
+			s.d.Log.Debug("scheduler: sweep run", "task", TaskSweep, "swept", swept, "skipped", skipped, "no_credential", noCred)
+		}
+	}()
+	for page := 0; page < maxSweepPages; page++ {
+		var users []store.User
+		if err := s.d.Store.View(ctx, func(tx store.Tx) error {
+			var err error
+			users, err = tx.ListUsers(st.after, s.c.Batch)
+			return err
+		}); err != nil {
+			return swept, len(errs), fmt.Errorf("scheduler: list users: %w", err)
+		}
+		for _, u := range users {
+			if err := ctx.Err(); err != nil {
+				return swept, len(errs), err
 			}
-			s.itemLog(ctx, TaskSweep, errs)
-			return swept, len(errs), err
-		}
-		st.seen[u.ID] = true
-		if last, ok := st.last[u.ID]; ok && now.Sub(last) < s.c.SweepInterval {
-			skipped++
-			continue
-		}
-		st.last[u.ID] = now
-		res, err := s.d.Auth.Sweep(ctx, u.ID)
-		switch {
-		case errors.Is(err, auth.ErrCredentialInvalid):
-			noCred++
-		case err != nil:
-			errs = append(errs, err)
-		default:
-			swept++
-			if res.Unknown > 0 {
-				s.d.Log.Warn("scheduler: token anomaly", "task", TaskSweep, "user", u.ID, "unknown", res.Unknown)
+			st.seen[u.ID] = true
+			prev, had := st.last[u.ID]
+			if had && now.Sub(prev) < s.c.SweepInterval {
+				skipped++
+				st.after = u.ID
+				continue
+			}
+			st.last[u.ID] = now
+			calls++
+			res, err := s.d.Auth.Sweep(ctx, u.ID)
+			switch {
+			case err != nil && unavailable(ctx, err):
+				// not swept: forget this attempt and resume at this user
+				if had {
+					st.last[u.ID] = prev
+				} else {
+					delete(st.last, u.ID)
+				}
+				errs = append(errs, err)
+				return swept, len(errs), nil
+			case errors.Is(err, auth.ErrCredentialInvalid):
+				noCred++
+			case err != nil:
+				errs = append(errs, err)
+			default:
+				swept++
+				if res.Unknown > 0 {
+					s.d.Log.Warn("scheduler: token anomaly", "task", TaskSweep, "user", u.ID, "unknown", res.Unknown)
+				}
+			}
+			st.after = u.ID
+			if calls >= s.c.Batch {
+				return swept, len(errs), nil
 			}
 		}
-	}
-	if len(users) < s.c.Batch {
-		s.wrapSweep()
-	} else {
-		st.after = users[len(users)-1].ID
-	}
-	s.itemLog(ctx, TaskSweep, errs)
-	if swept+len(errs)+noCred > 0 {
-		s.d.Log.Debug("scheduler: sweep page", "task", TaskSweep, "swept", swept, "skipped", skipped, "no_credential", noCred)
+		if len(users) < s.c.Batch {
+			s.wrapSweep()
+			return swept, len(errs), nil
+		}
 	}
 	return swept, len(errs), nil
 }
@@ -182,6 +219,3 @@ func (s *Scheduler) wrapSweep() {
 	st.after = ""
 	st.seen = map[string]bool{}
 }
-
-// trackedSweeps is for tests: how many users the sweep remembers.
-func (s *Scheduler) trackedSweeps() int { return len(s.sweep.last) }

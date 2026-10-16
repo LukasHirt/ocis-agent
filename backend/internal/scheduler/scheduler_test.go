@@ -28,7 +28,9 @@ var (
 	_            = agent.EnvBuilder{}.EnvFunc
 )
 
-var allTasks = []string{TaskReap, TaskExpire, TaskSettle, TaskReconcile, TaskRenew, TaskSweep, TaskDormant}
+// The database-only tasks run first, the oCIS-bound ones (each under its own
+// deadline) after them.
+var allTasks = []string{TaskReap, TaskExpire, TaskSettle, TaskDormant, TaskReconcile, TaskRenew, TaskSweep}
 
 func TestTickRunsEveryTaskOnce(t *testing.T) {
 	fx := newFixture(t)
@@ -303,16 +305,185 @@ func TestACancelledTickReturnsPromptly(t *testing.T) {
 	ctx, cancel := context.WithCancel(bg)
 	defer cancel()
 	fx.f.onCall = func(task string) {
-		if task == TaskSweep {
+		if task == TaskReconcile {
 			cancel()
 		}
 	}
 	res := fx.scheduler().Tick(ctx)
-	if got := fx.f.count(TaskSweep); got != 1 {
-		t.Fatalf("swept %d users after the cancel, want 1", got)
-	}
-	if fx.f.count(TaskDormant) != 0 || slices.Contains(res.Ran, TaskDormant) {
+	if fx.f.count(TaskRenew) != 0 || fx.f.count(TaskSweep) != 0 || slices.Contains(res.Ran, TaskSweep) {
 		t.Fatalf("a task ran after the cancel: %v", res.Ran)
+	}
+}
+
+func TestACancelDuringASweepStopsAndResumesAtThatUser(t *testing.T) {
+	for name, at := range map[string]int{"mid-page": 2, "last user of the page": 4} {
+		t.Run(name, func(t *testing.T) {
+			fx := newFixture(t)
+			users := fx.addUsers(10)
+			fx.cfg.Batch = 5
+			s := fx.scheduler()
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			calls := 0
+			// the first `at` calls return at once; the next one hangs until
+			// the context is cancelled
+			fx.f.onCall = func(task string) {
+				if task != TaskSweep {
+					return
+				}
+				if calls++; calls == at+1 {
+					fx.f.mu.Lock()
+					fx.f.hung["sweep"] = true
+					fx.f.mu.Unlock()
+					go cancel()
+				}
+			}
+			s.Tick(ctx)
+			if got := fx.f.sweptUsers(); !slices.Equal(got, users[:at+1]) {
+				t.Fatalf("first tick swept %v, want %v", got, users[:at+1])
+			}
+			fx.f.mu.Lock()
+			fx.f.hung["sweep"] = false
+			fx.f.onCall = nil
+			fx.f.mu.Unlock()
+			fx.clk.Advance(10 * time.Second)
+			s.Tick(bg)
+			// the interrupted user is swept again first: the cursor did not
+			// pass it and its sweep time was not recorded
+			got := fx.f.sweptUsers()[at+1:]
+			if len(got) == 0 || got[0] != users[at] {
+				t.Fatalf("next tick swept %v, want it to start at %s", got, users[at])
+			}
+		})
+	}
+}
+
+func TestAHungOCISCannotWedgeTheTick(t *testing.T) {
+	fx := newFixture(t)
+	users := fx.addUsers(3)
+	fx.cfg.TaskTimeout = 50 * time.Millisecond
+	fx.f.renew = []auth.RenewOutcome{{UserID: users[0]}, {UserID: users[1]}, {UserID: users[2]}}
+	fx.f.hung["reconcile"], fx.f.hung["renew.user"], fx.f.hung["sweep"] = true, true, true
+	s := fx.scheduler()
+
+	start := time.Now()
+	res := s.Tick(bg)
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("Tick took %v with three 50ms deadlines", took)
+	}
+	if !slices.Equal(res.Ran, allTasks) {
+		t.Fatalf("ran %v", res.Ran)
+	}
+	for _, task := range []string{TaskReap, TaskExpire, TaskSettle, TaskDormant} {
+		if fx.f.count(task) != 1 || res.Failed[task] != "" {
+			t.Fatalf("%s: calls %d, failed %q", task, fx.f.count(task), res.Failed[task])
+		}
+	}
+	if res.Failed[TaskReconcile] != CategoryUnavailable {
+		t.Fatalf("reconcile failed %q, want unavailable", res.Failed[TaskReconcile])
+	}
+	fx.f.mu.Lock()
+	renewed := len(fx.f.renewed)
+	fx.f.mu.Unlock()
+	if renewed != 1 || len(fx.f.sweptUsers()) != 1 {
+		t.Fatalf("renew calls %d, sweep calls %d: the batch must stop at the first unavailable item", renewed, len(fx.f.sweptUsers()))
+	}
+	if res.Errors[TaskRenew] != 1 || res.Errors[TaskSweep] != 1 {
+		t.Fatalf("errors = %v", res.Errors)
+	}
+}
+
+func TestTheBatchStopsAtTheFirstUnavailableItem(t *testing.T) {
+	fx := newFixture(t)
+	users := fx.addUsers(4)
+	down := &ocisclient.StatusError{Method: "GET", Path: "/graph/v1.0/me", Status: 503}
+	fx.f.renew = []auth.RenewOutcome{{UserID: users[0]}, {UserID: users[1], Err: down}, {UserID: users[2]}}
+	fx.f.sweepErr[users[1]] = down
+	s := fx.scheduler()
+	res := s.Tick(bg)
+	fx.f.mu.Lock()
+	renewed := append([]string(nil), fx.f.renewed...)
+	fx.f.mu.Unlock()
+	if !slices.Equal(renewed, users[:2]) || !slices.Equal(fx.f.sweptUsers(), users[:2]) {
+		t.Fatalf("renewed %v, swept %v: want both to stop after %s", renewed, fx.f.sweptUsers(), users[1])
+	}
+	if res.Counts[TaskRenew] != 1 || res.Errors[TaskRenew] != 1 || res.Counts[TaskSweep] != 1 || res.Errors[TaskSweep] != 1 {
+		t.Fatalf("counts %v errors %v", res.Counts, res.Errors)
+	}
+	// The next sweep run resumes at the user that hit the outage.
+	delete(fx.f.sweepErr, users[1])
+	fx.clk.Advance(10 * time.Second)
+	s.Tick(bg)
+	if got := fx.f.sweptUsers()[2:]; !slices.Equal(got, users[1:]) {
+		t.Fatalf("next run swept %v, want %v", got, users[1:])
+	}
+}
+
+func TestAUserWhoseSweepFailsIsNotRetriedWithinTheInterval(t *testing.T) {
+	fx := newFixture(t)
+	users := fx.addUsers(2)
+	fx.f.sweepErr[users[0]] = errors.New("listing failed")
+	fx.cfg.Intervals.Sweep = 10 * time.Second
+	s := fx.scheduler()
+	for i := 0; i < 10; i++ {
+		s.Tick(bg)
+		fx.clk.Advance(10 * time.Second)
+	}
+	n := 0
+	for _, u := range fx.f.sweptUsers() {
+		if u == users[0] {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the failing user was swept %d times within the interval, want 1", n)
+	}
+}
+
+func TestASweepRunMakesUpToBatchCalls(t *testing.T) {
+	fx := newFixture(t)
+	fx.addUsers(25)
+	fx.cfg.Batch = 10
+	fx.cfg.Intervals.Sweep = 10 * time.Second
+	s := fx.scheduler()
+	for i := 0; i < 3; i++ { // 0-9, 10-19, 20-24 and wrap
+		s.Tick(bg)
+		fx.clk.Advance(10 * time.Second)
+	}
+	var added []string
+	if err := fx.st.InTx(bg, func(tx store.Tx) error {
+		for i := 25; i < 37; i++ {
+			id := fmt.Sprintf("u%04d", i)
+			added = append(added, id)
+			if err := tx.PutUser(store.User{ID: id, Name: "n" + id, PersonalDriveID: "d" + id}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One run pages past the 25 users that are not due and stops after Batch
+	// calls.
+	s.Tick(bg)
+	if got := fx.f.sweptUsers()[25:]; !slices.Equal(got, added[:10]) {
+		t.Fatalf("the run swept %v, want %v", got, added[:10])
+	}
+	fx.clk.Advance(10 * time.Second)
+	s.Tick(bg)
+	if got := fx.f.sweptUsers()[35:]; !slices.Equal(got, added[10:]) {
+		t.Fatalf("the next run swept %v, want %v", got, added[10:])
+	}
+}
+
+func TestATokenAnomalyIsLoggedWithTheCountOnly(t *testing.T) {
+	fx := newFixture(t)
+	users := fx.addUsers(1)
+	fx.f.sweepRes = auth.SweepResult{Unknown: 2}
+	fx.scheduler().Tick(bg)
+	logs := fx.logs.String()
+	if !strings.Contains(logs, `msg="scheduler: token anomaly"`) || !strings.Contains(logs, "user="+users[0]) || !strings.Contains(logs, "unknown=2") {
+		t.Fatalf("logs:\n%s", logs)
 	}
 }
 
@@ -382,21 +553,22 @@ func TestNewValidates(t *testing.T) {
 		t.Fatalf("valid: %v", err)
 	}
 	for name, mutate := range map[string]func(*Deps, *Config){
-		"no store":         func(d *Deps, _ *Config) { d.Store = nil },
-		"no queue":         func(d *Deps, _ *Config) { d.Queue = nil },
-		"no gate":          func(d *Deps, _ *Config) { d.Gate = nil },
-		"no executor":      func(d *Deps, _ *Config) { d.Executor = nil },
-		"no env":           func(d *Deps, _ *Config) { d.Env = nil },
-		"no auth":          func(d *Deps, _ *Config) { d.Auth = nil },
-		"no log":           func(d *Deps, _ *Config) { d.Log = nil },
-		"no clock":         func(d *Deps, _ *Config) { d.Now = nil },
-		"negative ttl":     func(_ *Deps, c *Config) { c.LeaseTTL = -time.Second },
-		"negative timeout": func(_ *Deps, c *Config) { c.CallTimeout = -time.Second },
-		"negative batch":   func(_ *Deps, c *Config) { c.Batch = -1 },
-		"huge batch":       func(_ *Deps, c *Config) { c.Batch = 1001 },
-		"negative attempt": func(_ *Deps, c *Config) { c.MaxAttempts = -1 },
-		"negative sweep":   func(_ *Deps, c *Config) { c.SweepInterval = -time.Minute },
-		"negative tick":    func(_ *Deps, c *Config) { c.Intervals.Tick = -time.Second },
+		"no store":              func(d *Deps, _ *Config) { d.Store = nil },
+		"no queue":              func(d *Deps, _ *Config) { d.Queue = nil },
+		"no gate":               func(d *Deps, _ *Config) { d.Gate = nil },
+		"no executor":           func(d *Deps, _ *Config) { d.Executor = nil },
+		"no env":                func(d *Deps, _ *Config) { d.Env = nil },
+		"no auth":               func(d *Deps, _ *Config) { d.Auth = nil },
+		"no log":                func(d *Deps, _ *Config) { d.Log = nil },
+		"no clock":              func(d *Deps, _ *Config) { d.Now = nil },
+		"negative ttl":          func(_ *Deps, c *Config) { c.LeaseTTL = -time.Second },
+		"negative timeout":      func(_ *Deps, c *Config) { c.CallTimeout = -time.Second },
+		"negative batch":        func(_ *Deps, c *Config) { c.Batch = -1 },
+		"huge batch":            func(_ *Deps, c *Config) { c.Batch = 1001 },
+		"negative attempt":      func(_ *Deps, c *Config) { c.MaxAttempts = -1 },
+		"negative sweep":        func(_ *Deps, c *Config) { c.SweepInterval = -time.Minute },
+		"negative tick":         func(_ *Deps, c *Config) { c.Intervals.Tick = -time.Second },
+		"negative task timeout": func(_ *Deps, c *Config) { c.TaskTimeout = -time.Second },
 	} {
 		d, c := fx.deps, fx.cfg
 		mutate(&d, &c)

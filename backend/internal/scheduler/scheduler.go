@@ -7,7 +7,10 @@
 // fake clock; Run calls Tick on a ticker. Tasks run regardless of the kill
 // switch and of user pauses: they keep the state consistent and the
 // credentials alive while the agent does no work. A task that fails or
-// panics is reported and does not stop the others. Logs carry task names,
+// panics is reported and does not stop the others. The tasks that call oCIS
+// (reconcile, renew, sweep) run last, each under Config.TaskTimeout, and
+// renew and sweep stop their batch at the first item that finds oCIS
+// unavailable; the rest is retried at the next run. Logs carry task names,
 // counts and fixed categories only, never error text (errors from oCIS, the
 // store or a tool may carry paths or values that must not reach the log).
 package scheduler
@@ -29,10 +32,10 @@ const (
 	TaskReap      = "reap"
 	TaskExpire    = "expire"
 	TaskSettle    = "settle"
+	TaskDormant   = "dormant"
 	TaskReconcile = "reconcile"
 	TaskRenew     = "renew"
 	TaskSweep     = "sweep"
-	TaskDormant   = "dormant"
 )
 
 // Failure categories reported in TickResult.Failed and in the logs.
@@ -60,8 +63,10 @@ type Reconciler interface {
 }
 
 // Auth is the credential maintenance the scheduler drives (*auth.Service).
+// The scheduler renews the due users one by one, so it can stop at an outage.
 type Auth interface {
-	RenewDue(ctx context.Context, limit int) ([]auth.RenewOutcome, error)
+	DueForRenewal(ctx context.Context, limit int) ([]string, error)
+	Renew(ctx context.Context, userID string) (auth.Renewed, error)
 	Sweep(ctx context.Context, userID string) (auth.SweepResult, error)
 	PauseDormant(ctx context.Context, limit int) (int, error)
 }
@@ -98,6 +103,7 @@ type Config struct {
 	RetrySettle   time.Duration // approvals.Config.RetrySettle (default 2m)
 	CallTimeout   time.Duration // the longest a tool call can take (default 5m)
 	SweepInterval time.Duration // how often each user's tokens are swept (default 15m)
+	TaskTimeout   time.Duration // deadline of one run of reconcile, renew and sweep (default 2m)
 	Intervals     Intervals
 	Batch         int // items per task run (default 100, at most 1000)
 }
@@ -105,7 +111,7 @@ type Config struct {
 const maxBatch = 1000
 
 func (c Config) withDefaults() (Config, error) {
-	if c.MaxAttempts < 0 || c.LeaseTTL < 0 || c.RetrySettle < 0 || c.CallTimeout < 0 || c.SweepInterval < 0 || c.Batch < 0 {
+	if c.MaxAttempts < 0 || c.LeaseTTL < 0 || c.RetrySettle < 0 || c.CallTimeout < 0 || c.SweepInterval < 0 || c.TaskTimeout < 0 || c.Batch < 0 {
 		return c, errors.New("scheduler: negative config value")
 	}
 	if c.Batch > maxBatch {
@@ -132,6 +138,7 @@ func (c Config) withDefaults() (Config, error) {
 	def(&c.RetrySettle, 2*time.Minute)
 	def(&c.CallTimeout, 5*time.Minute)
 	def(&c.SweepInterval, 15*time.Minute)
+	def(&c.TaskTimeout, 2*time.Minute)
 	def(&iv.Reap, max(c.LeaseTTL/2, time.Second))
 	def(&iv.Expire, time.Minute)
 	def(&iv.Settle, time.Minute)
@@ -154,6 +161,7 @@ type TickResult struct {
 type task struct {
 	name     string
 	interval time.Duration
+	ocis     bool // talks to oCIS: runs under Config.TaskTimeout
 	run      func(ctx context.Context, now time.Time) (count, errs int, err error)
 }
 
@@ -178,14 +186,16 @@ func New(d Deps, c Config) (*Scheduler, error) {
 	}
 	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState()}
 	iv := c.Intervals
+	// The database-only tasks run first, so a slow or hung oCIS delays them
+	// by at most the three TaskTimeouts of the previous Tick.
 	s.tasks = []task{
-		{TaskReap, iv.Reap, s.reap},
-		{TaskExpire, iv.Expire, s.expire},
-		{TaskSettle, iv.Settle, s.settle},
-		{TaskReconcile, iv.Reconcile, s.reconcile},
-		{TaskRenew, iv.Renew, s.renew},
-		{TaskSweep, iv.Sweep, s.sweepPage},
-		{TaskDormant, iv.Dormant, s.dormant},
+		{TaskReap, iv.Reap, false, s.reap},
+		{TaskExpire, iv.Expire, false, s.expire},
+		{TaskSettle, iv.Settle, false, s.settle},
+		{TaskDormant, iv.Dormant, false, s.dormant},
+		{TaskReconcile, iv.Reconcile, true, s.reconcile},
+		{TaskRenew, iv.Renew, true, s.renew},
+		{TaskSweep, iv.Sweep, true, s.sweepRun},
 	}
 	return s, nil
 }
@@ -228,6 +238,11 @@ func (s *Scheduler) runTask(ctx context.Context, t task, now time.Time) (count, 
 			cat = CategoryPanic
 		}
 	}()
+	if t.ocis {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.c.TaskTimeout)
+		defer cancel()
+	}
 	count, errs, err := t.run(ctx, now)
 	if err != nil {
 		return count, errs, category(err)
