@@ -40,6 +40,13 @@ const (
 	RoleWorker = "worker"
 )
 
+// retrySettle is how long after an attempt started a "retry" verdict of a
+// reconciled call is honoured (approvals.Config.RetrySettle, also given to
+// the scheduler). A job cut off by shutdown is requeued after the same delay
+// (agent.Config.ShutdownRequeueDelay), so that the next claim retries an
+// approved call that was interrupted instead of reporting it unknown.
+const retrySettle = 2 * time.Minute
+
 // Options replace defaults of Build; every field is optional.
 type Options struct {
 	// HTTPClient is the client for oCIS (default
@@ -58,7 +65,8 @@ type Options struct {
 
 // tuning shortens fixed delays in tests.
 type tuning struct {
-	queuePoll time.Duration // queue poll interval
+	queuePoll            time.Duration // queue poll interval
+	shutdownRequeueDelay time.Duration // agent.Config.ShutdownRequeueDelay
 }
 
 // App holds the built services of one process.
@@ -90,6 +98,7 @@ type App struct {
 	stopJobs context.CancelFunc
 
 	secretsReady atomic.Bool
+	stopping     atomic.Bool  // set when the shutdown begins
 	alive        atomic.Int32 // running worker goroutines
 
 	ran     atomic.Bool
@@ -102,6 +111,11 @@ type App struct {
 	// beforeWorkers, if set, runs in Run after the listeners are up and
 	// before the workers start (tests only).
 	beforeWorkers func()
+	// apiHandler, if set, replaces the API router (tests only).
+	apiHandler http.Handler
+
+	retrySettle          time.Duration
+	shutdownRequeueDelay time.Duration
 }
 
 // Build constructs the services in dependency order. st stays the caller's:
@@ -157,7 +171,14 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 	if a.registry, err = tools.NewDefault(); err != nil {
 		return nil, fmt.Errorf("app: tools: %w", err)
 	}
-	acfg := approvals.Config{ApprovalTTL: cfg.Process.ApprovalTTL, Now: a.now}
+	a.retrySettle, a.shutdownRequeueDelay = retrySettle, retrySettle
+	if opts.tune.shutdownRequeueDelay > 0 {
+		a.shutdownRequeueDelay = opts.tune.shutdownRequeueDelay
+	}
+	if a.shutdownRequeueDelay < a.retrySettle {
+		return nil, errors.New("app: the shutdown requeue delay must be at least the retry settle time")
+	}
+	acfg := approvals.Config{ApprovalTTL: cfg.Process.ApprovalTTL, RetrySettle: a.retrySettle, Now: a.now}
 	if a.gate, err = approvals.NewGate(st, a.registry, acfg); err != nil {
 		return nil, fmt.Errorf("app: approvals gate: %w", err)
 	}
@@ -199,7 +220,7 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	rcfg := agent.Config{
 		MaxSteps: cfg.Agent.MaxSteps, MaxRuns: cfg.Agent.MaxRuns, MaxTokens: cfg.Agent.MaxTokens,
-		KillSwitch: cfg.Agent.KillSwitch, Now: a.now,
+		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay, Now: a.now,
 	}
 	var err error
 	if a.runner, err = agent.NewRunner(agent.Deps{
@@ -222,7 +243,8 @@ func (a *App) buildWorkers(opts Options) error {
 		Store: a.st, Queue: a.queue, Gate: a.gate, Executor: a.executor, Env: a.env.EnvFunc(),
 		Auth: a.auth, Log: a.log, Now: a.now,
 	}, scheduler.Config{
-		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, SweepInterval: cfg.Process.SweepInterval,
+		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, RetrySettle: a.retrySettle,
+		SweepInterval: cfg.Process.SweepInterval,
 	}); err != nil {
 		return fmt.Errorf("app: scheduler: %w", err)
 	}

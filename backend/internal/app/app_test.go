@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"net"
+	"net/http"
 	"regexp"
 	"strings"
 	"testing"
@@ -199,11 +200,15 @@ func TestShutdownWithADrainLetsTheRunningJobFinish(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the model was not called")
 	}
+	apiAddr, debugAddr := a.APIAddr(), a.DebugAddr()
+	if code, _ := get(t, "http://"+debugAddr+"/readyz"); code != 200 {
+		t.Fatalf("readyz before the shutdown = %d", code)
+	}
 	r.cancel()
 	// the API listener is closed in phase 1, while the job still runs
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c, err := net.DialTimeout("tcp", a.APIAddr(), 200*time.Millisecond)
+		c, err := net.DialTimeout("tcp", apiAddr, 200*time.Millisecond)
 		if err != nil {
 			break
 		}
@@ -212,6 +217,14 @@ func TestShutdownWithADrainLetsTheRunningJobFinish(t *testing.T) {
 			t.Fatal("the API listener is still open during the drain")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	// once the shutdown has begun the process is not ready, but the probes
+	// still answer
+	if code, body := get(t, "http://"+debugAddr+"/readyz"); code != 503 || !strings.Contains(body, "not ready") {
+		t.Errorf("readyz during the drain = %d %q, want 503", code, body)
+	}
+	if code, _ := get(t, "http://"+debugAddr+"/healthz"); code != 200 {
+		t.Errorf("healthz during the drain = %d", code)
 	}
 	// the second worker stops claiming: a job enqueued now stays queued
 	j2 := f.enqueue(a, "later")
@@ -424,5 +437,76 @@ func TestTheKillSwitchStatus(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("a refused command printed %q", out.String())
+	}
+}
+
+// The API's graceful stop runs alongside the drain: the drain deadline counts
+// from the signal, so a slow request does not lengthen the shutdown.
+func TestTheAPIStopRunsAlongsideTheDrain(t *testing.T) {
+	f := newFixture(t, map[string]string{"AGENT_SHUTDOWN_DRAIN": "2s"})
+	p := newBlocking()
+	a := f.build(p)
+	entered := make(chan struct{})
+	a.apiHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		time.Sleep(2 * time.Second)
+	})
+	f.enroll(a)
+	j := f.enqueue(a, "think hard")
+	r := start(t, a)
+	<-p.entered
+	go func() {
+		c := &http.Client{Timeout: 10 * time.Second}
+		if resp, err := c.Get("http://" + a.APIAddr() + "/slow"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	stopped := time.Now()
+	r.cancel()
+	var cancelledAfter time.Duration
+	select {
+	case <-p.cancelled:
+		cancelledAfter = time.Since(stopped)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the job was not cancelled")
+	}
+	if err := r.stop(t, 15*time.Second); err != nil {
+		t.Errorf("Run = %v", err)
+	}
+	total := time.Since(stopped)
+	// sequential would be 2s (API) + 2s (drain)
+	if cancelledAfter < 1900*time.Millisecond || cancelledAfter > 3200*time.Millisecond {
+		t.Errorf("the job was cancelled %v after the signal, want about the 2s drain", cancelledAfter)
+	}
+	if total > 3500*time.Millisecond {
+		t.Errorf("shutdown took %v, want about max(drain, API stop) = 2s", total)
+	}
+	if got := f.job(j); got.State != store.JobQueued {
+		t.Errorf("job = %s, want queued", got.State)
+	}
+}
+
+// The requeue delay of a job cut off by shutdown must not be shorter than
+// the settle time of a reconciled call: both come from one value.
+func TestTheShutdownDelayCoversTheRetrySettle(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.build(llmtest.New())
+	if a.retrySettle != 2*time.Minute || a.shutdownRequeueDelay != a.retrySettle {
+		t.Errorf("retry settle %v, shutdown requeue delay %v", a.retrySettle, a.shutdownRequeueDelay)
+	}
+	tune := fast()
+	tune.shutdownRequeueDelay = time.Minute
+	if _, err := Build(bg, f.cfg, f.st, Options{Provider: llmtest.New(), Log: quietLog(), tune: tune}); err == nil {
+		t.Error("a shutdown requeue delay below the retry settle must be refused")
+	}
+}
+
+func TestTheDebugServerHasTimeouts(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.build(llmtest.New())
+	srv := a.newServer(a.debugHandler(), true)
+	if srv.ReadHeaderTimeout != 10*time.Second || srv.WriteTimeout != 10*time.Second || srv.IdleTimeout != 60*time.Second {
+		t.Errorf("timeouts: header %v write %v idle %v", srv.ReadHeaderTimeout, srv.WriteTimeout, srv.IdleTimeout)
 	}
 }

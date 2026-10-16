@@ -21,6 +21,10 @@ const (
 	finalWait = 30 * time.Second
 	// debugShutdownTimeout bounds the stop of the debug listener.
 	debugShutdownTimeout = 5 * time.Second
+	// debugWriteTimeout and debugIdleTimeout bound a probe's response and
+	// an idle probe connection.
+	debugWriteTimeout = 10 * time.Second
+	debugIdleTimeout  = 60 * time.Second
 )
 
 var errWorkersStuck = errors.New("app: the workers did not stop in time")
@@ -28,12 +32,21 @@ var errWorkersStuck = errors.New("app: the workers did not stop in time")
 // Run starts the selected roles and serves until ctx ends or a listener
 // fails, then shuts down in three phases:
 //
-//  1. stop claiming jobs, stop the scheduler and stop the API listener;
-//  2. wait up to Process.ShutdownDrain for the running jobs to finish;
+//  1. stop claiming jobs and the scheduler, mark the process not ready and
+//     start the graceful stop of the API listener (up to 10s, alongside the
+//     drain);
+//  2. wait up to Process.ShutdownDrain, counted from the signal, for the
+//     running jobs to finish;
 //  3. cancel the jobs still running (the workers requeue them with the
-//     shutdown delay) and wait for the workers to return.
+//     shutdown delay, at most a few seconds) and wait for the workers, the
+//     scheduler and the API stop to return.
 //
-// The debug listener keeps answering until the end. Run returns the listener
+// A normal shutdown thus takes at most ShutdownDrain + about 15s (requeue,
+// debug listener stop): the container's grace period (docker stop -t,
+// terminationGracePeriodSeconds) must exceed ShutdownDrain + 15s, or jobs in
+// flight are killed instead of requeued (the reaper recovers them only after
+// their lease expires). The debug listener keeps answering (/readyz with 503)
+// until the end. Run returns the listener
 // error that ended it, if any; it never closes the store. It may be called
 // once.
 func (a *App) Run(ctx context.Context) error {
@@ -53,7 +66,7 @@ func (a *App) Run(ctx context.Context) error {
 	var servers sync.WaitGroup
 	defer servers.Wait()
 
-	debugSrv, err := a.listen(a.cfg.Process.DebugAddr, a.debugHandler(), &a.debugAddr, &servers, fatal)
+	debugSrv, err := a.listen(a.cfg.Process.DebugAddr, a.newServer(a.debugHandler(), true), &a.debugAddr, &servers, fatal)
 	if err != nil {
 		a.log.Error("app: debug listener failed", "category", "listen")
 		return err
@@ -61,7 +74,11 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.shutdownDebug(debugSrv)
 	var apiSrv *http.Server
 	if a.cfg.Process.Has(RoleAPI) {
-		if apiSrv, err = a.listen(a.cfg.HTTPAddr, api.NewRouter(), &a.apiAddr, &servers, fatal); err != nil {
+		h := api.NewRouter()
+		if a.apiHandler != nil {
+			h = a.apiHandler
+		}
+		if apiSrv, err = a.listen(a.cfg.HTTPAddr, a.newServer(h, false), &a.apiAddr, &servers, fatal); err != nil {
 			a.log.Error("app: api listener failed", "category", "listen")
 			return err
 		}
@@ -92,15 +109,22 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// phase 1: no new work
+	a.stopping.Store(true)
 	stopClaims()
 	stopScheduler()
+	apiDone := make(chan struct{})
 	if apiSrv != nil {
-		sctx, cancel := context.WithTimeout(base, apiShutdownTimeout)
-		if err := apiSrv.Shutdown(sctx); err != nil {
-			_ = apiSrv.Close()
-		}
-		cancel()
-		a.setAddr(&a.apiAddr, "")
+		go func() {
+			defer close(apiDone)
+			sctx, cancel := context.WithTimeout(base, apiShutdownTimeout)
+			defer cancel()
+			if err := apiSrv.Shutdown(sctx); err != nil {
+				_ = apiSrv.Close()
+			}
+			a.setAddr(&a.apiAddr, "")
+		}()
+	} else {
+		close(apiDone)
 	}
 	// phase 2: let the running jobs finish
 	if !waitFor(workersDone, a.cfg.Process.ShutdownDrain) {
@@ -112,6 +136,7 @@ func (a *App) Run(ctx context.Context) error {
 			runErr = errors.Join(runErr, errWorkersStuck)
 		}
 	}
+	<-apiDone // bounded by apiShutdownTimeout
 	if !waitFor(schedDone, finalWait) {
 		a.log.Error("app: scheduler did not stop", "category", "timeout")
 		runErr = errors.Join(runErr, errors.New("app: the scheduler did not stop in time"))
@@ -120,9 +145,9 @@ func (a *App) Run(ctx context.Context) error {
 	return runErr
 }
 
-// listen binds addr and serves h on it; addr "" means disabled (nil server).
+// listen binds addr and runs srv on it; addr "" means disabled (nil server).
 // A serve error other than a regular close is sent to fatal.
-func (a *App) listen(addr string, h http.Handler, bound *string, wg *sync.WaitGroup, fatal chan<- error) (*http.Server, error) {
+func (a *App) listen(addr string, srv *http.Server, bound *string, wg *sync.WaitGroup, fatal chan<- error) (*http.Server, error) {
 	if addr == "" {
 		return nil, nil
 	}
@@ -130,7 +155,6 @@ func (a *App) listen(addr string, h http.Handler, bound *string, wg *sync.WaitGr
 	if err != nil {
 		return nil, err
 	}
-	srv := &http.Server{Handler: h, ReadHeaderTimeout: readHeaderTimeout}
 	a.setAddr(bound, ln.Addr().String())
 	wg.Go(func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -195,4 +219,15 @@ func waitFor(done <-chan struct{}, d time.Duration) bool {
 	case <-t.C:
 		return false
 	}
+}
+
+// newServer returns the server for h. The debug server also bounds writes and
+// idle connections; the API keeps no write timeout (long requests and event
+// streams belong to it).
+func (a *App) newServer(h http.Handler, debug bool) *http.Server {
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: readHeaderTimeout}
+	if debug {
+		srv.WriteTimeout, srv.IdleTimeout = debugWriteTimeout, debugIdleTimeout
+	}
+	return srv
 }
