@@ -328,6 +328,10 @@ func TestInjectedArgumentsCannotNameADriveOrUser(t *testing.T) {
 	}
 }
 
+// TestAFileCannotChangePolicyOrTheModel: no tool can change policy or the
+// model at all; the policy.* and agent.* calls the model makes here are
+// invented names, denied as unknown tools. What the test pins is that file
+// text and memory notes change neither the stored policy nor the model sent.
 func TestAFileCannotChangePolicyOrTheModel(t *testing.T) {
 	f := newFixture(t)
 	f.setPolicy(func(p *store.Policy) { p.DailyTokens = 1000 })

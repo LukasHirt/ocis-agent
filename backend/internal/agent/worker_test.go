@@ -716,10 +716,14 @@ func TestAJobCancelledInTheStoreCancelsTheRun(t *testing.T) {
 
 func TestTheLeaseNeverExpiresWhileAJobRuns(t *testing.T) {
 	f := newWorkerFixture(t)
+	// a longer ttl than the other tests: two renewal periods (200ms) of
+	// slack before a late renewal could let the lease expire
+	const ttl = 300 * time.Millisecond
+	f.q = queue.New(f.spy, queue.WithLeaseTTL(ttl), queue.WithPollInterval(10*time.Millisecond))
 	f.clk.Follow() // the store's lease clock moves in real time
 	var reaped atomic.Int32
 	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
-		end := time.After(4 * workerTTL)
+		end := time.After(4 * ttl)
 		for {
 			select {
 			case <-end:
@@ -870,5 +874,11 @@ func TestATransientRenewErrorAfterALongRunIsNotALostLease(t *testing.T) {
 	f.expect(id, "released")
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("job = %s", f.job().State)
+	}
+}
+
+func TestTheSettleWritesAreBounded(t *testing.T) {
+	if settleTimeout != 15*time.Second || shutdownRequeueTimeout != 5*time.Second {
+		t.Fatalf("settle %v, shutdown requeue %v: change the docs and this pin together", settleTimeout, shutdownRequeueTimeout)
 	}
 }

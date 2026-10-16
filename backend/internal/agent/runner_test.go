@@ -643,7 +643,10 @@ func TestTheModelComesFromTheCatalogAndThePolicy(t *testing.T) {
 	f.runOnce()
 	f.enqueueKind("schedule", "sweep")
 	f.runOnce()
-	f.setPolicy(func(p *store.Policy) { p.Models = map[string]string{store.ModelTaskChat: "model-gone"} })
+	// ids that pass validation but are not (or no longer) in the catalog
+	f.setPolicy(func(p *store.Policy) {
+		p.Models = map[string]string{store.ModelTaskChat: "model-gone", store.ModelTaskProactive: "model-unknown"}
+	})
 	f.enqueue("chat again")
 	f.runOnce()
 	f.enqueueKind("schedule", "sweep again")
