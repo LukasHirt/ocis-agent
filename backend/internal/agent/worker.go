@@ -166,10 +166,14 @@ func (w *Worker) runJob(ctx context.Context, claim store.Claim) (panicked bool, 
 
 // renew extends the lease every ttl/3 until ctx ends. A lease that is no
 // longer ours cancels the job with errLeaseLost; other errors are retried at
-// the next tick.
+// the next tick, but once no renewal has succeeded for a whole ttl (counted
+// from the claim) the lease may have expired, so the job is cancelled with
+// errLeaseLost too.
 func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, claim store.Claim) {
 	t := time.NewTicker(w.period)
 	defer t.Stop()
+	ttl := w.q.LeaseTTL()
+	lastOK := time.Now() // the claim was just made
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,6 +183,7 @@ func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, clai
 		_, err := w.q.Renew(ctx, claim)
 		switch {
 		case err == nil:
+			lastOK = time.Now()
 		case lost(err):
 			cancel(errLeaseLost)
 			return
@@ -186,6 +191,10 @@ func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, clai
 			return
 		default:
 			w.log.Warn("agent worker: lease renewal failed", "worker", w.id, "job_id", claim.Job.ID, "outcome", "renew_error")
+			if time.Since(lastOK) >= ttl {
+				cancel(errLeaseLost)
+				return
+			}
 		}
 	}
 }

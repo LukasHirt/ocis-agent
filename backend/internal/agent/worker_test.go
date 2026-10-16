@@ -805,3 +805,70 @@ func TestAKillSwitchTurnedOnWhileClaimBlocksStopsTheJobAndTheWorker(t *testing.T
 		t.Errorf("%d claims, want 1", n)
 	}
 }
+
+func TestAWorkerWhoseRenewalsAllFailStopsTheJobWithinTheTTL(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.spy.renewFail.Store(1 << 20) // every renewal fails with a transient error
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() { // drain the failure signals
+		for {
+			select {
+			case <-f.spy.failCh:
+			case <-done:
+				return
+			}
+		}
+	}()
+	b := newBlocking()
+	f.provider = b
+	id := f.enqueue("g")
+	f.start(f.worker("w1"))
+	waitFor(t, b.entered, "the model call")
+	select {
+	case cause := <-b.cause:
+		if !errors.Is(cause, errLeaseLost) {
+			t.Errorf("cause = %v, want errLeaseLost", cause)
+		}
+	case <-time.After(wait):
+		t.Fatal("the job kept running although no renewal succeeded within the ttl")
+	}
+	f.expect(id, "lease_lost")
+}
+
+func TestATransientRenewErrorAfterALongRunIsNotALostLease(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		recv := func(ch <-chan store.Claim) error {
+			select {
+			case <-ch:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+				return errors.New("no renewal")
+			}
+		}
+		for range 5 { // more than a ttl of successful renewals
+			if err := recv(f.spy.renewCh); err != nil {
+				return llm.CompletionResponse{}, err
+			}
+		}
+		f.spy.renewFail.Store(1)
+		select {
+		case <-f.spy.failCh:
+		case <-ctx.Done():
+			return llm.CompletionResponse{}, ctx.Err()
+		}
+		if err := recv(f.spy.renewCh); err != nil {
+			return llm.CompletionResponse{}, err
+		}
+		return llmtest.Say("done", 1, 1).Resp, nil
+	})
+	id := f.enqueue("g")
+	f.start(f.worker("w1"))
+	f.expect(id, "released")
+	if f.job().State != store.JobSucceeded {
+		t.Fatalf("job = %s", f.job().State)
+	}
+}
