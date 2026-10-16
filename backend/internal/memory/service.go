@@ -152,26 +152,39 @@ func (s *Service) List(ctx context.Context, sess Session) ([]Info, error) {
 // Write takes a base ETag, only the job runner may call Read for a user's
 // memory; UI/API reads must not use this caching Read.
 func (s *Service) Read(ctx context.Context, sess Session, name string) (File, error) {
+	f, err := s.Peek(ctx, sess, name)
+	if errors.Is(err, ocisclient.ErrNotFound) {
+		// the file is gone: forget its ETag so Write can recreate it
+		if cerr := s.dropETag(ctx, sess.UserID, name); cerr != nil {
+			return File{}, fmt.Errorf("%w (and %v)", err, cerr)
+		}
+		return File{}, err
+	}
+	if err != nil {
+		return File{}, err
+	}
+	if err := s.cacheETag(ctx, sess.UserID, name, f.ETag); err != nil {
+		return File{}, err
+	}
+	return f, nil
+}
+
+// Peek reads a memory file like Read (same names, size limit, text check and
+// errors) but never touches the ETag cache: it neither stores nor drops an
+// ETag, so it can never make a later Write accept a version, nor revoke one
+// that a Read cached. Use it to show memory to the model as context
+// (the system prompt excerpt) and for UI reads.
+func (s *Service) Peek(ctx context.Context, sess Session, name string) (File, error) {
 	p, err := ResolveName(name)
 	if err != nil {
 		return File{}, err
 	}
 	data, etag, err := s.files.Get(ctx, sess.Creds, sess.DriveID, p, s.lim.MaxReadBytes)
-	if errors.Is(err, ocisclient.ErrNotFound) {
-		// the file is gone: forget its ETag so Write can recreate it
-		if cerr := s.dropETag(ctx, sess.UserID, name); cerr != nil {
-			return File{}, fmt.Errorf("memory: read %s: %w (and %v)", name, err, cerr)
-		}
-		return File{}, fmt.Errorf("memory: read %s: %w", name, err)
-	}
 	if err != nil {
 		return File{}, fmt.Errorf("memory: read %s: %w", name, err)
 	}
 	if !validText(data) {
 		return File{}, ErrNotText
-	}
-	if err := s.cacheETag(ctx, sess.UserID, name, etag); err != nil {
-		return File{}, err
 	}
 	return File{Name: name, Content: string(data), ETag: etag}, nil
 }
