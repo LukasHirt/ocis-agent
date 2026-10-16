@@ -263,3 +263,16 @@ func TestTinyLeaseTTLIsIgnored(t *testing.T) {
 		t.Fatalf("Claim with an ignored zero ttl: %v", err)
 	}
 }
+
+func TestLeaseTTLReportsTheConfiguredTTL(t *testing.T) {
+	st := newStore(t)
+	if got := New(st).LeaseTTL(); got != 2*time.Minute {
+		t.Errorf("default ttl = %s", got)
+	}
+	if got := New(st, WithLeaseTTL(90*time.Second)).LeaseTTL(); got != 90*time.Second {
+		t.Errorf("ttl = %s", got)
+	}
+	if got := New(st, WithLeaseTTL(0)).LeaseTTL(); got != 2*time.Minute {
+		t.Errorf("an ignored ttl = %s", got)
+	}
+}

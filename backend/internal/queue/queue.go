@@ -60,6 +60,10 @@ func New(st store.Store, opts ...Option) *Queue {
 	return q
 }
 
+// LeaseTTL is how long a claim's lease lasts: Claim and Renew set it to now
+// plus this ttl.
+func (q *Queue) LeaseTTL() time.Duration { return q.ttl }
+
 // Enqueue adds a job and wakes a waiting claimer.
 func (q *Queue) Enqueue(ctx context.Context, j store.Job) (store.Job, error) {
 	var out store.Job
