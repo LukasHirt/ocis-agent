@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -33,15 +32,17 @@ func SystemPrompt(now time.Time) string {
 
 // MemoryExcerpt returns the fenced profile.md and projects.md for the system
 // message, at most maxExcerptBytes in total. A missing or unreadable file is
-// skipped. A file that does not fit whole is left out and its cached ETag is
-// forgotten, so the model cannot replace content it never saw; only a failure
-// to forget is returned.
+// skipped and a file that does not fit whole is left out. It reads with
+// memory.Service.Peek, so it never touches the ETag cache: seeing a file here
+// does not unlock a replace-write (the model must memory.read it), and leaving
+// one out does not revoke an ETag the model's own read cached. The error is
+// reserved; today it is always nil.
 func MemoryExcerpt(ctx context.Context, mem *memory.Service, sess memory.Session) (string, error) {
 	var sb strings.Builder
 	for _, name := range excerptFiles {
-		f, err := mem.Read(ctx, sess, name)
+		f, err := mem.Peek(ctx, sess, name)
 		if err != nil {
-			continue // missing or unreadable: nothing was cached
+			continue
 		}
 		block := "\n" + Fence("memory", name, "", f.Content)
 		head := 0
@@ -49,9 +50,6 @@ func MemoryExcerpt(ctx context.Context, mem *memory.Service, sess memory.Session
 			head = len(excerptHeader)
 		}
 		if sb.Len()+head+len(block) > maxExcerptBytes {
-			if err := mem.Forget(ctx, sess, name); err != nil {
-				return "", fmt.Errorf("agent: forget memory %s: %w", name, err)
-			}
 			continue
 		}
 		if sb.Len() == 0 {
