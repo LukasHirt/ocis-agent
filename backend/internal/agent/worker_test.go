@@ -161,6 +161,9 @@ type workerFixture struct {
 	spy   *spyStore
 	ended chan ended
 	log   *syncBuffer
+	// jobCtx becomes WorkerConfig.JobContext of every worker made after it
+	// is set (nil: the jobs run under the Run context)
+	jobCtx context.Context
 }
 
 // newWorkerFixture is the runner fixture with the store behind a spy and a
@@ -179,8 +182,9 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 func (f *workerFixture) worker(id string) *Worker {
 	f.t.Helper()
 	w, err := NewWorker(f.q, f.st, f.runner(), WorkerConfig{
-		ID:  id,
-		Log: slog.New(slog.NewTextHandler(f.log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		ID:         id,
+		Log:        slog.New(slog.NewTextHandler(f.log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		JobContext: f.jobCtx,
 	})
 	if err != nil {
 		f.t.Fatal(err)
@@ -881,4 +885,266 @@ func TestTheSettleWritesAreBounded(t *testing.T) {
 	if settleTimeout != 15*time.Second || shutdownRequeueTimeout != 5*time.Second {
 		t.Fatalf("settle %v, shutdown requeue %v: change the docs and this pin together", settleTimeout, shutdownRequeueTimeout)
 	}
+}
+
+// draining is a worker run with separate claim and job contexts.
+type draining struct {
+	stopClaiming context.CancelFunc // cancels the context given to Run
+	stopJobs     context.CancelFunc // cancels WorkerConfig.JobContext
+	done         chan struct{}      // closed when RunPool returned
+	w            *Worker
+}
+
+// startDraining runs one worker through RunPool with a JobContext of its
+// own; setup may adjust the worker before it starts. At the end of the test
+// both contexts are cancelled and the worker must have stopped without
+// leaving a goroutine behind.
+func (f *workerFixture) startDraining(setup func(*Worker)) *draining {
+	f.t.Helper()
+	jobCtx, stopJobs := context.WithCancel(bg)
+	f.jobCtx = jobCtx
+	w := f.worker("w1")
+	if setup != nil {
+		setup(w)
+	}
+	claimCtx, stopClaiming := context.WithCancel(bg)
+	d := &draining{stopClaiming: stopClaiming, stopJobs: stopJobs, done: make(chan struct{}), w: w}
+	go func() {
+		defer close(d.done)
+		RunPool(claimCtx, 1, func(int) *Worker { return w })
+	}()
+	f.t.Cleanup(func() {
+		stopClaiming()
+		stopJobs()
+		select {
+		case <-d.done:
+		case <-time.After(wait):
+			f.t.Error("the worker did not stop")
+			return
+		}
+		if n := w.live.Load(); n != 0 {
+			f.t.Errorf("%d goroutines of the worker still run", n)
+		}
+	})
+	return d
+}
+
+func (d *draining) returned(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-d.done:
+	case <-time.After(wait):
+		t.Fatalf("the worker did not return after %s", what)
+	}
+	if n := d.w.live.Load(); n != 0 {
+		t.Errorf("%d goroutines of the worker still run", n)
+	}
+}
+
+func (f *workerFixture) jobByID(id string) store.Job {
+	f.t.Helper()
+	var j store.Job
+	if err := f.st.View(bg, func(tx store.Tx) error {
+		var err error
+		j, err = tx.GetJob(userID, id)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	return j
+}
+
+func TestStoppingClaimingLetsTheRunningJobFinish(t *testing.T) {
+	f := newWorkerFixture(t)
+	entered := make(chan struct{}, 16)
+	release := make(chan struct{})
+	cancelled := make(chan struct{}, 16)
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+			return llmtest.Say("done", 1, 1).Resp, nil
+		case <-ctx.Done():
+			cancelled <- struct{}{}
+			return llm.CompletionResponse{}, ctx.Err()
+		}
+	})
+	first := f.enqueue("g")
+	second := f.enqueue("h") // the same user's: claimable only after the first
+	d := f.startDraining(nil)
+	waitFor(t, entered, "the model call")
+	d.stopClaiming()
+
+	// several renewal periods: the job keeps running and so does the worker
+	select {
+	case <-cancelled:
+		t.Fatal("stopping the claims cancelled the running job")
+	case <-d.done:
+		t.Fatal("the worker returned while its job runs")
+	case <-time.After(5 * workerTTL):
+	}
+	close(release)
+	f.expect(first, "released")
+	d.returned(t, "its job finished")
+
+	if j := f.jobByID(first); j.State != store.JobSucceeded {
+		t.Errorf("first job = %s %q", j.State, j.Error)
+	}
+	if j := f.jobByID(second); j.State != store.JobQueued || j.Runs != 0 {
+		t.Errorf("second job = %s runs %d: claimed after claiming stopped", j.State, j.Runs)
+	}
+	if n := f.spy.claims(); n != 1 {
+		t.Errorf("%d claims, want 1", n)
+	}
+}
+
+func TestTheLeaseKeepsBeingRenewedAfterClaimingStops(t *testing.T) {
+	f := newWorkerFixture(t)
+	const ttl = 300 * time.Millisecond // as in TestTheLeaseNeverExpiresWhileAJobRuns
+	f.q = queue.New(f.spy, queue.WithLeaseTTL(ttl), queue.WithPollInterval(10*time.Millisecond))
+	f.clk.Follow()
+	entered := make(chan struct{}, 16)
+	stopped := make(chan struct{})
+	var reaped atomic.Int32
+	var before atomic.Int64 // renewals when claiming stopped
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		entered <- struct{}{}
+		select {
+		case <-stopped:
+		case <-ctx.Done():
+			return llm.CompletionResponse{}, ctx.Err()
+		case <-time.After(wait):
+			return llm.CompletionResponse{}, errors.New("claiming did not stop")
+		}
+		before.Store(int64(f.spy.renewals()))
+		end := time.After(4 * ttl)
+		for {
+			select {
+			case <-end:
+				return llmtest.Say("done", 1, 1).Resp, nil
+			case <-ctx.Done():
+				return llm.CompletionResponse{}, ctx.Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+			res, err := f.q.Reap(bg, 100)
+			if err != nil {
+				return llm.CompletionResponse{}, err
+			}
+			reaped.Add(int32(res.Requeued + res.Failed))
+		}
+	})
+	id := f.enqueue("g")
+	d := f.startDraining(nil)
+	waitFor(t, entered, "the model call")
+	d.stopClaiming()
+	close(stopped)
+	e := f.next()
+	if n := reaped.Load(); n != 0 {
+		t.Fatalf("the lease expired %d times after claiming stopped", n)
+	}
+	if e.jobID != id || e.outcome != "released" || f.job().State != store.JobSucceeded {
+		t.Fatalf("processed %+v, job %s", e, f.job().State)
+	}
+	if n := int64(f.spy.renewals()) - before.Load(); n < 3 {
+		t.Errorf("%d renewals in 4 ttls after claiming stopped", n)
+	}
+	d.returned(t, "its job finished")
+}
+
+func TestCancellingTheJobContextRequeuesTheRunningJob(t *testing.T) {
+	f := newWorkerFixture(t)
+	b := newBlocking()
+	f.provider = b
+	id := f.enqueue("g")
+	d := f.startDraining(nil)
+	waitFor(t, b.entered, "the model call")
+	d.stopJobs() // the claim context stays alive
+	select {
+	case cause := <-b.cause:
+		if !errors.Is(cause, context.Canceled) {
+			t.Errorf("cause = %v, want context.Canceled", cause)
+		}
+	case <-time.After(wait):
+		t.Fatal("the model call was not cancelled")
+	}
+	f.expect(id, "shutdown")
+	assertRequeued(t, f.fixture, 2*time.Minute)
+	j := f.job()
+	if j.Runs != 1 || j.Attempt != 0 {
+		t.Errorf("runs %d attempt %d, want 1 and a refunded attempt", j.Runs, j.Attempt)
+	}
+	if len(f.steps()) != 0 {
+		t.Error("no step for a shutdown")
+	}
+	// with no context to run jobs under, the worker claims nothing more
+	d.returned(t, "the job context ended")
+	if n := f.spy.claims(); n != 1 {
+		t.Errorf("%d claims, want 1", n)
+	}
+}
+
+func TestAFailureAfterClaimingStoppedIsNotAShutdown(t *testing.T) {
+	f := newWorkerFixture(t)
+	entered := make(chan struct{}, 16)
+	release := make(chan struct{})
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return llm.CompletionResponse{}, ctx.Err()
+		}
+		panic("boom")
+	})
+	id := f.enqueue("g")
+	d := f.startDraining(nil)
+	waitFor(t, entered, "the model call")
+	d.stopClaiming()
+	close(release)
+	// the backoff of a panic, written although claiming has stopped
+	f.expect(id, "panic")
+	assertRequeued(t, f.fixture, 7*time.Second)
+	d.returned(t, "its job finished")
+}
+
+func TestAWorkerWaitingForAJobReturnsWhenClaimingStops(t *testing.T) {
+	t.Run("blocked in claim", func(t *testing.T) {
+		f := newWorkerFixture(t)
+		f.provider = llmtest.New()
+		d := f.startDraining(nil)
+		waitFor(t, f.spy.emptyCh, "a blocked claim")
+		d.stopClaiming()
+		d.returned(t, "claiming stopped")
+	})
+	t.Run("kill switch on", func(t *testing.T) {
+		f := newWorkerFixture(t)
+		f.provider = llmtest.New()
+		if err := SetKillSwitch(bg, f.st, true); err != nil {
+			t.Fatal(err)
+		}
+		checks := make(chan struct{}, 1024)
+		d := f.startDraining(func(w *Worker) {
+			w.killPoll = time.Hour // the sleep must end with the claim context
+			w.onKillSwitch = func() {
+				select {
+				case checks <- struct{}{}:
+				default:
+				}
+			}
+		})
+		waitFor(t, checks, "a kill switch check")
+		d.stopClaiming()
+		d.returned(t, "claiming stopped")
+	})
+	t.Run("job context ended", func(t *testing.T) {
+		f := newWorkerFixture(t)
+		f.provider = llmtest.New()
+		d := f.startDraining(nil)
+		waitFor(t, f.spy.emptyCh, "a blocked claim")
+		d.stopJobs()
+		d.returned(t, "the job context ended")
+		if n := f.spy.claims(); n != 0 {
+			t.Errorf("%d claims", n)
+		}
+	})
 }
