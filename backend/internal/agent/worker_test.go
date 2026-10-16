@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,10 +38,14 @@ type spyStore struct {
 	empty    int
 	renewCh  chan store.Claim
 	emptyCh  chan struct{}
+	// renewFail fails that many of the next RenewLease calls with
+	// errInjected, a transient error; failCh signals each.
+	renewFail atomic.Int32
+	failCh    chan struct{}
 }
 
 func newSpy(st store.Store) *spyStore {
-	return &spyStore{Store: st, releases: map[int64]int{}, renewCh: make(chan store.Claim, 1024), emptyCh: make(chan struct{}, 1024)}
+	return &spyStore{Store: st, releases: map[int64]int{}, renewCh: make(chan store.Claim, 1024), emptyCh: make(chan struct{}, 1024), failCh: make(chan struct{}, 1024)}
 }
 
 func (s *spyStore) InTx(ctx context.Context, fn func(store.Tx) error) error {
@@ -57,6 +62,12 @@ func (s *spyStore) firstClaim() store.Claim {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.claimed[0]
+}
+
+func (s *spyStore) renewals() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.renewed)
 }
 
 func (s *spyStore) releasesOf(fence int64) int {
@@ -88,6 +99,11 @@ func (t spyTx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool
 }
 
 func (t spyTx) RenewLease(c store.Claim, ttl time.Duration) (store.Claim, error) {
+	if t.s.renewFail.Add(-1) >= 0 {
+		t.s.failCh <- struct{}{}
+		return store.Claim{}, errInjected
+	}
+	t.s.renewFail.Store(0)
 	out, err := t.Tx.RenewLease(c, ttl)
 	if err == nil {
 		t.s.mu.Lock()
@@ -163,7 +179,7 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 func (f *workerFixture) worker(id string) *Worker {
 	f.t.Helper()
 	w, err := NewWorker(f.q, f.st, f.runner(), WorkerConfig{
-		ID: id, LeaseTTL: workerTTL, Now: f.clk.Now,
+		ID:  id,
 		Log: slog.New(slog.NewTextHandler(f.log, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
@@ -260,7 +276,7 @@ func TestNewWorkerChecksItsConfig(t *testing.T) {
 	f := newWorkerFixture(t)
 	f.provider = llmtest.New()
 	r := f.runner()
-	ok := WorkerConfig{ID: "w1", LeaseTTL: time.Minute}
+	ok := WorkerConfig{ID: "w1"}
 	if _, err := NewWorker(f.q, f.st, r, ok); err != nil {
 		t.Fatal(err)
 	}
@@ -269,10 +285,7 @@ func TestNewWorkerChecksItsConfig(t *testing.T) {
 		"no store":  func() (*queue.Queue, store.Store, *Runner, WorkerConfig) { return f.q, nil, r, ok },
 		"no runner": func() (*queue.Queue, store.Store, *Runner, WorkerConfig) { return f.q, f.st, nil, ok },
 		"no id": func() (*queue.Queue, store.Store, *Runner, WorkerConfig) {
-			return f.q, f.st, r, WorkerConfig{LeaseTTL: time.Minute}
-		},
-		"no ttl": func() (*queue.Queue, store.Store, *Runner, WorkerConfig) {
-			return f.q, f.st, r, WorkerConfig{ID: "w1"}
+			return f.q, f.st, r, WorkerConfig{}
 		},
 	} {
 		if _, err := NewWorker(c()); err == nil {
@@ -286,7 +299,7 @@ func TestAWorkerRunsAClaimedJobToTheEnd(t *testing.T) {
 	f.provider = llmtest.New(llmtest.Say("done", 1, 1))
 	id := f.enqueue("g")
 	f.start(f.worker("w1"))
-	f.expect(id, "done")
+	f.expect(id, "released")
 	if j := f.job(); j.State != store.JobSucceeded {
 		t.Fatalf("job = %s %q", j.State, j.Error)
 	}
@@ -323,7 +336,7 @@ func TestTheLeaseIsRenewedWhileAJobRuns(t *testing.T) {
 	id := f.enqueue("g")
 	w = f.worker("w1")
 	f.start(w)
-	f.expect(id, "done")
+	f.expect(id, "released")
 	if j := f.job(); j.State != store.JobSucceeded {
 		t.Fatalf("job = %s %q", j.State, j.Error)
 	}
@@ -465,7 +478,7 @@ func TestTheKillSwitchStopsClaiming(t *testing.T) {
 		if err := SetKillSwitch(bg, f.st, false); err != nil {
 			t.Fatal(err)
 		}
-		f.expect(id, "done")
+		f.expect(id, "released")
 		if j := f.job(); j.State != store.JobSucceeded {
 			t.Errorf("job = %s", j.State)
 		}
@@ -518,7 +531,7 @@ func TestAPausedUsersJobIsNotClaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.q.Wake()
-	f.expect(id, "done")
+	f.expect(id, "released")
 }
 
 func TestTwoWorkersNeverRunTheSameUsersJobsConcurrently(t *testing.T) {
@@ -562,7 +575,7 @@ func TestTwoWorkersNeverRunTheSameUsersJobsConcurrently(t *testing.T) {
 		e := f.next()
 		got[e.jobID] = e.outcome
 	}
-	if got[a] != "done" || got[b] != "done" {
+	if got[a] != "released" || got[b] != "released" {
 		t.Fatalf("processed %v", got)
 	}
 	if p := peak.Load(); p != 1 {
@@ -604,5 +617,176 @@ func TestWorkerLogsDoNotContainProviderErrorText(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the log lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestTheRenewalPeriodDerivesFromTheQueuesTTL(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.provider = llmtest.New()
+	r := f.runner()
+	for _, c := range []struct{ ttl, want time.Duration }{
+		{90 * time.Second, 30 * time.Second},
+		{workerTTL, workerTTL / 3},
+		{time.Millisecond, time.Millisecond}, // never a zero ticker
+	} {
+		w, err := NewWorker(queue.New(f.st, queue.WithLeaseTTL(c.ttl)), f.st, r, WorkerConfig{ID: "w1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w.period != c.want {
+			t.Errorf("ttl %s: period %s, want %s", c.ttl, w.period, c.want)
+		}
+	}
+}
+
+func TestATransientRenewErrorDoesNotCancelTheJob(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.spy.renewFail.Store(1)
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		select { // the failed renewal
+		case <-f.spy.failCh:
+		case <-ctx.Done():
+			return llm.CompletionResponse{}, ctx.Err()
+		case <-time.After(wait):
+			return llm.CompletionResponse{}, errors.New("no failed renewal")
+		}
+		select { // a successful one after it
+		case <-f.spy.renewCh:
+		case <-ctx.Done():
+			return llm.CompletionResponse{}, ctx.Err()
+		case <-time.After(wait):
+			return llm.CompletionResponse{}, errors.New("no renewal after the failure")
+		}
+		return llmtest.Say("done", 1, 1).Resp, nil
+	})
+	id := f.enqueue("g")
+	f.start(f.worker("w1"))
+	f.expect(id, "released")
+	if j := f.job(); j.State != store.JobSucceeded {
+		t.Fatalf("job = %s %q", j.State, j.Error)
+	}
+	if !strings.Contains(f.log.String(), "outcome=renew_error") {
+		t.Errorf("the failed renewal is not logged:\n%s", f.log.String())
+	}
+}
+
+func TestAJobCancelledInTheStoreCancelsTheRun(t *testing.T) {
+	f := newWorkerFixture(t)
+	b := newBlocking()
+	f.provider = b
+	id := f.enqueue("g")
+	f.start(f.worker("w1"))
+	waitFor(t, b.entered, "the model call")
+	claim := f.spy.firstClaim()
+	if err := f.st.InTx(bg, func(tx store.Tx) error { return tx.CancelJob(userID, id) }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case cause := <-b.cause:
+		if !errors.Is(cause, errLeaseLost) {
+			t.Errorf("cause = %v, want errLeaseLost", cause)
+		}
+	case <-time.After(wait):
+		t.Fatal("the model call was not cancelled")
+	}
+	f.expect(id, "lease_lost")
+	if n := f.spy.releasesOf(claim.Fence); n != 0 {
+		t.Errorf("%d releases after the cancel", n)
+	}
+	j := f.job()
+	if j.State != store.JobCancelled || j.Error != "" || len(f.steps()) != 0 || len(f.auditOf("job_finished")) != 0 {
+		t.Errorf("written after the cancel: job %s %q, steps %d, audit %s", j.State, j.Error, len(f.steps()), f.auditKinds())
+	}
+}
+
+func TestTheLeaseNeverExpiresWhileAJobRuns(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.clk.Follow() // the store's lease clock moves in real time
+	var reaped atomic.Int32
+	f.provider = llm.ProviderFunc(func(ctx context.Context, _ llm.CompletionRequest) (llm.CompletionResponse, error) {
+		end := time.After(4 * workerTTL)
+		for {
+			select {
+			case <-end:
+				return llmtest.Say("done", 1, 1).Resp, nil
+			case <-ctx.Done():
+				return llm.CompletionResponse{}, ctx.Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+			res, err := f.q.Reap(bg, 100)
+			if err != nil {
+				return llm.CompletionResponse{}, err
+			}
+			reaped.Add(int32(res.Requeued + res.Failed))
+		}
+	})
+	id := f.enqueue("g")
+	f.start(f.worker("w1"))
+	e := f.next()
+	if n := reaped.Load(); n != 0 {
+		t.Fatalf("the lease expired %d times while the job ran", n)
+	}
+	if e.jobID != id || e.outcome != "released" || f.job().State != store.JobSucceeded {
+		t.Fatalf("processed %+v, job %s", e, f.job().State)
+	}
+	if n := f.spy.renewals(); n < 3 {
+		t.Errorf("%d renewals in 4 ttls", n)
+	}
+}
+
+func TestGoexitInTheRunnerStopsTheRenewal(t *testing.T) {
+	f := newWorkerFixture(t)
+	f.provider = llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (llm.CompletionResponse, error) {
+		runtime.Goexit()
+		return llm.CompletionResponse{}, nil
+	})
+	f.enqueue("g")
+	w := f.worker("w1")
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		t.Fatal("Run did not end with the Goexit")
+	}
+	// the parent ctx is still alive: only the deferred cleanup stops it
+	if n := w.live.Load(); n != 0 {
+		t.Errorf("%d renewal goroutines left after Goexit", n)
+	}
+}
+
+func TestAKillSwitchTurnedOnWhileClaimBlocksStopsTheJobAndTheWorker(t *testing.T) {
+	f := newWorkerFixture(t)
+	p := llmtest.New()
+	f.provider = p
+	w := f.worker("w1")
+	checks := make(chan struct{}, 1024)
+	w.onKillSwitch = func() {
+		select {
+		case checks <- struct{}{}:
+		default:
+		}
+	}
+	f.start(w)
+	waitFor(t, f.spy.emptyCh, "a blocked claim")
+	if err := SetKillSwitch(bg, f.st, true); err != nil {
+		t.Fatal(err)
+	}
+	id := f.enqueue("g")
+	f.expect(id, "released")
+	assertRequeued(t, f.fixture, DefaultConfig().PausedDelay)
+	if j := f.job(); j.Runs != 1 || len(p.Requests()) != 0 {
+		t.Errorf("runs %d, %d model calls", j.Runs, len(p.Requests()))
+	}
+	for range 3 {
+		waitFor(t, checks, "a kill switch check")
+	}
+	if n := f.spy.claims(); n != 1 {
+		t.Errorf("%d claims, want 1", n)
 	}
 }

@@ -84,13 +84,7 @@ func (r *Runner) fail(ctx context.Context, claim store.Claim, reason string) err
 // requeue puts the job back to queued, claimable at now+delay, keeping the
 // stored checkpoint.
 func (r *Runner) requeue(ctx context.Context, claim store.Claim, delay time.Duration) error {
-	return r.requeueAt(ctx, claim, r.cfg.Now().Add(delay))
-}
-
-// requeueAt puts the job back to queued, claimable at at, keeping the stored
-// checkpoint. A job that is no longer running is left alone; a lost fence is
-// returned wrapped.
-func (r *Runner) requeueAt(ctx context.Context, claim store.Claim, at time.Time) error {
+	at := r.cfg.Now().Add(delay)
 	var applied bool
 	err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
 		var err error

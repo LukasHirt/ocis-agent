@@ -40,8 +40,9 @@ const (
 )
 
 type clock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu     sync.Mutex
+	t      time.Time
+	follow time.Time // if set, the clock moves with real time since then
 }
 
 func newClock() *clock { return &clock{t: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)} }
@@ -49,7 +50,17 @@ func newClock() *clock { return &clock{t: time.Date(2026, 10, 16, 12, 0, 0, 0, t
 func (c *clock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.follow.IsZero() {
+		return c.t.Add(time.Since(c.follow))
+	}
 	return c.t
+}
+
+// Follow makes the clock move with real time from now on.
+func (c *clock) Follow() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.follow = time.Now()
 }
 
 func (c *clock) Advance(d time.Duration) {

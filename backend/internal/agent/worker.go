@@ -18,13 +18,15 @@ const (
 	// shutdownRequeueTimeout bounds the requeue of a job interrupted by
 	// shutdown.
 	shutdownRequeueTimeout = 5 * time.Second
+	// settleTimeout bounds the release after a panic or a runner error.
+	settleTimeout = 15 * time.Second
 )
 
 // The outcomes of a processed claim, and the only text the worker logs about
 // it besides ids: error values may carry model, oCIS or job text and are never
 // logged.
 const (
-	outcomeDone        = "done"
+	outcomeReleased    = "released" // the runner released the job itself
 	outcomeLeaseLost   = "lease_lost"
 	outcomeShutdown    = "shutdown"
 	outcomePanic       = "panic"
@@ -36,14 +38,10 @@ var (
 	errJobEnded  = errors.New("agent: the job's processing ended")
 )
 
-// WorkerConfig configures a Worker. LeaseTTL must equal the queue's lease ttl
-// (queue.WithLeaseTTL): the lease is renewed every LeaseTTL/3. Log defaults to
-// slog.Default and Now to time.Now.
+// WorkerConfig configures a Worker. Log defaults to slog.Default.
 type WorkerConfig struct {
-	ID       string
-	LeaseTTL time.Duration
-	Log      *slog.Logger
-	Now      func() time.Time
+	ID  string
+	Log *slog.Logger
 }
 
 // Worker claims jobs one at a time and runs them with the Runner, keeping the
@@ -53,19 +51,19 @@ type Worker struct {
 	st  store.Store
 	r   *Runner
 	id  string
-	ttl time.Duration
 	log *slog.Logger
-	now func() time.Time
 
 	killPoll time.Duration
-	live     atomic.Int32 // running renewal goroutines
+	period   time.Duration // lease renewal: a third of the queue's ttl
+	live     atomic.Int32  // running renewal goroutines
 
 	// test hooks
 	onDone       func(claim store.Claim, outcome string)
 	onKillSwitch func()
 }
 
-// NewWorker checks the collaborators and the config.
+// NewWorker checks the collaborators and the config. The lease is renewed
+// every third of the queue's lease ttl.
 func NewWorker(q *queue.Queue, st store.Store, r *Runner, cfg WorkerConfig) (*Worker, error) {
 	if q == nil || st == nil || r == nil {
 		return nil, errors.New("agent: the worker needs a queue, a store and a runner")
@@ -73,18 +71,12 @@ func NewWorker(q *queue.Queue, st store.Store, r *Runner, cfg WorkerConfig) (*Wo
 	if cfg.ID == "" {
 		return nil, errors.New("agent: the worker needs an id")
 	}
-	if cfg.LeaseTTL < 3*time.Millisecond {
-		return nil, errors.New("agent: the worker's lease ttl must be at least 3ms")
-	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
-	if cfg.Now == nil {
-		cfg.Now = time.Now
-	}
 	return &Worker{
-		q: q, st: st, r: r, id: cfg.ID, ttl: cfg.LeaseTTL, log: cfg.Log, now: cfg.Now,
-		killPoll: killSwitchPoll,
+		q: q, st: st, r: r, id: cfg.ID, log: cfg.Log,
+		killPoll: killSwitchPoll, period: max(q.LeaseTTL()/3, time.Millisecond),
 	}, nil
 }
 
@@ -138,6 +130,9 @@ func RunPool(ctx context.Context, n int, newWorker func(i int) *Worker) {
 func (w *Worker) process(ctx context.Context, claim store.Claim) {
 	jobCtx, cancel := context.WithCancelCause(ctx)
 	var wg sync.WaitGroup
+	// deferred too, so a Goexit in the runner cannot leave the renewal running
+	defer wg.Wait()
+	defer cancel(errJobEnded)
 	w.live.Add(1)
 	wg.Go(func() {
 		defer w.live.Add(-1)
@@ -173,7 +168,7 @@ func (w *Worker) runJob(ctx context.Context, claim store.Claim) (panicked bool, 
 // longer ours cancels the job with errLeaseLost; other errors are retried at
 // the next tick.
 func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, claim store.Claim) {
-	t := time.NewTicker(w.ttl / 3)
+	t := time.NewTicker(w.period)
 	defer t.Stop()
 	for {
 		select {
@@ -200,14 +195,14 @@ func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, clai
 func (w *Worker) settle(ctx, jobCtx context.Context, claim store.Claim, panicked bool, err error) string {
 	switch {
 	case !panicked && err == nil:
-		return outcomeDone
+		return outcomeReleased
 	case lost(err) || errors.Is(context.Cause(jobCtx), errLeaseLost):
 		// the job belongs to someone else or ended meanwhile
 		return outcomeLeaseLost
 	case ctx.Err() != nil:
 		rctx, done := context.WithTimeout(context.WithoutCancel(ctx), shutdownRequeueTimeout)
 		defer done()
-		if err := w.r.requeueAt(rctx, claim, w.now()); err != nil {
+		if err := w.r.requeue(rctx, claim, 0); err != nil {
 			w.log.Warn("agent worker: shutdown requeue failed", "worker", w.id, "job_id", claim.Job.ID, "outcome", "release_failed")
 		}
 		return outcomeShutdown
@@ -216,11 +211,13 @@ func (w *Worker) settle(ctx, jobCtx context.Context, claim store.Claim, panicked
 	if panicked {
 		outcome = outcomePanic
 	}
+	wctx, done := context.WithTimeout(ctx, settleTimeout)
+	defer done()
 	var rerr error
 	if claim.Job.Runs >= w.r.cfg.MaxRuns {
-		rerr = w.r.fail(ctx, claim, ReasonInternal)
+		rerr = w.r.fail(wctx, claim, ReasonInternal)
 	} else {
-		rerr = w.r.requeueAt(ctx, claim, w.now().Add(requeueDelay(w.r.cfg.RequeueDelay, claim.Job.Runs)))
+		rerr = w.r.backoff(wctx, claim)
 	}
 	if rerr != nil {
 		w.log.Warn("agent worker: release failed", "worker", w.id, "job_id", claim.Job.ID, "outcome", "release_failed")
