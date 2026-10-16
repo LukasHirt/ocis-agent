@@ -99,7 +99,8 @@ func TestOrphansOfActiveJobsAreLeftToTheJob(t *testing.T) {
 	}
 	f.ex.hook = nil
 	sum, err := f.ex.ReconcileOrphans(bg, f.envFor(), f.due(), 100)
-	if err != nil || sum.Resolved != 0 || sum.Skipped != 1 {
+	// The active job's record is not even listed (Skipped stays 0).
+	if err != nil || sum.Resolved != 0 || sum.Skipped != 0 || len(sum.Errors) != 0 {
 		t.Fatalf("summary = %+v %v", sum, err)
 	}
 	if rec, _ := f.idem(a.IdemKey); rec.State != store.IdemStarted || f.approvalOf(a.ID).State != store.ApprovalExecuting {
@@ -242,5 +243,30 @@ func TestAnOrphanFailureReasonIsCapped(t *testing.T) {
 	}
 	if got := decodeOutcome(f.approvalOf(a.ID).Result).Reason; len(got) > maxReason || got == "" {
 		t.Fatalf("stored reason has %d bytes", len(got))
+	}
+}
+
+func TestOrphansOfEndedJobsAreNotStarvedByOlderRecordsOfActiveJobs(t *testing.T) {
+	f := newFixture(t)
+	waiting, _ := f.requested(call("w1", "probe.write", `{}`))
+	for i := 0; i < 150; i++ {
+		f.seedRecord(fmt.Sprintf("%s:c%d:hash", waiting.Job.ID, i), "probe.write")
+	}
+	f.clk.Advance(time.Second)
+	p := f.probes["probe.write"]
+	p.recon = func(tools.ExecInfo) (tools.Reconciled, error) {
+		return tools.Reconciled{State: tools.ReconDone, Result: tools.Result{Summary: "it is there"}}, nil
+	}
+	_, a := crashedAndEnded(t, f, p)
+
+	sum, err := f.ex.ReconcileOrphans(bg, f.envFor(), f.due(), 100)
+	if err != nil || sum.Resolved != 1 || len(sum.Errors) != 0 {
+		t.Fatalf("summary = %+v %v, want the ended job's record resolved", sum, err)
+	}
+	if got := f.approvalOf(a.ID).State; got != store.ApprovalExecuted {
+		t.Fatalf("approval = %s, want executed", got)
+	}
+	if rec, _ := f.idem(fmt.Sprintf("%s:c0:hash", waiting.Job.ID)); rec.State != store.IdemStarted {
+		t.Fatalf("an active job's record was touched: %+v", rec)
 	}
 }

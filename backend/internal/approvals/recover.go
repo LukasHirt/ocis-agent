@@ -27,10 +27,12 @@ type ReconcileSummary struct {
 const notRetried = "the job ended before the action could be retried; it was not run"
 
 // ReconcileOrphans resolves calls whose outcome was never recorded (an
-// idempotency record still started) and whose job has ENDED. While a job is
-// still active it reconciles its own records when it runs again, so those
-// are skipped. An ended job is never resumed: a "retry" verdict is recorded
-// as a failure, not executed.
+// idempotency record still started) and whose job has ENDED (or no longer
+// exists). While a job is still active it reconciles its own records when it
+// runs again, so those are not listed at all (they cannot fill limit and
+// starve the records of ended jobs behind them; Skipped counts only a record
+// whose job turned out active anyway). An ended job is never resumed: a
+// "retry" verdict is recorded as a failure, not executed.
 //
 // olderThan is clamped to Now()-RetrySettle: a call that started within the
 // settle window may still be in flight (cancelling a job does not stop its
@@ -43,7 +45,7 @@ func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderTh
 	var recs []store.IdemRecord
 	if err := x.st.View(ctx, func(tx store.Tx) error {
 		var err error
-		recs, err = tx.ListStartedIdempotent(olderThan, limit)
+		recs, err = tx.ListStartedIdempotentOfEndedJobs(olderThan, limit)
 		return err
 	}); err != nil {
 		return ReconcileSummary{}, fmt.Errorf("approvals: list started records: %w", err)
