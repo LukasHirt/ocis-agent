@@ -58,8 +58,7 @@ type Options struct {
 
 // tuning shortens fixed delays in tests.
 type tuning struct {
-	queuePoll   time.Duration // queue poll interval
-	pausedDelay time.Duration // agent.Config.PausedDelay
+	queuePoll time.Duration // queue poll interval
 }
 
 // App holds the built services of one process.
@@ -200,7 +199,7 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	rcfg := agent.Config{
 		MaxSteps: cfg.Agent.MaxSteps, MaxRuns: cfg.Agent.MaxRuns, MaxTokens: cfg.Agent.MaxTokens,
-		KillSwitch: cfg.Agent.KillSwitch, Now: a.now, PausedDelay: opts.tune.pausedDelay,
+		KillSwitch: cfg.Agent.KillSwitch, Now: a.now,
 	}
 	var err error
 	if a.runner, err = agent.NewRunner(agent.Deps{

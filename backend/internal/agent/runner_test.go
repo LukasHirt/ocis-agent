@@ -454,11 +454,16 @@ func TestAKillSwitchCancelsAJobInFlightButOnlyRequeuesAtClaim(t *testing.T) {
 		f := newFixture(t)
 		p := llmtest.New(llmtest.Say("x", 1, 1))
 		f.provider = p
+		f.enqueue("g")
+		// the store claims nothing while the switch is on: it was turned on
+		// between the claim and the run
+		c := f.claim()
 		if err := SetKillSwitch(bg, f.st, true); err != nil {
 			t.Fatal(err)
 		}
-		f.enqueue("g")
-		f.runOnce()
+		if err := f.runner().Run(bg, c); err != nil {
+			t.Fatal(err)
+		}
 		assertRequeued(t, f, DefaultConfig().PausedDelay)
 		if len(p.Requests()) != 0 {
 			t.Error("the model must not be called")

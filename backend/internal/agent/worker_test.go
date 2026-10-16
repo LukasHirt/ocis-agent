@@ -783,34 +783,34 @@ func TestGoexitInTheRunnerStopsTheRenewal(t *testing.T) {
 	}
 }
 
-func TestAKillSwitchTurnedOnWhileClaimBlocksStopsTheJobAndTheWorker(t *testing.T) {
+// The store hands out nothing while the database kill switch is on, so a
+// worker blocked in Claim does not take a job enqueued after the switch was
+// turned on (no run is consumed), and takes it once the switch is off.
+func TestAKillSwitchTurnedOnWhileClaimBlocksLeavesNewJobsQueued(t *testing.T) {
 	f := newWorkerFixture(t)
-	p := llmtest.New()
+	p := llmtest.New(llmtest.Say("done", 1, 1))
 	f.provider = p
-	w := f.worker("w1")
-	checks := make(chan struct{}, 1024)
-	w.onKillSwitch = func() {
-		select {
-		case checks <- struct{}{}:
-		default:
-		}
-	}
-	f.start(w)
+	f.start(f.worker("w1"))
 	waitFor(t, f.spy.emptyCh, "a blocked claim")
 	if err := SetKillSwitch(bg, f.st, true); err != nil {
 		t.Fatal(err)
 	}
+	for len(f.spy.emptyCh) > 0 {
+		<-f.spy.emptyCh
+	}
 	id := f.enqueue("g")
-	f.expect(id, "released")
-	assertRequeued(t, f.fixture, DefaultConfig().PausedDelay)
-	if j := f.job(); j.Runs != 1 || len(p.Requests()) != 0 {
-		t.Errorf("runs %d, %d model calls", j.Runs, len(p.Requests()))
-	}
 	for range 3 {
-		waitFor(t, checks, "a kill switch check")
+		waitFor(t, f.spy.emptyCh, "an empty claim with the kill switch on")
 	}
-	if n := f.spy.claims(); n != 1 {
-		t.Errorf("%d claims, want 1", n)
+	if j := f.job(); j.State != store.JobQueued || j.Runs != 0 || f.spy.claims() != 0 || len(p.Requests()) != 0 {
+		t.Fatalf("with the kill switch on: job %s runs %d, %d claims, %d model calls", j.State, j.Runs, f.spy.claims(), len(p.Requests()))
+	}
+	if err := SetKillSwitch(bg, f.st, false); err != nil {
+		t.Fatal(err)
+	}
+	f.expect(id, "released")
+	if j := f.job(); j.State != store.JobSucceeded || j.Runs != 1 || f.spy.claims() != 1 {
+		t.Errorf("after off: job %s runs %d, %d claims", j.State, j.Runs, f.spy.claims())
 	}
 }
 

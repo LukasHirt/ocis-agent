@@ -347,9 +347,17 @@ func TestTheDebugListenerCanBeDisabled(t *testing.T) {
 func TestTheKillSwitchCommandStopsAndResumesARunningApp(t *testing.T) {
 	f := newFixture(t, nil)
 	p := llmtest.New(llmtest.Say("resumed", 1, 1))
-	a := f.build(p)
+	spy := newClaimSpy(f.st)
+	a, err := Build(bg, f.cfg, spy, Options{Provider: p, Log: quietLog(), tune: fast()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.enroll(a)
 	r := start(t, a)
+	// the worker checked the switch (off) and is blocked in Claim, polling
+	if !spy.emptyClaims(2, 10*time.Second) {
+		t.Fatal("the worker does not poll")
+	}
 
 	var out bytes.Buffer
 	if err := KillSwitch(bg, f.st, false, "on", &out); err != nil {
@@ -359,9 +367,14 @@ func TestTheKillSwitchCommandStopsAndResumesARunningApp(t *testing.T) {
 		t.Errorf("on printed %q", out.String())
 	}
 	j := f.enqueue(a, "hello")
-	time.Sleep(1500 * time.Millisecond)
-	if got := f.job(j); got.State != store.JobQueued || len(p.Requests()) != 0 {
-		t.Fatalf("with the kill switch on: job %s, %d model calls", got.State, len(p.Requests()))
+	// many queue polls (20ms): the store hands nothing out, so the job is
+	// never claimed and no run is consumed
+	polled := spy.emptyClaims(20, 3*time.Second)
+	if got := f.job(j); got.State != store.JobQueued || got.Runs != 0 || len(p.Requests()) != 0 {
+		t.Fatalf("with the kill switch on: job %s runs %d, %d model calls", got.State, got.Runs, len(p.Requests()))
+	}
+	if !polled {
+		t.Error("the worker stopped polling while the switch was on")
 	}
 
 	out.Reset()
@@ -371,7 +384,11 @@ func TestTheKillSwitchCommandStopsAndResumesARunningApp(t *testing.T) {
 	if out.String() != "kill switch: off (database)\n" {
 		t.Errorf("off printed %q", out.String())
 	}
-	f.waitState(j, store.JobSucceeded, 15*time.Second)
+	// claimed at the next polls, with the production pause delay (5m): a
+	// job requeued by the runner's own check would not run again in time
+	if got := f.waitState(j, store.JobSucceeded, 2*time.Second); got.Runs != 1 {
+		t.Errorf("runs = %d, want 1", got.Runs)
+	}
 	if err := r.stop(t, 15*time.Second); err != nil {
 		t.Errorf("Run = %v", err)
 	}

@@ -85,10 +85,8 @@ func newFixture(t *testing.T, extra map[string]string) *fixture {
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// fast are the test tunings: a short queue poll and pause delay.
-func fast() tuning {
-	return tuning{queuePoll: 20 * time.Millisecond, pausedDelay: 50 * time.Millisecond}
-}
+// fast are the test tunings: a short queue poll.
+func fast() tuning { return tuning{queuePoll: 20 * time.Millisecond} }
 
 // build builds the app with the provider (nil: the one from the config).
 func (f *fixture) build(p llm.Provider) *App {
@@ -270,4 +268,51 @@ func (b *blocking) Complete(ctx context.Context, _ llm.CompletionRequest) (llm.C
 		b.cancelled <- struct{}{}
 		return llm.CompletionResponse{}, ctx.Err()
 	}
+}
+
+// claimSpy wraps a store and signals every ClaimNextJob that found nothing.
+type claimSpy struct {
+	store.Store
+	empty chan struct{}
+}
+
+func newClaimSpy(st store.Store) *claimSpy {
+	return &claimSpy{Store: st, empty: make(chan struct{}, 1024)}
+}
+
+func (s *claimSpy) InTx(ctx context.Context, fn func(store.Tx) error) error {
+	return s.Store.InTx(ctx, func(tx store.Tx) error { return fn(claimSpyTx{Tx: tx, s: s}) })
+}
+
+type claimSpyTx struct {
+	store.Tx
+	s *claimSpy
+}
+
+func (t claimSpyTx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, error) {
+	c, ok, err := t.Tx.ClaimNextJob(worker, ttl)
+	if err == nil && !ok {
+		select {
+		case t.s.empty <- struct{}{}:
+		default:
+		}
+	}
+	return c, ok, err
+}
+
+// emptyClaims drains the signals so far, then waits up to within for n new
+// empty claims and reports whether they came.
+func (s *claimSpy) emptyClaims(n int, within time.Duration) bool {
+	for len(s.empty) > 0 {
+		<-s.empty
+	}
+	deadline := time.After(within)
+	for range n {
+		select {
+		case <-s.empty:
+		case <-deadline:
+			return false
+		}
+	}
+	return true
 }

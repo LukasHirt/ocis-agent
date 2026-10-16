@@ -1,5 +1,13 @@
 package store
 
+// The kill switch is the system key KillSwitchKey; it is on exactly when its
+// value is KillSwitchOnValue (an absent key is off). While it is on,
+// ClaimNextJob hands out nothing, like for a paused user.
+const (
+	KillSwitchKey     = "killswitch"
+	KillSwitchOnValue = "1"
+)
+
 // pauseRank orders the automatic pause reasons: a higher rank is more serious
 // and replaces a lower one. The user's own pause is not ranked; see
 // PauseSupersedes.

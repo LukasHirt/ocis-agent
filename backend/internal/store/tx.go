@@ -100,8 +100,9 @@ type Tx interface {
 	ListSteps(userID, jobID string) ([]JobStep, error)
 
 	// ClaimNextJob claims the oldest runnable job whose user has no active
-	// lease and is not paused (a job already running is not touched). The
-	// bool is false when nothing is runnable.
+	// lease and is not paused (a job already running is not touched). While
+	// the kill switch (KillSwitchKey) is on it claims nothing. The bool is
+	// false when nothing is runnable.
 	ClaimNextJob(worker string, ttl time.Duration) (Claim, bool, error)
 	// RenewLease extends the lease. ErrFenceLost if it is no longer ours.
 	RenewLease(c Claim, ttl time.Duration) (Claim, error)
