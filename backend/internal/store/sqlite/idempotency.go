@@ -104,15 +104,34 @@ func (t *tx) GetIdempotent(userID, key string) (store.IdemRecord, error) {
 
 // ListStartedIdempotent implements store.Tx.
 func (t *tx) ListStartedIdempotent(olderThan time.Time, limit int) ([]store.IdemRecord, error) {
+	return t.listIdem(
+		`SELECT `+idemColumns+` FROM idempotency WHERE state = 'started' AND started_at <= ?
+		 ORDER BY started_at, idem_key LIMIT ?`, olderThan, limit)
+}
+
+// ListStartedIdempotentOfEndedJobs implements store.Tx. The job id is the
+// key's prefix before the first ":" (the whole key if it has none), matched
+// against the record user's jobs only.
+func (t *tx) ListStartedIdempotentOfEndedJobs(olderThan time.Time, limit int) ([]store.IdemRecord, error) {
+	return t.listIdem(
+		`SELECT i.idem_key, i.user_id, i.tool, i.state, i.started_at, i.finished_at, i.result
+		 FROM idempotency i
+		 LEFT JOIN jobs j ON j.user_id = i.user_id AND j.id = CASE
+		     WHEN instr(i.idem_key, ':') > 0 THEN substr(i.idem_key, 1, instr(i.idem_key, ':') - 1)
+		     ELSE i.idem_key END
+		 WHERE i.state = 'started' AND i.started_at <= ?
+		   AND (j.id IS NULL OR j.state IN ('succeeded', 'failed', 'cancelled'))
+		 ORDER BY i.started_at, i.idem_key LIMIT ?`, olderThan, limit)
+}
+
+func (t *tx) listIdem(query string, olderThan time.Time, limit int) ([]store.IdemRecord, error) {
 	if limit <= 0 {
 		limit = defaultIdemLimit
 	}
 	if limit > maxIdemLimit {
 		limit = maxIdemLimit
 	}
-	rows, err := t.q.QueryContext(t.ctx,
-		`SELECT `+idemColumns+` FROM idempotency WHERE state = 'started' AND started_at <= ?
-		 ORDER BY started_at, idem_key LIMIT ?`, ms(olderThan), limit)
+	rows, err := t.q.QueryContext(t.ctx, query, ms(olderThan), limit)
 	if err != nil {
 		return nil, err
 	}

@@ -190,6 +190,13 @@ type Tx interface {
 	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
 	// means 100; the maximum is 1000.
 	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
+	// ListStartedIdempotentOfEndedJobs returns the same records as
+	// ListStartedIdempotent, but only those whose job (the key's prefix before
+	// the first ":", a job of the record's user) has ended (succeeded, failed,
+	// cancelled) or no longer exists, oldest first. Records of active jobs are
+	// left out, so they cannot hide the records of ended jobs behind them.
+	// limit <= 0 means 100; the maximum is 1000.
+	ListStartedIdempotentOfEndedJobs(olderThan time.Time, limit int) ([]IdemRecord, error)
 
 	// PausePolicy pauses the agent for reason unless a pause that outranks it
 	// is already in place (see PauseSupersedes). changed is false if nothing
