@@ -42,7 +42,8 @@ spike:
 # worker role refuses to start without. To run the workers and the scheduler too, export AGENT_ROLES=api,worker
 # and AGENT_LLM_BASE_URL, AGENT_LLM_MODEL and AGENT_LLM_API_KEY (or AGENT_LLM_API_KEY_FILE; optional
 # AGENT_LLM_MODELS, AGENT_LLM_ALLOWED_HOSTS); they pass through from your shell. The kill switch for a running
-# sidecar: `go run -C backend ./cmd/ocis-agent killswitch on|off|status` with the same AGENT_DATA_DIR.
+# sidecar: `go run -C backend ./cmd/ocis-agent killswitch on|off|status` with the same AGENT_DATA_DIR, plus a
+# well-formed AGENT_MASTER_KEY and AGENT_OCIS_URL (the configuration loads first); it applies pending migrations.
 sidecar:
 	@mkdir -p $(CURDIR)/backend/bin/data
 	@test -f $(CURDIR)/backend/bin/data/dev-master.key || (umask 077 && openssl rand -base64 32 > $(CURDIR)/backend/bin/data/dev-master.key)
