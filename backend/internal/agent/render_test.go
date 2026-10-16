@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -273,7 +274,30 @@ func TestRenderResultHugeToolAndState(t *testing.T) {
 }
 
 func TestFenceLinear(t *testing.T) {
-	for _, c := range []string{strings.Repeat("<", 64<<10), "d" + strings.Repeat("<", 64<<10) + "x", "<" + strings.Repeat(" ", 64<<10)} {
-		Fence("s", "p", "h", c)
+	inputs := map[string]func(n int) string{
+		"openers":    func(n int) string { return strings.Repeat("<", n) },
+		"wrapped":    func(n int) string { return "d" + strings.Repeat("<", n) + "x" },
+		"skippables": func(n int) string { return "<" + strings.Repeat(" ", n) },
+		"near-miss":  func(n int) string { return strings.Repeat("< d a t ", n/8) },
+	}
+	// best of several runs, so scheduling noise only makes it slower
+	best := func(s string) time.Duration {
+		min := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			Fence("s", "p", "h", s)
+			if d := time.Since(start); d < min {
+				min = d
+			}
+		}
+		return min
+	}
+	const n = 32 << 10
+	for name, gen := range inputs {
+		small, large := best(gen(n)), best(gen(4*n))
+		// linear gives a ratio near 4, quadratic near 16
+		if ratio := float64(large) / float64(max(small, time.Microsecond)); ratio > 10 {
+			t.Errorf("%s: 4x the input took %.1fx the time (%v vs %v): not linear", name, ratio, large, small)
+		}
 	}
 }
