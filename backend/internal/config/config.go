@@ -23,6 +23,7 @@ type Config struct {
 	MasterKey     []byte
 	LLM           LLMConfig
 	Agent         AgentConfig
+	Process       ProcessConfig
 }
 
 // Load reads and validates the configuration. getenv is os.Getenv in
@@ -80,6 +81,10 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	if cfg.Agent, err = loadAgent(getenv); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.Process, err = loadProcess(getenv); err != nil {
 		return Config{}, err
 	}
 

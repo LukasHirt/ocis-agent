@@ -278,11 +278,11 @@ type RenewOutcome struct {
 	Err    error
 }
 
-// RenewDue renews every valid token that has used half of its lifetime (up to
-// limit). A token whose renewal fails permanently (401) is marked invalid and
-// leaves the due list; transient failures are returned in the outcomes and
-// retried on the next call.
-func (s *Service) RenewDue(ctx context.Context, limit int) ([]RenewOutcome, error) {
+// DueForRenewal returns the ids of the users whose valid token has used half
+// of its lifetime (up to limit), the users RenewDue would renew. A caller that
+// renews them one by one with Renew can stop early (the scheduler stops at an
+// oCIS outage).
+func (s *Service) DueForRenewal(ctx context.Context, limit int) ([]string, error) {
 	var due []store.TokenDue
 	if err := s.d.Store.View(ctx, func(tx store.Tx) error {
 		var err error
@@ -291,10 +291,26 @@ func (s *Service) RenewDue(ctx context.Context, limit int) ([]RenewOutcome, erro
 	}); err != nil {
 		return nil, fmt.Errorf("auth: list due tokens: %w", err)
 	}
-	out := make([]RenewOutcome, 0, len(due))
-	for _, d := range due {
-		res, err := s.Renew(ctx, d.UserID)
-		out = append(out, RenewOutcome{UserID: d.UserID, Result: res, Err: err})
+	ids := make([]string, len(due))
+	for i, d := range due {
+		ids[i] = d.UserID
+	}
+	return ids, nil
+}
+
+// RenewDue renews every valid token that has used half of its lifetime (up to
+// limit). A token whose renewal fails permanently (401) is marked invalid and
+// leaves the due list; transient failures are returned in the outcomes and
+// retried on the next call.
+func (s *Service) RenewDue(ctx context.Context, limit int) ([]RenewOutcome, error) {
+	ids, err := s.DueForRenewal(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RenewOutcome, 0, len(ids))
+	for _, id := range ids {
+		res, err := s.Renew(ctx, id)
+		out = append(out, RenewOutcome{UserID: id, Result: res, Err: err})
 	}
 	return out, nil
 }

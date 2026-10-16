@@ -100,8 +100,9 @@ type Tx interface {
 	ListSteps(userID, jobID string) ([]JobStep, error)
 
 	// ClaimNextJob claims the oldest runnable job whose user has no active
-	// lease and is not paused (a job already running is not touched). The
-	// bool is false when nothing is runnable.
+	// lease and is not paused (a job already running is not touched). While
+	// the kill switch (KillSwitchKey) is on it claims nothing. The bool is
+	// false when nothing is runnable.
 	ClaimNextJob(worker string, ttl time.Duration) (Claim, bool, error)
 	// RenewLease extends the lease. ErrFenceLost if it is no longer ours.
 	RenewLease(c Claim, ttl time.Duration) (Claim, error)
@@ -154,6 +155,15 @@ type Tx interface {
 	// ResumeJobIfSettled for every returned ref: the refs are never returned
 	// again, so a split would strand the job in waiting_approval.
 	ExpireApprovals() ([]ApprovalRef, error)
+	// ExpireEndedJobApprovals moves the pending and approved approvals of
+	// jobs that have ended (succeeded, failed, cancelled) to expired, oldest
+	// first (requested_at, then id), at most limit rows (limit <= 0 means
+	// 100, the maximum is 1000), and returns what it changed. An approved
+	// row keeps its decided_by and decided_at. It never touches executing
+	// approvals (their outcome is open and is reconciled instead), settled
+	// ones, or the approvals of a job that has not ended. Run it in the same
+	// transaction as the approval_expired audit event for every returned ref.
+	ExpireEndedJobApprovals(limit int) ([]ApprovalRef, error)
 	// ResumeJobIfSettled moves a job from waiting_approval back to queued
 	// (claimable now) when none of its approvals is still pending. It returns
 	// false if the job is not waiting or something is still pending. Call it
@@ -179,8 +189,17 @@ type Tx interface {
 	GetIdempotent(userID, key string) (IdemRecord, error)
 	// ListStartedIdempotent returns started records with started_at <=
 	// olderThan, oldest first (calls whose outcome may be unknown). limit <= 0
-	// means 100; the maximum is 1000.
+	// means 100; the maximum is 1000. No production code calls it (the
+	// scheduler reconciles via ListStartedIdempotentOfEndedJobs); it serves
+	// diagnostics and tests.
 	ListStartedIdempotent(olderThan time.Time, limit int) ([]IdemRecord, error)
+	// ListStartedIdempotentOfEndedJobs returns the same records as
+	// ListStartedIdempotent, but only those whose job (the key's prefix before
+	// the first ":", a job of the record's user) has ended (succeeded, failed,
+	// cancelled) or no longer exists, oldest first. Records of active jobs are
+	// left out, so they cannot hide the records of ended jobs behind them.
+	// limit <= 0 means 100; the maximum is 1000.
+	ListStartedIdempotentOfEndedJobs(olderThan time.Time, limit int) ([]IdemRecord, error)
 
 	// PausePolicy pauses the agent for reason unless a pause that outranks it
 	// is already in place (see PauseSupersedes). changed is false if nothing

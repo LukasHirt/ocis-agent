@@ -39,9 +39,17 @@ var (
 )
 
 // WorkerConfig configures a Worker. Log defaults to slog.Default.
+//
+// JobContext, if set, is the context the claimed jobs run under: the context
+// given to Run then controls claiming only, so a worker can drain (stop
+// claiming, let the running job finish) before its jobs are cancelled. When
+// JobContext ends, the running job is cancelled and requeued after
+// Config.ShutdownRequeueDelay, and the worker stops claiming too. Unset, the
+// jobs run under the context given to Run.
 type WorkerConfig struct {
-	ID  string
-	Log *slog.Logger
+	ID         string
+	Log        *slog.Logger
+	JobContext context.Context
 }
 
 // Worker claims jobs one at a time and runs them with the Runner, keeping the
@@ -52,6 +60,8 @@ type Worker struct {
 	r   *Runner
 	id  string
 	log *slog.Logger
+	// jobBase is WorkerConfig.JobContext (nil: the Run context)
+	jobBase context.Context
 
 	killPoll time.Duration
 	period   time.Duration // lease renewal: a third of the queue's ttl
@@ -75,15 +85,27 @@ func NewWorker(q *queue.Queue, st store.Store, r *Runner, cfg WorkerConfig) (*Wo
 		cfg.Log = slog.Default()
 	}
 	return &Worker{
-		q: q, st: st, r: r, id: cfg.ID, log: cfg.Log,
+		q: q, st: st, r: r, id: cfg.ID, log: cfg.Log, jobBase: cfg.JobContext,
 		killPoll: killSwitchPoll, period: max(q.LeaseTTL()/3, time.Millisecond),
 	}, nil
 }
 
-// Run claims and processes jobs until ctx ends. While the kill switch is on it
-// claims nothing.
+// Run claims and processes jobs until ctx (or the JobContext) ends, then
+// returns once the job it is running, if any, has been settled. While the kill
+// switch is on it claims nothing.
 func (w *Worker) Run(ctx context.Context) {
-	for ctx.Err() == nil {
+	base := w.jobBase
+	if base == nil {
+		base = ctx
+	}
+	// claiming ends with either context: without a job context left, a
+	// claimed job could only be requeued again
+	ctx, stopClaiming := context.WithCancel(ctx)
+	defer stopClaiming()
+	defer context.AfterFunc(base, stopClaiming)()
+	// base is checked too: the AfterFunc runs in its own goroutine, so ctx
+	// may still look alive for a moment after the job context ended
+	for ctx.Err() == nil && base.Err() == nil {
 		on, err := KillSwitchOn(ctx, w.st, w.r.cfg.KillSwitch)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -107,26 +129,13 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 			continue
 		}
-		w.process(ctx, claim)
+		w.process(base, claim)
 	}
 }
 
-// RunPool runs n workers (nil ones are skipped) until ctx ends and waits for
-// all of them.
-func RunPool(ctx context.Context, n int, newWorker func(i int) *Worker) {
-	var wg sync.WaitGroup
-	for i := range n {
-		w := newWorker(i)
-		if w == nil {
-			continue
-		}
-		wg.Go(func() { w.Run(ctx) })
-	}
-	wg.Wait()
-}
-
-// process runs one claim with its lease renewed, then settles what the
-// runner left: the renewal goroutine has ended before process returns.
+// process runs one claim under a context derived from ctx (the job
+// context, not the claim context) with its lease renewed, then settles what
+// the runner left: the renewal goroutine has ended before process returns.
 func (w *Worker) process(ctx context.Context, claim store.Claim) {
 	jobCtx, cancel := context.WithCancelCause(ctx)
 	var wg sync.WaitGroup
@@ -200,7 +209,8 @@ func (w *Worker) renew(ctx context.Context, cancel context.CancelCauseFunc, clai
 }
 
 // settle decides the job's fate after the runner returned, through the same
-// fenced store writes the runner uses, and reports the outcome.
+// fenced store writes the runner uses, and reports the outcome. ctx is the
+// job context: its end is a shutdown, whatever happened to claiming.
 func (w *Worker) settle(ctx, jobCtx context.Context, claim store.Claim, panicked bool, err error) string {
 	switch {
 	case !panicked && err == nil:
