@@ -1,0 +1,1 @@
+ALTER TABLE policies ADD COLUMN models TEXT NOT NULL DEFAULT '{}';

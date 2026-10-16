@@ -2,7 +2,25 @@ package store
 
 import (
 	"time"
+
+	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
+
+// Task kinds a user can prefer a model for.
+const (
+	ModelTaskChat      = "chat"
+	ModelTaskProactive = "proactive"
+)
+
+// ModelTaskFor maps a job's trigger kind to the task kind that selects the
+// model: interactive chat jobs use the chat preference, everything else
+// (file events, scheduled sweeps) the proactive one.
+func ModelTaskFor(triggerKind string) string {
+	if triggerKind == "chat" {
+		return ModelTaskChat
+	}
+	return ModelTaskProactive
+}
 
 // User is an enrolled user.
 type User struct {
@@ -45,7 +63,12 @@ type Policy struct {
 	QuietHours       string
 	DailyTokens      int64
 	DormancyDays     int // 0 disables the dormancy pause
-	UpdatedAt        time.Time
+	// Models maps a task kind (ModelTaskChat, ModelTaskProactive) to the model
+	// id the user prefers. The store does not know the operator's catalog:
+	// check llm.Catalog.Has before setting one and use llm.Catalog.Resolve
+	// before using one. Remove the key to go back to the default.
+	Models    map[string]string
+	UpdatedAt time.Time
 }
 
 // DefaultPolicy returns the policy a newly enrolled user starts with.
@@ -56,6 +79,7 @@ func DefaultPolicy(userID string, now time.Time) Policy {
 		SweepInterval: 6 * time.Hour,
 		DailyTokens:   200000,
 		DormancyDays:  30,
+		Models:        map[string]string{},
 		UpdatedAt:     now,
 	}
 }
@@ -77,6 +101,14 @@ func (p Policy) Validate() error {
 		return Invalid("daily tokens must not be negative")
 	case p.DormancyDays < 0:
 		return Invalid("dormancy days must not be negative")
+	}
+	for task, id := range p.Models {
+		if task != ModelTaskChat && task != ModelTaskProactive {
+			return Invalid("unknown model task kind")
+		}
+		if !llm.ValidModelID(id) {
+			return Invalid("the preferred model for %s is not a valid model id", task)
+		}
 	}
 	return nil
 }

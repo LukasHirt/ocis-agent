@@ -179,6 +179,57 @@ func runCore(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("model preferences", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		p := getPolicy(t, st, "u1")
+		if p.Models == nil || len(p.Models) != 0 {
+			t.Fatalf("default Models = %#v, want empty and non-nil", p.Models)
+		}
+
+		p.Models = map[string]string{store.ModelTaskChat: "gpt-x", store.ModelTaskProactive: "meta-llama/Llama-3.1:8b"}
+		mustTx(t, st, func(tx store.Tx) error { return tx.PutPolicy(p) })
+		got := getPolicy(t, st, "u1")
+		if len(got.Models) != 2 || got.Models[store.ModelTaskChat] != "gpt-x" || got.Models[store.ModelTaskProactive] != "meta-llama/Llama-3.1:8b" {
+			t.Fatalf("Models = %#v", got.Models)
+		}
+
+		got.ProactiveEnabled = true
+		mustTx(t, st, func(tx store.Tx) error { return tx.PutPolicy(got) })
+		if again := getPolicy(t, st, "u1"); len(again.Models) != 2 {
+			t.Errorf("an unrelated policy update lost the preferences: %#v", again.Models)
+		}
+
+		mustUser(t, st, "u1")
+		if again := getPolicy(t, st, "u1"); len(again.Models) != 2 {
+			t.Errorf("enrolling again lost the preferences: %#v", again.Models)
+		}
+
+		bad := map[string]map[string]string{
+			"unknown task": {"sweep": "gpt-x"},
+			"empty id":     {store.ModelTaskChat: ""},
+			"bad id":       {store.ModelTaskChat: "a b"},
+		}
+		for label, m := range bad {
+			cand := getPolicy(t, st, "u1")
+			cand.Models = m
+			err := st.InTx(bg(), func(tx store.Tx) error { return tx.PutPolicy(cand) })
+			if !errors.Is(err, store.ErrInvalid) {
+				t.Errorf("%s: PutPolicy err = %v, want ErrInvalid", label, err)
+			}
+		}
+		if still := getPolicy(t, st, "u1"); len(still.Models) != 2 {
+			t.Errorf("a refused update changed the stored preferences: %#v", still.Models)
+		}
+
+		clear := getPolicy(t, st, "u1")
+		clear.Models = nil
+		mustTx(t, st, func(tx store.Tx) error { return tx.PutPolicy(clear) })
+		if cleared := getPolicy(t, st, "u1"); cleared.Models == nil || len(cleared.Models) != 0 {
+			t.Errorf("clearing: Models = %#v, want empty and non-nil", cleared.Models)
+		}
+	})
+
 	t.Run("app token upsert, status and lookup", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u1")
