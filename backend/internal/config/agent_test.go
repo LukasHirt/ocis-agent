@@ -73,3 +73,50 @@ func TestAgentEmptyMeansDefault(t *testing.T) {
 		t.Errorf("%+v, %v", cfg.Agent, err)
 	}
 }
+
+func TestAgentBoundariesAreAccepted(t *testing.T) {
+	cfg, err := Load(llmEnv(map[string]string{
+		"AGENT_MAX_STEPS": "1", "AGENT_MAX_RUNS": "1", "AGENT_MAX_ATTEMPTS": "20", "AGENT_KILL_SWITCH": "false",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if a := cfg.Agent; a.MaxSteps != 1 || a.MaxRuns != 1 || a.MaxAttempts != 20 || a.KillSwitch {
+		t.Errorf("Agent = %+v", a)
+	}
+}
+
+func TestAgentLeaseTTLEdges(t *testing.T) {
+	for _, c := range []struct {
+		v  string
+		ok bool
+	}{{"999ms", false}, {"1s", true}, {"1h", true}, {"1h0m1s", false}} {
+		cfg, err := Load(llmEnv(map[string]string{"AGENT_LEASE_TTL": c.v}))
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.v, err, c.ok)
+			continue
+		}
+		if c.ok {
+			if want, _ := time.ParseDuration(c.v); cfg.Agent.LeaseTTL != want {
+				t.Errorf("%s: LeaseTTL = %v", c.v, cfg.Agent.LeaseTTL)
+			}
+		}
+	}
+}
+
+func TestAgentErrorsNeverEchoTheBadValue(t *testing.T) {
+	const bad = "zzBADVALUEzz"
+	for _, name := range []string{
+		"AGENT_WORKERS", "AGENT_MAX_STEPS", "AGENT_MAX_ATTEMPTS", "AGENT_MAX_RUNS",
+		"AGENT_LLM_MAX_TOKENS", "AGENT_LEASE_TTL", "AGENT_KILL_SWITCH",
+	} {
+		_, err := Load(llmEnv(map[string]string{name: bad}))
+		if err == nil {
+			t.Errorf("%s: no error", name)
+			continue
+		}
+		if strings.Contains(err.Error(), bad) {
+			t.Errorf("%s: error %q echoes the value", name, err)
+		}
+	}
+}
