@@ -90,7 +90,7 @@ everything a contributor needs.
 - Same-transaction rules: `InsertApproval` with `ReleaseJob(waiting_approval)`; `DecideApproval` with its `approval_decided` audit event and `ResumeJobIfSettled`; `ExpireApprovals` with `ResumeJobIfSettled` for every returned ref (refs are returned once, so a split strands the job). Idempotency keys are server-derived (job id, call id, args hash), never user-supplied.
 - `Job.Runs` counts every claim and is never refunded; a runner must cap it and release to queued with `RequeueJob` and a delay.
 - Model preference: `Policy.Models` maps a task kind (`store.ModelTaskChat`, `store.ModelTaskProactive`; `store.ModelTaskFor(trigger kind)`) to a model id. The store only checks the id's shape, so the API must check `llm.Catalog.Has` when setting one and the runner must use `Catalog.Resolve`. Always start from `GetPolicy` when changing a policy: a `Policy` built from scratch and put clears the preferences.
-- Pause: the user's own pause is sticky; automatic reasons are ranked (`PauseSupersedes`); `ClearPause` clears only the reasons the caller names.
+- Pause: the user's own pause is sticky; automatic reasons are ranked (`PauseSupersedes`); `ClearPause` clears only the reasons the caller names; queued jobs of a paused user are not claimed.
 
 ## oCIS access and memory
 

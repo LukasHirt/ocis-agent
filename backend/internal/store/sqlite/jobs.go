@@ -250,6 +250,7 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 		`SELECT j.id, j.user_id FROM jobs j LEFT JOIN leases l ON l.user_id = j.user_id
 		 WHERE j.state = 'queued' AND j.not_before <= ?
 		   AND (l.user_id IS NULL OR l.holder = '' OR l.expires_at <= ?)
+		   AND NOT EXISTS (SELECT 1 FROM policies p WHERE p.user_id = j.user_id AND p.paused = 1)
 		 ORDER BY j.created_at, j.id LIMIT 1`, ms(now), ms(now)).Scan(&id, &userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.Claim{}, false, nil
