@@ -76,6 +76,10 @@ func (r *Runner) approvalsByCall(ctx context.Context, claim store.Claim) (map[st
 // resolveNew classifies a call that has no approval yet and runs, denies or
 // collects it.
 func (r *Runner) resolveNew(ctx context.Context, claim store.Claim, env tools.Env, cp *Checkpoint, c llm.ToolCall, pending *[]approvals.Pending) (bool, error) {
+	// Prepare may already call oCIS
+	if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
+		return true, err
+	}
 	call := approvals.Call{ID: c.ID, Tool: c.Name, Args: json.RawMessage(c.Arguments)}
 	d, err := r.d.Gate.Classify(ctx, claim, env, call)
 	if err != nil {
@@ -164,6 +168,12 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 			// a job that still runs must have no pending approval: never
 			// execute, try again later
 			return true, r.backoff(ctx, claim)
+		}
+		if a.State == store.ApprovalApproved || a.State == store.ApprovalExecuting {
+			// about to execute or reconcile
+			if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
+				return true, err
+			}
 		}
 		out, err := r.d.Executor.Run(ctx, claim, env, a.ID)
 		if err == nil && a.State == store.ApprovalExpired && a.DecidedBy == "" {

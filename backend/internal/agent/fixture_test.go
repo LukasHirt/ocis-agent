@@ -74,6 +74,7 @@ func (c *clock) Advance(d time.Duration) {
 type fakeCreds struct {
 	mu           sync.Mutex
 	err          error
+	secret       string // "" means the fake's password
 	unauthorized atomic.Int32
 }
 
@@ -83,7 +84,17 @@ func (c *fakeCreds) AppCreds(context.Context, string) (ocisclient.Creds, error) 
 	if c.err != nil {
 		return ocisclient.Creds{}, c.err
 	}
+	if c.secret != "" {
+		return ocisclient.AppToken(login, ocisclient.Secret(c.secret)), nil
+	}
 	return ocisclient.AppToken(login, password), nil
+}
+
+// setSecret makes AppCreds hand out another token, like a renewal.
+func (c *fakeCreds) setSecret(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secret = s
 }
 
 func (c *fakeCreds) HandleUnauthorized(context.Context, string) error {

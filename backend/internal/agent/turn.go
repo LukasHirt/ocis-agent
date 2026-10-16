@@ -20,10 +20,11 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 		// also after a crash right after the turn that reached the limit
 		return true, r.fail(ctx, claim, ReasonStepLimit)
 	}
-	pol, stop, err := r.precheck(ctx, claim, inRun)
+	pol, creds, stop, err := r.precheck(ctx, claim, inRun)
 	if stop || err != nil {
 		return true, err
 	}
+	env.Creds = creds
 	excerpt, err := MemoryExcerpt(ctx, env.Memory, session(env))
 	if err != nil {
 		return true, err

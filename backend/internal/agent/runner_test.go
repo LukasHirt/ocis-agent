@@ -495,6 +495,9 @@ func TestAKillSwitchCancelsAJobInFlightButOnlyRequeuesAtClaim(t *testing.T) {
 		if calls != 1 {
 			t.Errorf("%d model calls", calls)
 		}
+		if n := f.executes("files.list"); n != 0 {
+			t.Errorf("the turn's read ran %d times after the kill switch", n)
+		}
 	})
 }
 
@@ -517,8 +520,15 @@ func TestAPausedUserIsRequeuedNotFailed(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("%d model calls, want 1", calls)
 	}
-	if tm := toolMessages(f.checkpoint().Messages); len(tm) != 1 {
-		t.Errorf("the turn's calls are still processed: %+v", tm)
+	// the pause is checked before every tool call: none of the turn's run
+	if tm := toolMessages(f.checkpoint().Messages); len(tm) != 0 {
+		t.Errorf("the turn's calls ran during the pause: %+v", tm)
+	}
+	if n := f.executes("files.list"); n != 0 {
+		t.Errorf("the read ran %d times", n)
+	}
+	if un := f.checkpoint().Unresolved(); len(un) != 1 {
+		t.Errorf("the call must wait for the next claim: %+v", un)
 	}
 }
 

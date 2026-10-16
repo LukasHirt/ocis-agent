@@ -9,6 +9,7 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/queue"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
@@ -61,7 +62,7 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 	if claim.Job.Runs > r.cfg.MaxRuns {
 		return r.fail(ctx, claim, ReasonRunsLimit)
 	}
-	if _, stop, err := r.precheck(ctx, claim, atClaim); stop || err != nil {
+	if _, _, stop, err := r.precheck(ctx, claim, atClaim); stop || err != nil {
 		return err
 	}
 	cp, err := ParseCheckpoint(claim.Job.Checkpoint)
@@ -103,46 +104,78 @@ const (
 	inRun
 )
 
-// precheck reads the kill switch, the policy, the credentials and the token
-// budget from the database. stop means the job was released.
-func (r *Runner) precheck(ctx context.Context, claim store.Claim, ph phase) (store.Policy, bool, error) {
+// precheck runs before every model call: gateCheck, then the daily token
+// budget. stop means the job was released.
+func (r *Runner) precheck(ctx context.Context, claim store.Claim, ph phase) (store.Policy, ocisclient.Creds, bool, error) {
+	pol, creds, stop, err := r.gateCheck(ctx, claim, ph)
+	if stop || err != nil {
+		return pol, creds, stop, err
+	}
 	userID := claim.Job.UserID
-	on, err := KillSwitchOn(ctx, r.d.Store, r.cfg.KillSwitch)
-	if err != nil {
-		return store.Policy{}, false, err
-	}
-	if on {
-		if ph == atClaim {
-			return store.Policy{}, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
-		}
-		return store.Policy{}, true, r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonKillSwitch})
-	}
-	var pol store.Policy
 	var in, out int64
 	since := startOfDay(r.cfg.Now())
 	if err := r.d.Store.View(ctx, func(tx store.Tx) error {
 		var err error
-		if pol, err = tx.GetPolicy(userID); err != nil {
-			return err
-		}
 		in, out, err = tx.SumJobTokens(userID, since)
 		return err
 	}); err != nil {
-		return store.Policy{}, false, fmt.Errorf("agent: read policy: %w", err)
-	}
-	if pol.Paused {
-		return pol, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
-	}
-	if _, err := r.d.Creds.AppCreds(ctx, userID); err != nil {
-		if errors.Is(err, auth.ErrCredentialInvalid) {
-			return pol, true, r.fail(ctx, claim, ReasonCredentials)
-		}
-		return pol, false, fmt.Errorf("agent: credentials: %w", err)
+		return pol, creds, false, fmt.Errorf("agent: read token usage: %w", err)
 	}
 	if pol.DailyTokens > 0 && in+out >= pol.DailyTokens {
-		return pol, true, r.fail(ctx, claim, ReasonBudget)
+		return pol, creds, true, r.fail(ctx, claim, ReasonBudget)
 	}
-	return pol, false, nil
+	return pol, creds, false, nil
+}
+
+// gateCheck runs before every model call and every tool call: the kill
+// switch (requeue at claim, cancel in a run), the pause (requeue) and the
+// credentials (fail when invalid), all read from the database. It returns the
+// current credentials, so a token renewed during the claim is used at once.
+// stop means the job was released.
+func (r *Runner) gateCheck(ctx context.Context, claim store.Claim, ph phase) (store.Policy, ocisclient.Creds, bool, error) {
+	userID := claim.Job.UserID
+	none := ocisclient.Creds{}
+	on, err := KillSwitchOn(ctx, r.d.Store, r.cfg.KillSwitch)
+	if err != nil {
+		return store.Policy{}, none, false, err
+	}
+	if on {
+		if ph == atClaim {
+			return store.Policy{}, none, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
+		}
+		return store.Policy{}, none, true, r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonKillSwitch})
+	}
+	var pol store.Policy
+	if err := r.d.Store.View(ctx, func(tx store.Tx) error {
+		var err error
+		pol, err = tx.GetPolicy(userID)
+		return err
+	}); err != nil {
+		return store.Policy{}, none, false, fmt.Errorf("agent: read policy: %w", err)
+	}
+	if pol.Paused {
+		return pol, none, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
+	}
+	creds, err := r.d.Creds.AppCreds(ctx, userID)
+	if err != nil {
+		if errors.Is(err, auth.ErrCredentialInvalid) {
+			return pol, none, true, r.fail(ctx, claim, ReasonCredentials)
+		}
+		return pol, none, false, fmt.Errorf("agent: credentials: %w", err)
+	}
+	return pol, creds, false, nil
+}
+
+// toolCheck is gateCheck before a tool call; it refreshes env's credentials.
+// An approval stays as it is when the job stops here, so the next claim
+// continues it unchanged.
+func (r *Runner) toolCheck(ctx context.Context, claim store.Claim, env *tools.Env) (bool, error) {
+	_, creds, stop, err := r.gateCheck(ctx, claim, inRun)
+	if stop || err != nil {
+		return true, err
+	}
+	env.Creds = creds
+	return false, nil
 }
 
 func startOfDay(t time.Time) time.Time {
