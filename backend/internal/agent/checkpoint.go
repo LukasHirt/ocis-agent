@@ -38,6 +38,12 @@ func ParseCheckpoint(raw json.RawMessage) (Checkpoint, error) {
 	if err := json.Unmarshal(t, &cp); err != nil {
 		return Checkpoint{}, fmt.Errorf("agent: parse checkpoint: %w", err)
 	}
+	var keys map[string]json.RawMessage
+	_ = json.Unmarshal(t, &keys) // already known to be an object
+	if _, hasV := keys["v"]; !hasV && cp.V == 0 && len(cp.Messages) == 0 && cp.NextCall == 0 &&
+		cp.Turns == 0 && len(cp.Seen) == 0 && cp.Answer == "" {
+		return Checkpoint{V: 1, Seen: map[string]int{}}, nil
+	}
 	if cp.V != 1 {
 		return Checkpoint{}, fmt.Errorf("agent: unknown checkpoint version %d", cp.V)
 	}
@@ -49,10 +55,13 @@ func ParseCheckpoint(raw json.RawMessage) (Checkpoint, error) {
 
 // Marshal encodes the checkpoint, refusing one over MaxCheckpointBytes.
 func (c Checkpoint) Marshal() (json.RawMessage, error) {
-	b, err := json.Marshal(c)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // do not inflate <, > and & six-fold
+	if err := enc.Encode(c); err != nil {
 		return nil, fmt.Errorf("agent: marshal checkpoint: %w", err)
 	}
+	b := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	if len(b) > MaxCheckpointBytes {
 		return nil, errors.New("agent: checkpoint too large")
 	}

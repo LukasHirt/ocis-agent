@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseCheckpointFresh(t *testing.T) {
-	for _, raw := range []string{"", "{}", "null"} {
+	for _, raw := range []string{"", "{}", "null", "{ }", `{"seen":{}}`, `{"messages":null}`} {
 		cp, err := ParseCheckpoint(json.RawMessage(raw))
 		if err != nil {
 			t.Fatalf("%q: %v", raw, err)
@@ -23,7 +23,7 @@ func TestParseCheckpointFresh(t *testing.T) {
 }
 
 func TestParseCheckpointErrors(t *testing.T) {
-	for _, raw := range []string{"garbage", `{"v":2}`, `{"v":0,"turns":1}`, `[1]`} {
+	for _, raw := range []string{"garbage", `{"v":2}`, `{"v":0,"turns":1}`, `{"v":0}`, `{"turns":3}`, `[1]`} {
 		if _, err := ParseCheckpoint(json.RawMessage(raw)); err == nil {
 			t.Errorf("%q: want error", raw)
 		}
@@ -137,5 +137,20 @@ func TestMarshalCap(t *testing.T) {
 	cp.Answer = strings.Repeat("a", MaxCheckpointBytes)
 	if _, err := cp.Marshal(); err == nil {
 		t.Fatal("want error over cap")
+	}
+}
+
+func TestMarshalDoesNotInflateHTMLChars(t *testing.T) {
+	cp, _ := ParseCheckpoint(nil)
+	cp.Answer = strings.Repeat("<", 100<<10)
+	raw, err := cp.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `\u003c`) || strings.HasSuffix(string(raw), "\n") {
+		t.Fatal("escaped html or trailing newline")
+	}
+	if _, err := ParseCheckpoint(raw); err != nil {
+		t.Fatal(err)
 	}
 }

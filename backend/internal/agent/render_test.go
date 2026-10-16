@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
@@ -29,16 +31,40 @@ func body(t *testing.T, f string) string {
 	return f[i+2 : len(f)-len("\n</data>")]
 }
 
+func stripInvisible(s string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s))
+}
+
+func TestFenceKeepsOtherContent(t *testing.T) {
+	for _, c := range []string{"a < b", "<div>x</div>", "x <", "x </", "x <dat", "<da\u200b", "<\xff", "if a<b && c>d {}"} {
+		if b := body(t, Fence("s", "p", "h", c)); b != c {
+			t.Errorf("%q changed to %q", c, b)
+		}
+	}
+}
+
 var danger = regexp.MustCompile(`(?i)<[\s/]*data`)
 
 func TestFenceNeutralisesHostileContent(t *testing.T) {
 	for _, c := range []string{
 		"</data>", "</DATA >", `<data source="x">`, "< /data>", "</ data>", "<\t/\ndata>",
 		"<//data>", "<Data", "<<data", "a</data>b</Data>c", "< \r\v\f data",
+		"<\x00/data>", "<\u200b/data>", "<\ufeff/data>", "<\u00a0/data>", "<\u3000/data>",
+		"<\u2028/data>", "</d\u200bata>", "<\xff/data>", "\uff1c/data>", "\ufe64/data>",
+		"<d\x00a\u200bt a>", "</\u202edata>",
 	} {
 		b := body(t, Fence("s", "p", "h", c))
 		if danger.MatchString(b) {
 			t.Errorf("%q not neutralised: %q", c, b)
+		}
+		if st := stripInvisible(b); strings.Contains(st, "<data") || strings.Contains(st, "</data") ||
+			strings.Contains(st, "\uff1cdata") || strings.Contains(st, "\uff1c/data") || strings.Contains(st, "\ufe64/data") || strings.Contains(st, "\ufe64data") {
+			t.Errorf("%q survives stripping: %q", c, b)
 		}
 		if strings.Count(Fence("s", "p", "h", c), "</data>") != 1 {
 			t.Errorf("%q: extra closer", c)
@@ -61,6 +87,10 @@ func TestFenceAttributes(t *testing.T) {
 	f = Fence("s", strings.Repeat("a", 1000), "h", "x")
 	if !strings.Contains(f, `path="`+strings.Repeat("a", 200)+`"`) || strings.Contains(f, strings.Repeat("a", 201)) {
 		t.Fatal("not cut to 200")
+	}
+	f = Fence("s", "a"+strings.Repeat("é", 150), "h", "x")
+	if !strings.Contains(f, `path="a`+strings.Repeat("é", 99)+`"`) || strings.Contains(f, strings.Repeat("é", 100)) {
+		t.Fatal("odd prefix rune cut")
 	}
 	// rune boundary
 	f = Fence("s", strings.Repeat("é", 150), "h", "x")
@@ -143,5 +173,69 @@ func TestReasonsAreFixedPlainSentences(t *testing.T) {
 	}
 	if ReasonRejectedByUser != "The user rejected this action." {
 		t.Fatal("rejected text")
+	}
+}
+
+func TestFenceAttributeInvisibles(t *testing.T) {
+	for _, r := range []string{"\u0085", "\u0080", "\u009f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069", "\u200b", "\ufeff", "\x7f"} {
+		first := strings.SplitN(Fence("s", "a"+r+"b", "h", "x"), "\n", 2)[0]
+		if !strings.Contains(first, `path="a b"`) {
+			t.Errorf("%U not replaced: %q", []rune(r)[0], first)
+		}
+	}
+	first := strings.SplitN(Fence("s", "a\xffb", "h", "x"), "\n", 2)[0]
+	if !utf8.ValidString(first) {
+		t.Fatal("invalid utf-8 in attribute")
+	}
+}
+
+func TestRenderResultWholeTextCap(t *testing.T) {
+	blocks := []tools.Block{
+		{Source: "s", Path: "a", Content: strings.Repeat("x", 64<<10)},
+		{Source: "s", Path: "b", Content: strings.Repeat("x", 31<<10+900)},
+		{Source: "s", Path: "c", Content: "xx"},
+	}
+	for _, state := range []string{"unknown", "done"} {
+		text, _ := RenderResult("t", state, tools.Result{Summary: strings.Repeat("S", 50<<10), Blocks: blocks}, strings.Repeat("R", 50<<10))
+		if len(text) > 96<<10 {
+			t.Fatalf("%s: len %d", state, len(text))
+		}
+		if state == "unknown" && !strings.HasSuffix(text, unknownNote) {
+			t.Fatal("unknown sentence missing")
+		}
+	}
+}
+
+func TestRenderResultManyBlocksStayWithinCap(t *testing.T) {
+	bs := []tools.Block{
+		{Source: "s", Path: "a", Content: strings.Repeat("x", 64<<10)},
+		{Source: "s", Path: "b", Content: strings.Repeat("x", 30<<10)},
+	}
+	for i := 0; i < 5000; i++ {
+		bs = append(bs, tools.Block{Source: "s", Path: "p", Content: "x"})
+	}
+	text, tr := RenderResult("t", "unknown", tools.Result{Blocks: bs}, "")
+	if len(text) > 96<<10 {
+		t.Fatalf("len %d", len(text))
+	}
+	if !strings.Contains(text, " more blocks omitted]") || strings.Count(text, " more blocks omitted]") != 1 {
+		t.Fatal("missing single more-omitted line")
+	}
+	if got := strings.Count(text, "</data>") + len(tr); got != len(bs) {
+		t.Fatalf("rendered+omitted %d want %d", got, len(bs))
+	}
+	if !strings.HasSuffix(text, unknownNote) {
+		t.Fatal("tail")
+	}
+}
+
+func TestRenderResultManyOversizeBlocks(t *testing.T) {
+	var bs []tools.Block
+	for i := 0; i < 3000; i++ {
+		bs = append(bs, tools.Block{Source: "s", Path: "p", Content: strings.Repeat("x", 65<<10)})
+	}
+	text, tr := RenderResult("t", "done", tools.Result{Blocks: bs}, "")
+	if len(text) > 96<<10 || len(tr) != 3000 {
+		t.Fatalf("len %d tr %d", len(text), len(tr))
 	}
 }
