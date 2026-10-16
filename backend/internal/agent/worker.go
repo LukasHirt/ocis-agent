@@ -103,7 +103,9 @@ func (w *Worker) Run(ctx context.Context) {
 	ctx, stopClaiming := context.WithCancel(ctx)
 	defer stopClaiming()
 	defer context.AfterFunc(base, stopClaiming)()
-	for ctx.Err() == nil {
+	// base is checked too: the AfterFunc runs in its own goroutine, so ctx
+	// may still look alive for a moment after the job context ended
+	for ctx.Err() == nil && base.Err() == nil {
 		on, err := KillSwitchOn(ctx, w.st, w.r.cfg.KillSwitch)
 		if err != nil {
 			if ctx.Err() == nil {

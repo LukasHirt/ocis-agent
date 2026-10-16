@@ -786,7 +786,9 @@ func TestGoexitInTheRunnerStopsTheRenewal(t *testing.T) {
 	case <-time.After(wait):
 		t.Fatal("Run did not end with the Goexit")
 	}
-	// the parent ctx is still alive: only the deferred cleanup stops it
+	// the parent ctx is still alive: only the deferred cleanup stops it (without
+	// process's deferred cancel(errJobEnded) the deferred wg.Wait hangs and Run
+	// never returns)
 	if n := w.live.Load(); n != 0 {
 		t.Errorf("%d renewal goroutines left after Goexit", n)
 	}
@@ -1156,4 +1158,31 @@ func TestAWorkerWaitingForAJobReturnsWhenClaimingStops(t *testing.T) {
 			t.Errorf("%d claims", n)
 		}
 	})
+}
+
+// A worker whose JobContext has already ended claims nothing, even though the
+// claim context is still alive (no window before the AfterFunc fires).
+func TestAWorkerWhoseJobContextEndedClaimsNothing(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		f := newWorkerFixture(t)
+		f.provider = llmtest.New(llmtest.Say("done", 1, 1))
+		f.enqueue("g")
+		jobCtx, stopJobs := context.WithCancel(bg)
+		stopJobs()
+		f.jobCtx = jobCtx
+		w := f.worker("w1")
+		ctx, cancel := context.WithCancel(bg)
+		done := make(chan struct{})
+		go func() { defer close(done); w.Run(ctx) }()
+		select {
+		case <-done:
+		case <-time.After(wait):
+			cancel()
+			t.Fatal("Run did not return after its JobContext ended")
+		}
+		cancel()
+		if n := f.spy.claims(); n != 0 {
+			t.Fatalf("run %d: %d claims after the JobContext ended", i, n)
+		}
+	}
 }
