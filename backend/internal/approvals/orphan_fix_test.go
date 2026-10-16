@@ -236,3 +236,41 @@ func TestTheGiveUpAgeIsConfigurable(t *testing.T) {
 		t.Fatalf("summary = %+v %v", sum, err)
 	}
 }
+
+func TestReconcileOrphansStopsWhenTheContextEnds(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 3; i++ {
+		f.storeOrphan(userID)
+	}
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	calls := 0
+	env := func(context.Context, string) (tools.Env, error) {
+		calls++
+		cancel() // the scheduler's deadline runs out during the first record
+		return tools.Env{}, context.Canceled
+	}
+	sum, err := f.ex.ReconcileOrphans(ctx, env, f.due(), 100)
+	if calls != 1 || !errors.Is(err, context.Canceled) || sum.Resolved != 0 {
+		t.Fatalf("calls %d, summary %+v, err %v: want a stop after the first record", calls, sum, err)
+	}
+}
+
+func TestACheckCutShortByTheContextLeavesTheRecordOpen(t *testing.T) {
+	f := newFixture(t)
+	p := f.probes["probe.write"]
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	p.recon = func(tools.ExecInfo) (tools.Reconciled, error) {
+		cancel()
+		return tools.Reconciled{}, fmt.Errorf("stat: %w", context.Canceled)
+	}
+	_, a := crashedAndEnded(t, f, p)
+	f.clk.Advance(48 * time.Hour) // even past the give-up age
+	if _, err := f.ex.ReconcileOrphans(ctx, f.envFor(), f.due(), 100); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the context error", err)
+	}
+	if rec, _ := f.idem(a.IdemKey); rec.State != store.IdemStarted || f.approvalOf(a.ID).State != store.ApprovalExecuting {
+		t.Fatal("a check cut short must leave the record open")
+	}
+}

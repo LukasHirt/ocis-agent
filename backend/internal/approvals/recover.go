@@ -59,7 +59,9 @@ func (x *Executor) givenUp(rec store.IdemRecord) bool {
 // olderThan is clamped to Now()-RetrySettle: a call that started within the
 // settle window may still be in flight (cancelling a job does not stop its
 // worker), so a sweep never touches it. Pass a cut-off of at least the longest
-// call duration plus RetrySettle.
+// call duration plus RetrySettle. Once ctx ends it stops (returning the
+// context error with what it did so far) and a check the context cut short
+// leaves its record open.
 func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderThan time.Time, limit int) (ReconcileSummary, error) {
 	if settled := x.cfg.Now().Add(-x.cfg.RetrySettle); olderThan.After(settled) {
 		olderThan = settled
@@ -74,6 +76,10 @@ func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderTh
 	}
 	var sum ReconcileSummary
 	for _, rec := range recs {
+		if err := ctx.Err(); err != nil {
+			// a deadline of the caller: the rest waits for the next pass
+			return sum, fmt.Errorf("approvals: reconcile orphans: %w", err)
+		}
 		resolved, err := x.reconcileOne(ctx, envFor, rec)
 		switch {
 		case err != nil:
@@ -83,6 +89,9 @@ func (x *Executor) ReconcileOrphans(ctx context.Context, envFor EnvFunc, olderTh
 		default:
 			sum.Skipped++
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return sum, fmt.Errorf("approvals: reconcile orphans: %w", err)
 	}
 	return sum, nil
 }
@@ -156,6 +165,8 @@ func (x *Executor) checkOrphan(ctx context.Context, envFor EnvFunc, rc tools.Rec
 	}
 	env, err := envFor(ctx, rec.UserID)
 	switch {
+	case err != nil && ctx.Err() != nil:
+		return nil, "", fmt.Errorf("approvals: environment for user: %w", err)
 	case err != nil && noCredentials(err):
 		return unknown(reasonNoCredentials), "", nil
 	case err != nil && x.givenUp(rec):
@@ -166,6 +177,9 @@ func (x *Executor) checkOrphan(ctx context.Context, envFor EnvFunc, rc tools.Rec
 	cred := env.Creds.Kind()
 	r, err := rc.Reconcile(ctx, env, a.Args, tools.ExecInfo{IdemKey: a.IdemKey, TargetETag: a.TargetETag})
 	switch {
+	case err != nil && ctx.Err() != nil:
+		// cut short by the caller's deadline: the tool could not tell
+		return nil, cred, fmt.Errorf("approvals: reconcile: %w", err)
 	case err != nil && errors.Is(err, ocisclient.ErrUnauthorized) && x.givenUp(rec):
 		return unknown(reasonGaveUp), cred, nil
 	case err != nil && errors.Is(err, ocisclient.ErrUnauthorized):
