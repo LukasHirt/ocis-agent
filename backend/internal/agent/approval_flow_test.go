@@ -64,7 +64,7 @@ func TestAWriteNeedingApprovalReleasesTheJobAndWritesNothing(t *testing.T) {
 	if un := cp.Unresolved(); len(un) != 1 || un[0].ID != "c0" {
 		t.Errorf("unresolved = %+v", un)
 	}
-	if _, _, ok := f.fake.File(drive, "/a.txt"); ok || f.modifying("/a.txt") != 0 {
+	if _, _, ok := f.fake.File(drive, "/a.txt"); ok || f.modifying("/a.txt") != 0 || f.executes("files.write_new") != 0 {
 		t.Error("nothing may be written before the approval")
 	}
 	if len(p.Requests()) != 1 {
@@ -74,7 +74,29 @@ func TestAWriteNeedingApprovalReleasesTheJobAndWritesNothing(t *testing.T) {
 
 func TestApprovingResumesTheJobAndExecutesExactlyOnce(t *testing.T) {
 	f := newFixture(t)
-	p, a := requestApproval(t, f)
+	p := llmtest.New(
+		llmtest.Calls(1, 1, list("l", "/"), writeNew("w", "/a.txt", "hi")),
+		llmtest.Say("written", 1, 1),
+	)
+	f.provider = p
+	f.enqueue("write a file")
+	f.runOnce()
+
+	// the read runs, the write waits for its approval
+	if j := f.job(); j.State != store.JobWaitingApproval {
+		t.Fatalf("job = %s", j.State)
+	}
+	as := f.approvals()
+	if len(as) != 1 || as[0].CallID != "c1" || as[0].State != store.ApprovalPending || as[0].Tool != "files.write_new" {
+		t.Fatalf("approvals = %+v", as)
+	}
+	a := as[0]
+	if _, _, ok := f.fake.File(drive, "/a.txt"); ok || f.executes("files.write_new") != 0 {
+		t.Fatal("nothing may be written before the approval")
+	}
+	if un := f.checkpoint().Unresolved(); len(un) != 1 || un[0].ID != "c1" {
+		t.Fatalf("unresolved = %+v", un)
+	}
 	f.decide(a, store.ApprovalApproved)
 	if f.job().State != store.JobQueued {
 		t.Fatalf("job = %s after approval", f.job().State)
@@ -87,8 +109,8 @@ func TestApprovingResumesTheJobAndExecutesExactlyOnce(t *testing.T) {
 	if err := f.runner().Run(bg, c); !errors.Is(err, errInjected) {
 		t.Fatalf("err = %v, want the injected fault", err)
 	}
-	if f.approvals()[0].State != store.ApprovalExecuted || f.modifying("/a.txt") != 1 {
-		t.Fatalf("approval = %s, %d writes", f.approvals()[0].State, f.modifying("/a.txt"))
+	if f.approvals()[0].State != store.ApprovalExecuted || f.modifying("/a.txt") != 1 || f.executes("files.write_new") != 1 {
+		t.Fatalf("approval = %s, %d writes, %d executes", f.approvals()[0].State, f.modifying("/a.txt"), f.executes("files.write_new"))
 	}
 
 	// second resume: the stored outcome is reported, nothing runs again
@@ -100,30 +122,36 @@ func TestApprovingResumesTheJobAndExecutesExactlyOnce(t *testing.T) {
 	if data, _, ok := f.fake.File(drive, "/a.txt"); !ok || string(data) != "hi" {
 		t.Fatalf("file = %q %v", data, ok)
 	}
+	if n := f.executes("files.write_new"); n != 1 {
+		t.Errorf("the write was executed %d times, want 1", n)
+	}
 	if n := f.modifying("/a.txt"); n != 1 {
 		t.Errorf("the file was written %d times, want 1", n)
 	}
 	if n := len(f.auditOf("action_executed")); n != 1 {
 		t.Errorf("%d action_executed events, want 1", n)
 	}
+	if st := f.approvals()[0].State; st != store.ApprovalExecuted {
+		t.Errorf("approval = %s", st)
+	}
 	reqs := p.Requests()
 	if len(reqs) != 2 {
 		t.Fatalf("%d model calls", len(reqs))
 	}
 	tm := toolMessages(reqs[1].Messages)
-	if len(tm) != 1 || tm[0].ToolCallID != "c0" || !strings.Contains(tm[0].Content, "files.write_new): done") {
+	if len(tm) != 2 || tm[0].ToolCallID != "c0" || tm[1].ToolCallID != "c1" || !strings.Contains(tm[1].Content, "files.write_new): done") {
 		t.Errorf("tool messages = %+v", tm)
 	}
 	if f.checkpoint().Answer != "written" {
 		t.Errorf("answer = %q", f.checkpoint().Answer)
 	}
 
-	// a stale copy of the first claim runs nothing either
+	// a stale copy of the first claim (a third resume) runs nothing either
 	if err := f.runner().Run(bg, c); !lost(err) {
 		t.Errorf("stale claim: err = %v, want a lost lease", err)
 	}
-	if n := f.modifying("/a.txt"); n != 1 {
-		t.Errorf("after a stale run the file was written %d times, want 1", n)
+	if n, m := f.executes("files.write_new"), f.modifying("/a.txt"); n != 1 || m != 1 {
+		t.Errorf("after a stale run: %d executes, %d writes, want 1 each", n, m)
 	}
 	if f.job().State != store.JobSucceeded || len(p.Requests()) != 2 {
 		t.Errorf("a stale run changed the job: %s, %d model calls", f.job().State, len(p.Requests()))
@@ -141,7 +169,8 @@ func TestRejectingTellsTheModelAndWritesNothing(t *testing.T) {
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("job = %+v", f.job())
 	}
-	if f.modifying("/a.txt") != 0 || len(f.auditOf("action_executed")) != 0 {
+	if _, _, ok := f.fake.File(drive, "/a.txt"); ok || f.modifying("/a.txt") != 0 || f.executes("files.write_new") != 0 ||
+		len(f.auditOf("action_executed")) != 0 {
 		t.Fatal("a rejected write must not happen")
 	}
 	tm := toolMessages(p.Requests()[1].Messages)
@@ -174,7 +203,7 @@ func TestAnExpiredApprovalIsReportedToTheModel(t *testing.T) {
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("job = %+v", f.job())
 	}
-	if f.modifying("/a.txt") != 0 || f.approvals()[0].State != store.ApprovalExpired {
+	if f.modifying("/a.txt") != 0 || f.executes("files.write_new") != 0 || f.approvals()[0].State != store.ApprovalExpired {
 		t.Fatalf("an expired approval must not run: %d writes, %s", f.modifying("/a.txt"), f.approvals()[0].State)
 	}
 	tm := toolMessages(p.Requests()[1].Messages)
@@ -192,7 +221,7 @@ func TestAnApprovalThatRunsOutAfterTheDecisionIsNotExecuted(t *testing.T) {
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("job = %+v", f.job())
 	}
-	if f.modifying("/a.txt") != 0 || f.approvals()[0].State != store.ApprovalExpired {
+	if f.modifying("/a.txt") != 0 || f.executes("files.write_new") != 0 || f.approvals()[0].State != store.ApprovalExpired {
 		t.Fatalf("%d writes, approval %s", f.modifying("/a.txt"), f.approvals()[0].State)
 	}
 	tm := toolMessages(p.Requests()[1].Messages)
@@ -257,6 +286,20 @@ func TestAMixedTurnKeepsOrderAndRequestsOneBatch(t *testing.T) {
 	}
 	if len(puts) != 2 || puts[0] != dav+"/a.txt" || puts[1] != dav+"/b.txt" {
 		t.Errorf("PUTs = %v, want a.txt then b.txt once each", puts)
+	}
+	if n := f.executes("files.write_new"); n != 2 {
+		t.Errorf("%d write executes, want 2", n)
+	}
+	for _, w := range []string{`{"content":"A","path":"/a.txt"}`, `{"content":"B","path":"/b.txt"}`} {
+		if n := f.executes("files.write_new", w); n != 1 {
+			t.Errorf("%s executed %d times, want 1", w, n)
+		}
+	}
+	if n := f.executes("files.list"); n != 1 {
+		t.Errorf("the read executed %d times, want 1", n)
+	}
+	if n := f.executes("files.nope"); n != 0 {
+		t.Errorf("the denied call executed %d times", n)
 	}
 	reqs := p.Requests()
 	if len(reqs) != 2 {
@@ -323,9 +366,10 @@ func TestAPendingApprovalOnResumeNeverExecutes(t *testing.T) {
 	if n := len(f.auditOf("action_executed")); n != 0 {
 		t.Errorf("%d action_executed events", n)
 	}
-	var rec store.IdemRecord
-	err := f.st.View(bg, func(tx store.Tx) error { var err error; rec, err = tx.GetIdempotent(userID, a.IdemKey); return err })
-	if !errors.Is(err, store.ErrNotFound) {
+	if f.executes("files.write_new") != 0 {
+		t.Error("a pending approval was executed")
+	}
+	if rec, err := f.idemMaybe(a.IdemKey); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("an idempotency record was begun: %+v, %v", rec, err)
 	}
 	if len(p.Requests()) != 1 {
@@ -340,7 +384,7 @@ func TestTamperedStoredArgumentsFailTheJobAndAreAudited(t *testing.T) {
 	f.rawSQL(`UPDATE approvals SET args = ? WHERE id = ?`, `{"content":"evil","path":"/a.txt"}`, a.ID)
 	f.runOnce()
 	assertFailed(t, f, ReasonInternal)
-	if f.modifying("/a.txt") != 0 {
+	if f.modifying("/a.txt") != 0 || f.executes("files.write_new") != 0 {
 		t.Fatal("tampered arguments must not run")
 	}
 	if ev := f.auditOf("tampered"); len(ev) != 1 || ev[0].Tool != "files.write_new" || ev[0].Outcome != "refused" {
@@ -351,5 +395,69 @@ func TestTamperedStoredArgumentsFailTheJobAndAreAudited(t *testing.T) {
 	}
 	if len(p.Requests()) != 1 {
 		t.Errorf("%d model calls", len(p.Requests()))
+	}
+}
+
+// expiredSteps counts the expired tool steps of call c0.
+func expiredSteps(f *fixture, approvalID string) int {
+	n := 0
+	for _, s := range f.steps() {
+		if s.Kind == "tool" && s.CallID == "c0" && s.Status == "expired" && s.ApprovalID == approvalID {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAnExpiredApprovalGetsExactlyOneStep(t *testing.T) {
+	t.Run("expired while pending", func(t *testing.T) {
+		f := newFixture(t)
+		_, a := requestApproval(t, f)
+		f.clk.Advance(169 * time.Hour)
+		if _, err := f.gate.ExpireAndResume(bg); err != nil {
+			t.Fatal(err)
+		}
+		f.runOnce()
+		if n := expiredSteps(f, a.ID); n != 1 {
+			t.Errorf("%d expired steps, want 1: %+v", n, f.steps())
+		}
+	})
+	t.Run("approved but overdue", func(t *testing.T) {
+		f := newFixture(t)
+		_, a := requestApproval(t, f)
+		f.decide(a, store.ApprovalApproved)
+		f.clk.Advance(169 * time.Hour)
+		// the executor expires it and records the step; a crash before the
+		// tool message is saved must not add a second one
+		f.faults.failAt("SaveCheckpoint", 1)
+		c := f.claim()
+		if err := f.runner().Run(bg, c); !errors.Is(err, errInjected) {
+			t.Fatalf("err = %v", err)
+		}
+		f.requeueNow(c)
+		f.runOnce()
+		if n := expiredSteps(f, a.ID); n != 1 {
+			t.Errorf("%d expired steps, want 1: %+v", n, f.steps())
+		}
+	})
+}
+
+func TestTheCountingRegistryKeepsWhatTheToolsOffer(t *testing.T) {
+	f := newFixture(t)
+	def, err := tools.NewDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(def.Names(), ",") != strings.Join(f.reg.Names(), ",") {
+		t.Fatalf("names %v != %v", f.reg.Names(), def.Names())
+	}
+	for _, n := range def.Names() {
+		inner, _ := def.Get(n)
+		wrapped, _ := f.reg.Get(n)
+		_, ri := inner.(tools.Reconciler)
+		_, rw := wrapped.(tools.Reconciler)
+		if ri != rw || inner.AutoAllowed() != wrapped.AutoAllowed() || inner.Risk(nil) != wrapped.Risk(nil) {
+			t.Errorf("%s: reconciler %v/%v, auto %v/%v", n, ri, rw, inner.AutoAllowed(), wrapped.AutoAllowed())
+		}
 	}
 }

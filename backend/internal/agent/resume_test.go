@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 	"github.com/owncloud/ocis-agent/backend/internal/llm/llmtest"
@@ -71,6 +70,9 @@ func TestAnAutoWriteIsNotRepeatedAfterACrashBeforeTheResultWasSaved(t *testing.T
 	if n := f.modifying(file); n != 1 {
 		t.Errorf("the memory file was written %d times, want 1", n)
 	}
+	if n := f.executes("memory.write"); n != 1 {
+		t.Errorf("the memory write was executed %d times, want 1", n)
+	}
 	if data, _, _ := f.fake.File(drive, file); string(data) != "remember this\n" {
 		t.Errorf("file = %q", data)
 	}
@@ -90,12 +92,23 @@ func TestAnInterruptedExecutionIsReconciledOnTheNextRun(t *testing.T) {
 	f := newFixture(t)
 	p, a := requestApproval(t, f)
 	f.decide(a, store.ApprovalApproved)
-	// the PUT lands, its response never arrives, the run gives up
-	f.fake.LoseResponse("PUT", "/remote.php/dav/spaces/"+drive+"/a.txt", 1)
-	ctx, cancel := context.WithTimeout(bg, time.Second)
+	// the PUT lands, its response never arrives, the run is stopped right
+	// then (as by a shutdown)
+	lostPut := f.fake.LoseResponse("PUT", "/remote.php/dav/spaces/"+drive+"/a.txt", 1)
+	ctx, cancel := context.WithCancel(bg)
 	defer cancel()
-	if err := f.runner().Run(ctx, f.claim()); !errors.Is(err, context.DeadlineExceeded) {
+	go func() {
+		select {
+		case <-lostPut:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if err := f.runner().Run(ctx, f.claim()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
+	}
+	if n := f.executes("files.write_new"); n != 1 {
+		t.Fatalf("%d executes in the interrupted run", n)
 	}
 	if _, _, ok := f.fake.File(drive, "/a.txt"); !ok {
 		t.Fatal("the PUT must have landed")
@@ -116,6 +129,9 @@ func TestAnInterruptedExecutionIsReconciledOnTheNextRun(t *testing.T) {
 	}
 	if n := f.modifying("/a.txt"); n != 1 {
 		t.Errorf("the file was written %d times, want 1", n)
+	}
+	if n, r := f.executes("files.write_new"), f.reconciles("files.write_new"); n != 1 || r != 1 {
+		t.Errorf("%d executes and %d reconciles, want 1 each: the next run must reconcile, not execute", n, r)
 	}
 	if data, _, _ := f.fake.File(drive, "/a.txt"); string(data) != "hi" {
 		t.Errorf("file = %q", data)
@@ -252,8 +268,8 @@ func TestALostLeaseDuringAnAutoWriteRecordsTheOutcomeButNotTheStep(t *testing.T)
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("job = %+v", f.job())
 	}
-	if n := f.modifying(file); n != 1 {
-		t.Errorf("the memory file was written %d times, want 1", n)
+	if n, m := f.modifying(file), f.executes("memory.write"); n != 1 || m != 1 {
+		t.Errorf("the memory file was written %d times and executed %d times, want 1 each", n, m)
 	}
 	tm := toolMessages(p.Requests()[1].Messages)
 	if len(tm) != 1 || !strings.Contains(tm[0].Content, "memory.write): done") {
@@ -285,5 +301,31 @@ func TestAnUnauthorizedFromOCISReportsTheCredentialAndRequeues(t *testing.T) {
 		if s.Kind == "tool" {
 			t.Errorf("tool step %+v", s)
 		}
+	}
+}
+
+// crashedTurn is a checkpoint saved right after a model turn whose calls
+// were never processed.
+func crashedTurn(turns int, calls ...llm.ToolCall) Checkpoint {
+	cp, _ := ParseCheckpoint(nil)
+	cp.Messages = []llm.Message{{Role: llm.RoleUser, Content: "g"}, {Role: llm.RoleAssistant, ToolCalls: calls}}
+	cp.NextCall = len(calls)
+	cp.Turns = turns
+	return cp
+}
+
+func TestACrashAfterTheLimitTurnDoesNotRunItsCalls(t *testing.T) {
+	f := newFixture(t)
+	f.cfg.MaxSteps = 2
+	f.seedJob(crashedTurn(2, tc("c0", "memory.write", `{"name":"notes/n.md","content":"x"}`)))
+	p := llmtest.New(llmtest.Say("x", 1, 1))
+	f.provider = p
+	f.runOnce()
+	assertFailed(t, f, ReasonStepLimit)
+	if f.modifying(memDir+"notes/n.md") != 0 || len(f.auditOf("action_executed")) != 0 {
+		t.Error("the calls of the turn that reached the limit must not run")
+	}
+	if len(toolMessages(f.checkpoint().Messages)) != 0 || len(p.Requests()) != 0 {
+		t.Error("no tool result and no model call past the limit")
 	}
 }

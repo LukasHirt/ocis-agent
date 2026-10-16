@@ -195,6 +195,7 @@ type fixture struct {
 	provider llm.Provider
 	lastJob  string
 	dbPath   string
+	calls    *toolCounter
 }
 
 // newFixture builds a runner's world: a SQLite store and the gate on the
@@ -228,7 +229,8 @@ func newFixture(t *testing.T) *fixture {
 	if err := f.mem.Ensure(bg, f.sess()); err != nil {
 		t.Fatal(err)
 	}
-	if f.reg, err = tools.NewDefault(); err != nil {
+	f.calls = &toolCounter{n: map[string]int{}}
+	if f.reg, err = countingRegistry(f.calls); err != nil {
 		t.Fatal(err)
 	}
 	acfg := approvals.Config{Now: clk.Now}
@@ -516,13 +518,99 @@ func (f *fixture) seedJob(cp Checkpoint) {
 
 func (f *fixture) idem(key string) store.IdemRecord {
 	f.t.Helper()
-	var r store.IdemRecord
-	if err := f.st.View(bg, func(tx store.Tx) error {
-		var err error
-		r, err = tx.GetIdempotent(userID, key)
-		return err
-	}); err != nil {
+	r, err := f.idemMaybe(key)
+	if err != nil {
 		f.t.Fatal(err)
 	}
 	return r
+}
+
+// toolCounter counts the Prepare, Execute and Reconcile calls of the
+// registry's tools, per tool and per (tool, canonical arguments).
+type toolCounter struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (c *toolCounter) add(op, tool string, args json.RawMessage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n[op+"\x00"+tool]++
+	c.n[op+"\x00"+tool+"\x00"+string(args)]++
+}
+
+func (c *toolCounter) get(op, tool string, args ...string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := op + "\x00" + tool
+	if len(args) > 0 {
+		k += "\x00" + args[0]
+	}
+	return c.n[k]
+}
+
+// countingTool delegates to the real tool and counts. It deliberately has no
+// Reconcile method: countingReconciler adds it only for tools that have one,
+// so the executor's type assertion sees what the real tool offers.
+type countingTool struct {
+	tools.Tool
+	c *toolCounter
+}
+
+func (t *countingTool) Prepare(ctx context.Context, env tools.Env, args json.RawMessage) (tools.Prepared, error) {
+	t.c.add("prepare", t.Name(), args)
+	return t.Tool.Prepare(ctx, env, args)
+}
+
+func (t *countingTool) Execute(ctx context.Context, env tools.Env, args json.RawMessage, info tools.ExecInfo) (tools.Result, error) {
+	t.c.add("execute", t.Name(), args)
+	return t.Tool.Execute(ctx, env, args, info)
+}
+
+type countingReconciler struct {
+	*countingTool
+	rc tools.Reconciler
+}
+
+func (t *countingReconciler) Reconcile(ctx context.Context, env tools.Env, args json.RawMessage, info tools.ExecInfo) (tools.Reconciled, error) {
+	t.c.add("reconcile", t.Name(), args)
+	return t.rc.Reconcile(ctx, env, args, info)
+}
+
+// countingRegistry is the default registry with every tool wrapped.
+func countingRegistry(c *toolCounter) (*tools.Registry, error) {
+	def, err := tools.NewDefault()
+	if err != nil {
+		return nil, err
+	}
+	var ts []tools.Tool
+	for _, name := range def.Names() {
+		inner, _ := def.Get(name)
+		ct := &countingTool{Tool: inner, c: c}
+		if rc, ok := inner.(tools.Reconciler); ok {
+			ts = append(ts, &countingReconciler{countingTool: ct, rc: rc})
+		} else {
+			ts = append(ts, ct)
+		}
+	}
+	return tools.NewRegistry(ts...)
+}
+
+// executes counts the Execute calls of a tool, optionally only those with
+// these canonical arguments.
+func (f *fixture) executes(tool string, args ...string) int {
+	return f.calls.get("execute", tool, args...)
+}
+
+func (f *fixture) reconciles(tool string) int { return f.calls.get("reconcile", tool) }
+
+// idemMaybe returns the idempotency record for key, or store.ErrNotFound.
+func (f *fixture) idemMaybe(key string) (store.IdemRecord, error) {
+	var r store.IdemRecord
+	err := f.st.View(bg, func(tx store.Tx) error {
+		var err error
+		r, err = tx.GetIdempotent(userID, key)
+		return err
+	})
+	return r, err
 }
