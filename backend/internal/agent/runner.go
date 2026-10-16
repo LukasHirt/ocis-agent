@@ -81,6 +81,11 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 	for {
 		// calls left from an earlier run (an approval, a crash) come first
 		if len(cp.Unresolved()) > 0 {
+			if cp.Turns >= r.cfg.MaxSteps {
+				// a crash after the turn that reached the limit: its calls
+				// never run
+				return r.fail(ctx, claim, ReasonStepLimit)
+			}
 			if stop, err := r.processCalls(ctx, claim, env, &cp); stop || err != nil {
 				return err
 			}

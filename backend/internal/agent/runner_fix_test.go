@@ -215,3 +215,29 @@ func TestTheMemoryChangedDiffIsCapped(t *testing.T) {
 		t.Fatalf("memory_changed detail is %d bytes", len(ch[0].Detail))
 	}
 }
+
+// crashedTurn is a checkpoint saved right after a model turn whose calls
+// were never processed.
+func crashedTurn(turns int, calls ...llm.ToolCall) Checkpoint {
+	cp, _ := ParseCheckpoint(nil)
+	cp.Messages = []llm.Message{{Role: llm.RoleUser, Content: "g"}, {Role: llm.RoleAssistant, ToolCalls: calls}}
+	cp.NextCall = len(calls)
+	cp.Turns = turns
+	return cp
+}
+
+func TestACrashAfterTheLimitTurnDoesNotRunItsCalls(t *testing.T) {
+	f := newFixture(t)
+	f.cfg.MaxSteps = 2
+	f.seedJob(crashedTurn(2, tc("c0", "memory.write", `{"name":"notes/n.md","content":"x"}`)))
+	p := llmtest.New(llmtest.Say("x", 1, 1))
+	f.provider = p
+	f.runOnce()
+	assertFailed(t, f, ReasonStepLimit)
+	if f.modifying(memDir+"notes/n.md") != 0 || len(f.auditOf("action_executed")) != 0 {
+		t.Error("the calls of the turn that reached the limit must not run")
+	}
+	if len(toolMessages(f.checkpoint().Messages)) != 0 || len(p.Requests()) != 0 {
+		t.Error("no tool result and no model call past the limit")
+	}
+}

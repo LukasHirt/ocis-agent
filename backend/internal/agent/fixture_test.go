@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -21,6 +22,8 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 	"github.com/owncloud/ocis-agent/backend/internal/store/sqlite"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
+
+	_ "modernc.org/sqlite" // the driver for rawSQL
 )
 
 var bg = context.Background()
@@ -92,6 +95,16 @@ type faultStore struct {
 	mu    sync.Mutex
 	calls map[string]int
 	fails map[string]int
+	after map[string]func()
+}
+
+// afterCommit runs fn once, outside any transaction, right after the next
+// committed transaction that called method (BeginIdempotent or
+// FinishIdempotent): a hook between the executor's transactions A and B.
+func (s *faultStore) afterCommit(method string, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after[method] = fn
 }
 
 func (s *faultStore) failAt(method string, n int) {
@@ -111,12 +124,35 @@ func (s *faultStore) hit(method string) error {
 }
 
 func (s *faultStore) InTx(ctx context.Context, fn func(store.Tx) error) error {
-	return s.Store.InTx(ctx, func(tx store.Tx) error { return fn(faultTx{Tx: tx, s: s}) })
+	called := map[string]bool{}
+	err := s.Store.InTx(ctx, func(tx store.Tx) error {
+		clear(called)
+		return fn(faultTx{Tx: tx, s: s, called: called})
+	})
+	if err != nil {
+		return err
+	}
+	for m := range called {
+		s.mu.Lock()
+		hook := s.after[m]
+		delete(s.after, m)
+		s.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+	}
+	return nil
 }
 
 type faultTx struct {
 	store.Tx
-	s *faultStore
+	s      *faultStore
+	called map[string]bool
+}
+
+func (t faultTx) BeginIdempotent(rec store.IdemRecord) (*store.IdemRecord, error) {
+	t.called["BeginIdempotent"] = true
+	return t.Tx.BeginIdempotent(rec)
 }
 
 func (t faultTx) SaveCheckpoint(userID, jobID string, cp json.RawMessage, fence int64) error {
@@ -134,6 +170,7 @@ func (t faultTx) InsertApproval(a store.Approval, fence int64) (store.Approval, 
 }
 
 func (t faultTx) FinishIdempotent(userID, key string, state store.IdemState, result json.RawMessage) error {
+	t.called["FinishIdempotent"] = true
 	if err := t.s.hit("FinishIdempotent"); err != nil {
 		return err
 	}
@@ -157,6 +194,7 @@ type fixture struct {
 	cfg      Config
 	provider llm.Provider
 	lastJob  string
+	dbPath   string
 }
 
 // newFixture builds a runner's world: a SQLite store and the gate on the
@@ -172,19 +210,20 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "agent.db"), sqlite.WithClock(clk.Now))
+	dbPath := filepath.Join(t.TempDir(), "agent.db")
+	db, err := sqlite.Open(dbPath, sqlite.WithClock(clk.Now))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}}
+	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}, after: map[string]func(){}}
 	var st store.Store = faults
 	if err := st.InTx(bg, func(tx store.Tx) error {
 		return tx.PutUser(store.User{ID: userID, Name: login, PersonalDriveID: drive})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, st: st, faults: faults, clk: clk, fake: fake, client: client, creds: &fakeCreds{}}
+	f := &fixture{t: t, st: st, faults: faults, clk: clk, fake: fake, client: client, creds: &fakeCreds{}, dbPath: dbPath}
 	f.mem = memory.New(client, st, memory.Limits{})
 	if err := f.mem.Ensure(bg, f.sess()); err != nil {
 		t.Fatal(err)
@@ -396,4 +435,94 @@ func toolMessages(ms []llm.Message) []llm.Message {
 		}
 	}
 	return out
+}
+
+// rawSQL changes exactly one row of the database behind the store's back, to
+// force a state the store's API never produces (a tampered or inconsistent
+// row).
+func (f *fixture) rawSQL(query string, a ...any) {
+	f.t.Helper()
+	db, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		f.t.Fatal(err)
+	}
+	res, err := db.Exec(query, a...)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		f.t.Fatalf("rawSQL changed %d rows, want 1", n)
+	}
+}
+
+// takeover lets the lease expire, reaps the job and claims it as another
+// worker, like a second sidecar after the first one stalled.
+func (f *fixture) takeover() store.Claim {
+	f.t.Helper()
+	f.clk.Advance(3 * time.Minute)
+	var c store.Claim
+	var ok bool
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		if _, err := tx.ReapExpired(100, func(int) time.Duration { return 0 }); err != nil {
+			return err
+		}
+		var err error
+		c, ok, err = tx.ClaimNextJob("w2", 2*time.Minute)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if !ok || c.Job.ID != f.lastJob {
+		f.t.Fatalf("takeover claimed %v %q", ok, c.Job.ID)
+	}
+	return c
+}
+
+// modifying counts the requests that could change the file at p in the
+// personal drive (PUT, DELETE, MKCOL, MOVE, COPY) the fake oCIS received.
+func (f *fixture) modifying(p string) int {
+	n := 0
+	for _, r := range f.fake.Requests() {
+		if r.Path != "/remote.php/dav/spaces/"+drive+p {
+			continue
+		}
+		switch r.Method {
+		case "PUT", "DELETE", "MKCOL", "MOVE", "COPY":
+			n++
+		}
+	}
+	return n
+}
+
+// seedJob enqueues a chat job with a stored checkpoint, as if a run had
+// saved it and died.
+func (f *fixture) seedJob(cp Checkpoint) {
+	f.t.Helper()
+	raw, err := cp.Marshal()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	j, err := f.q.Enqueue(bg, store.Job{UserID: userID, TriggerKind: store.TriggerChat, Goal: "g", Checkpoint: raw})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.lastJob = j.ID
+}
+
+func (f *fixture) idem(key string) store.IdemRecord {
+	f.t.Helper()
+	var r store.IdemRecord
+	if err := f.st.View(bg, func(tx store.Tx) error {
+		var err error
+		r, err = tx.GetIdempotent(userID, key)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	return r
 }
