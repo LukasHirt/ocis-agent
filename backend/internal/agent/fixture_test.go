@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,9 +83,67 @@ func (c *fakeCreds) setErr(err error) {
 	c.err = err
 }
 
+var errInjected = errors.New("injected store fault")
+
+// faultStore wraps a store and can fail the nth call (1-based, counted from
+// arming) of selected Tx methods with errInjected.
+type faultStore struct {
+	store.Store
+	mu    sync.Mutex
+	calls map[string]int
+	fails map[string]int
+}
+
+func (s *faultStore) failAt(method string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[method], s.fails[method] = 0, n
+}
+
+func (s *faultStore) hit(method string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[method]++
+	if n := s.fails[method]; n > 0 && s.calls[method] == n {
+		return errInjected
+	}
+	return nil
+}
+
+func (s *faultStore) InTx(ctx context.Context, fn func(store.Tx) error) error {
+	return s.Store.InTx(ctx, func(tx store.Tx) error { return fn(faultTx{Tx: tx, s: s}) })
+}
+
+type faultTx struct {
+	store.Tx
+	s *faultStore
+}
+
+func (t faultTx) SaveCheckpoint(userID, jobID string, cp json.RawMessage, fence int64) error {
+	if err := t.s.hit("SaveCheckpoint"); err != nil {
+		return err
+	}
+	return t.Tx.SaveCheckpoint(userID, jobID, cp, fence)
+}
+
+func (t faultTx) InsertApproval(a store.Approval, fence int64) (store.Approval, error) {
+	if err := t.s.hit("InsertApproval"); err != nil {
+		return store.Approval{}, err
+	}
+	return t.Tx.InsertApproval(a, fence)
+}
+
+func (t faultTx) FinishIdempotent(userID, key string, state store.IdemState, result json.RawMessage) error {
+	if err := t.s.hit("FinishIdempotent"); err != nil {
+		return err
+	}
+	return t.Tx.FinishIdempotent(userID, key, state, result)
+}
+
 type fixture struct {
 	t        *testing.T
 	st       store.Store
+	faults   *faultStore
 	clk      *clock
 	fake     *fakeocis.Server
 	client   *ocisclient.Client
@@ -113,17 +172,19 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := sqlite.Open(filepath.Join(t.TempDir(), "agent.db"), sqlite.WithClock(clk.Now))
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "agent.db"), sqlite.WithClock(clk.Now))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(func() { _ = db.Close() })
+	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}}
+	var st store.Store = faults
 	if err := st.InTx(bg, func(tx store.Tx) error {
 		return tx.PutUser(store.User{ID: userID, Name: login, PersonalDriveID: drive})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, st: st, clk: clk, fake: fake, client: client, creds: &fakeCreds{}}
+	f := &fixture{t: t, st: st, faults: faults, clk: clk, fake: fake, client: client, creds: &fakeCreds{}}
 	f.mem = memory.New(client, st, memory.Limits{})
 	if err := f.mem.Ensure(bg, f.sess()); err != nil {
 		t.Fatal(err)

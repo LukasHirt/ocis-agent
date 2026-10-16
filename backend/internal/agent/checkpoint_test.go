@@ -154,3 +154,43 @@ func TestMarshalDoesNotInflateHTMLChars(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNoteCallCountsACallIDOnce(t *testing.T) {
+	cp, _ := ParseCheckpoint(nil)
+	if n := cp.NoteCall("c0", "k"); n != 1 {
+		t.Fatalf("first = %d", n)
+	}
+	if n := cp.NoteCall("c0", "k"); n != 1 {
+		t.Fatalf("same call again = %d, want 1", n)
+	}
+	if n := cp.NoteCall("c1", "k"); n != 2 {
+		t.Fatalf("another call = %d, want 2", n)
+	}
+	raw, err := cp.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseCheckpoint(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cp, got) || !got.Counted["c0"] {
+		t.Fatalf("round trip: %+v", got)
+	}
+	if n := got.NoteCall("c1", "k"); n != 2 {
+		t.Fatalf("after round trip = %d, want 2", n)
+	}
+	if _, err := ParseCheckpoint(json.RawMessage(`{"counted":{"c0":true}}`)); err == nil {
+		t.Error("a non-empty checkpoint without a version must be refused")
+	}
+}
+
+func TestNoteCallIsBounded(t *testing.T) {
+	cp, _ := ParseCheckpoint(nil)
+	for i := 0; i < MaxSeenKeys+10; i++ {
+		cp.NoteCall(fmt.Sprintf("c%d", i), "k")
+	}
+	if len(cp.Counted) > MaxSeenKeys {
+		t.Fatalf("%d counted ids", len(cp.Counted))
+	}
+}

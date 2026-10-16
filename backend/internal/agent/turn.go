@@ -16,6 +16,10 @@ const noAnswer = "(no answer)"
 // (final answer, a limit, a model error); otherwise the new assistant message
 // holds tool calls to process.
 func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp *Checkpoint) (bool, error) {
+	if cp.Turns >= r.cfg.MaxSteps {
+		// also after a crash right after the turn that reached the limit
+		return true, r.fail(ctx, claim, ReasonStepLimit)
+	}
 	pol, stop, err := r.precheck(ctx, claim, inRun)
 	if stop || err != nil {
 		return true, err
@@ -53,6 +57,7 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 	}
 	cp.Messages = append(cp.Messages, msg)
 	cp.Turns++
+	cp.Counted = nil // the previous turn's calls are all resolved
 	if len(calls) == 0 {
 		cp.Answer = msg.Content
 	}

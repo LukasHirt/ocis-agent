@@ -24,7 +24,11 @@ type Checkpoint struct {
 	NextCall int            `json:"next_call"`
 	Turns    int            `json:"turns"`
 	Seen     map[string]int `json:"seen"`
-	Answer   string         `json:"answer,omitempty"`
+	// Counted holds the call ids of the current turn already noted in Seen,
+	// so a call classified again after a failed run is not counted twice.
+	// A new turn starts with an empty set.
+	Counted map[string]bool `json:"counted,omitempty"`
+	Answer  string          `json:"answer,omitempty"`
 }
 
 // ParseCheckpoint decodes a stored checkpoint. Empty input, "null" and "{}"
@@ -41,7 +45,7 @@ func ParseCheckpoint(raw json.RawMessage) (Checkpoint, error) {
 	var keys map[string]json.RawMessage
 	_ = json.Unmarshal(t, &keys) // already known to be an object
 	if _, hasV := keys["v"]; !hasV && cp.V == 0 && len(cp.Messages) == 0 && cp.NextCall == 0 &&
-		cp.Turns == 0 && len(cp.Seen) == 0 && cp.Answer == "" {
+		cp.Turns == 0 && len(cp.Seen) == 0 && len(cp.Counted) == 0 && cp.Answer == "" {
 		return Checkpoint{V: 1, Seen: map[string]int{}}, nil
 	}
 	if cp.V != 1 {
@@ -121,6 +125,22 @@ func (c *Checkpoint) Note(key string) int {
 	n++
 	c.Seen[key] = n
 	return n
+}
+
+// NoteCall counts key for the call callID once: a call id already counted
+// returns the current count of key without counting again. At most
+// MaxSeenKeys call ids are remembered.
+func (c *Checkpoint) NoteCall(callID, key string) int {
+	if c.Counted[callID] {
+		return c.Seen[key]
+	}
+	if c.Counted == nil {
+		c.Counted = map[string]bool{}
+	}
+	if len(c.Counted) < MaxSeenKeys {
+		c.Counted[callID] = true
+	}
+	return c.Note(key)
 }
 
 // Fixed, model-safe and operator-safe refusal texts.

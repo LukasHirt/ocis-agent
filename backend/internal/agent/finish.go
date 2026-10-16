@@ -85,8 +85,10 @@ func (r *Runner) fail(ctx context.Context, claim store.Claim, reason string) err
 // stored checkpoint.
 func (r *Runner) requeue(ctx context.Context, claim store.Claim, delay time.Duration) error {
 	at := r.cfg.Now().Add(delay)
+	var applied bool
 	err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
-		_, err := tx.RequeueJob(claim, at, nil)
+		var err error
+		applied, err = tx.RequeueJob(claim, at, nil)
 		return err
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -95,7 +97,9 @@ func (r *Runner) requeue(ctx context.Context, claim store.Claim, delay time.Dura
 	if err != nil {
 		return fmt.Errorf("agent: requeue job: %w", err)
 	}
-	r.d.Queue.Wake()
+	if applied {
+		r.d.Queue.Wake()
+	}
 	return nil
 }
 
@@ -107,6 +111,12 @@ func (r *Runner) backoff(ctx context.Context, claim store.Claim) error {
 // unauthorized reports a 401 for the app credentials and requeues the job for
 // later (the report may pause the user).
 func (r *Runner) unauthorized(ctx context.Context, claim store.Claim) error {
-	_ = r.d.Creds.HandleUnauthorized(ctx, claim.Job.UserID) // a failed report is retried at the next 401
+	r.reportUnauthorized(ctx, claim)
 	return r.requeue(ctx, claim, r.cfg.PausedDelay)
+}
+
+// reportUnauthorized tells the credentials about a 401. A failed report is
+// retried at the next 401.
+func (r *Runner) reportUnauthorized(ctx context.Context, claim store.Claim) {
+	_ = r.d.Creds.HandleUnauthorized(ctx, claim.Job.UserID)
 }

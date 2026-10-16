@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
@@ -83,7 +84,7 @@ func (r *Runner) resolveNew(ctx context.Context, claim store.Claim, env tools.En
 	if d.Kind == approvals.KindDeny {
 		return r.deny(ctx, claim, cp, c, d.Reason)
 	}
-	if cp.Note(c.Name+"\x00"+d.ArgsHash) >= loopLimit {
+	if cp.NoteCall(c.ID, c.Name+"\x00"+d.ArgsHash) >= loopLimit {
 		return true, r.fail(ctx, claim, ReasonLoop)
 	}
 	switch {
@@ -104,13 +105,14 @@ func (r *Runner) runRead(ctx context.Context, claim store.Claim, env tools.Env, 
 	if err == nil {
 		return r.applyOutcome(ctx, claim, env, cp, c.Name, c.ID, out, nil, false)
 	}
+	// the model gets no content: drop what the read may have cached
+	if ferr := r.forgetRead(ctx, env, c.Name, c.Arguments); ferr != nil {
+		return true, errors.Join(err, ferr)
+	}
 	switch {
 	case isCtxErr(ctx, err), lost(err),
 		errors.Is(err, approvals.ErrBadCall), errors.Is(err, approvals.ErrTampered):
 		return r.runError(ctx, claim, c.Name, err)
-	}
-	if ferr := r.forgetRead(ctx, env, c); ferr != nil {
-		return true, ferr
 	}
 	if errors.Is(err, ocisclient.ErrUnauthorized) {
 		return true, r.unauthorized(ctx, claim)
@@ -122,21 +124,25 @@ func (r *Runner) runRead(ctx context.Context, claim store.Claim, env tools.Env, 
 
 // forgetRead drops the cached ETag of a memory.read whose content the model
 // does not get.
-func (r *Runner) forgetRead(ctx context.Context, env tools.Env, c llm.ToolCall) error {
-	if c.Name != memoryRead {
+func (r *Runner) forgetRead(ctx context.Context, env tools.Env, tool, arguments string) error {
+	if tool != memoryRead {
 		return nil
 	}
 	var a struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal([]byte(c.Arguments), &a) != nil || a.Name == "" {
+	if json.Unmarshal([]byte(arguments), &a) != nil || a.Name == "" {
 		return nil
 	}
 	return r.forget(ctx, env, a.Name)
 }
 
+// forget drops a cached memory ETag. It runs detached from ctx: it must also
+// happen when the job's context has just ended.
 func (r *Runner) forget(ctx context.Context, env tools.Env, name string) error {
-	err := env.Memory.Forget(ctx, session(env), name)
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	err := env.Memory.Forget(fctx, session(env), name)
 	if err != nil && !errors.Is(err, memory.ErrInvalidName) { // a bad name was never cached
 		return fmt.Errorf("agent: forget memory read: %w", err)
 	}
@@ -177,6 +183,10 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 // applyOutcome renders an executor outcome as the call's tool message.
 func (r *Runner) applyOutcome(ctx context.Context, claim store.Claim, env tools.Env, cp *Checkpoint, tool, callID string, out approvals.Outcome, err error, auditDiff bool) (bool, error) {
 	if err != nil {
+		if errors.Is(out.Err, ocisclient.ErrUnauthorized) {
+			// the outcome was not recorded, but the 401 is still news
+			r.reportUnauthorized(ctx, claim)
+		}
 		return r.runError(ctx, claim, tool, err)
 	}
 	text, truncated := RenderResult(tool, out.State.String(), out.Result, out.Reason)
@@ -196,6 +206,14 @@ func (r *Runner) applyOutcome(ctx context.Context, claim store.Claim, env tools.
 		})
 	}
 	if stop, err := r.record(ctx, claim, cp, callID, text, nil, events); stop || err != nil {
+		if tool == memoryRead && out.State == approvals.OutcomeDone {
+			// the result was not saved, so the model never sees it
+			for _, b := range out.Result.Blocks {
+				if ferr := r.forget(ctx, env, b.Path); ferr != nil {
+					err = errors.Join(err, ferr)
+				}
+			}
+		}
 		return true, err
 	}
 	if errors.Is(out.Err, ocisclient.ErrUnauthorized) {
