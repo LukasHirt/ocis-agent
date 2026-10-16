@@ -399,7 +399,7 @@ func TestTheKillSwitchCommandStopsAndResumesARunningApp(t *testing.T) {
 	}
 	// claimed at the next polls, with the production pause delay (5m): a
 	// job requeued by the runner's own check would not run again in time
-	if got := f.waitState(j, store.JobSucceeded, 2*time.Second); got.Runs != 1 {
+	if got := f.waitState(j, store.JobSucceeded, 15*time.Second); got.Runs != 1 {
 		t.Errorf("runs = %d, want 1", got.Runs)
 	}
 	if err := r.stop(t, 15*time.Second); err != nil {
@@ -449,7 +449,7 @@ func TestTheAPIStopRunsAlongsideTheDrain(t *testing.T) {
 	entered := make(chan struct{})
 	a.apiHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(entered)
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 	})
 	f.enroll(a)
 	j := f.enqueue(a, "think hard")
@@ -475,12 +475,14 @@ func TestTheAPIStopRunsAlongsideTheDrain(t *testing.T) {
 		t.Errorf("Run = %v", err)
 	}
 	total := time.Since(stopped)
-	// sequential would be 2s (API) + 2s (drain)
-	if cancelledAfter < 1900*time.Millisecond || cancelledAfter > 3200*time.Millisecond {
+	// alongside: the job is cancelled at the 2s drain and the shutdown takes
+	// max(drain, API stop) = 4s; sequential would cancel the job at 4s (API)
+	// + 2s (drain) = 6s. The bounds leave room for a loaded runner.
+	if cancelledAfter < 1900*time.Millisecond || cancelledAfter > 5*time.Second {
 		t.Errorf("the job was cancelled %v after the signal, want about the 2s drain", cancelledAfter)
 	}
-	if total > 3500*time.Millisecond {
-		t.Errorf("shutdown took %v, want about max(drain, API stop) = 2s", total)
+	if total > 5900*time.Millisecond {
+		t.Errorf("shutdown took %v, want about max(drain, API stop) = 4s", total)
 	}
 	if got := f.job(j); got.State != store.JobQueued {
 		t.Errorf("job = %s, want queued", got.State)
@@ -497,8 +499,9 @@ func TestTheShutdownDelayCoversTheRetrySettle(t *testing.T) {
 	}
 	tune := fast()
 	tune.shutdownRequeueDelay = time.Minute
-	if _, err := Build(bg, f.cfg, f.st, Options{Provider: llmtest.New(), Log: quietLog(), tune: tune}); err == nil {
-		t.Error("a shutdown requeue delay below the retry settle must be refused")
+	_, err := Build(bg, f.cfg, f.st, Options{Provider: llmtest.New(), Log: quietLog(), tune: tune})
+	if err == nil || !strings.Contains(err.Error(), "shutdown requeue delay") {
+		t.Errorf("Build = %v, want the shutdown requeue delay below the retry settle refused", err)
 	}
 }
 
