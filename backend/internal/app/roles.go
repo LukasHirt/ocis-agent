@@ -97,6 +97,9 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	} else {
 		close(schedDone)
+		// token renewal, the sweep, approval expiry, dormancy and the reaper
+		// run only with the worker role
+		a.log.Info("app: maintenance not running in this process", "role_missing", RoleWorker)
 	}
 	close(a.started)
 	a.log.Info("app: started", "roles", len(a.cfg.Process.Roles), "workers", len(a.workers))

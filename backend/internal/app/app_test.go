@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
@@ -42,7 +43,8 @@ func TestTheWorkerRoleNeedsAModelEndpoint(t *testing.T) {
 
 func TestTheAPIRoleStartsWithoutAModelAndWithoutWorkers(t *testing.T) {
 	f := newFixture(t, map[string]string{"AGENT_ROLES": "api", "AGENT_LLM_BASE_URL": "-", "AGENT_LLM_MODEL": "-"})
-	a, err := Build(bg, f.cfg, f.st, Options{Log: quietLog()})
+	var logs syncBuffer
+	a, err := Build(bg, f.cfg, f.st, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -56,6 +58,9 @@ func TestTheAPIRoleStartsWithoutAModelAndWithoutWorkers(t *testing.T) {
 	}
 	if code, _ := get(t, "http://"+a.DebugAddr()+"/readyz"); code != 200 {
 		t.Errorf("readyz without the worker role = %d, want 200", code)
+	}
+	if !strings.Contains(logs.String(), `level=INFO msg="app: maintenance not running in this process"`) {
+		t.Errorf("no notice that the maintenance does not run:\n%s", logs.String())
 	}
 	// a job is never claimed: there is no worker
 	j := f.enqueue(a, "hello")
