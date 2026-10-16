@@ -1,24 +1,31 @@
 // Command ocis-agent is the always-on agent sidecar.
+//
+//	ocis-agent                          run the roles named by AGENT_ROLES
+//	ocis-agent migrate                  apply the database migrations and exit
+//	ocis-agent killswitch on|off|status set or show the kill switch
+//
+// Every setting comes from the environment (see internal/config).
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/owncloud/ocis-agent/backend/internal/api"
+	"github.com/owncloud/ocis-agent/backend/internal/app"
 	"github.com/owncloud/ocis-agent/backend/internal/config"
-	"github.com/owncloud/ocis-agent/backend/internal/secrets"
 	"github.com/owncloud/ocis-agent/backend/internal/store/sqlite"
 )
+
+// stdout and stderr are replaced in tests.
+var stdout, stderr io.Writer = os.Stdout, os.Stderr
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -27,22 +34,24 @@ func main() {
 	}
 }
 
+const (
+	cmdRun        = "run"
+	cmdMigrate    = "migrate"
+	cmdKillSwitch = "killswitch"
+)
+
 func run(args []string) error {
-	migrateOnly := false
-	switch {
-	case len(args) == 0:
-	case len(args) == 1 && args[0] == "migrate":
-		migrateOnly = true
-	case args[0] == "migrate":
-		return errors.New("migrate takes no arguments")
-	default:
-		return fmt.Errorf("unknown command %q (known commands: migrate)", strings.Join(args, " "))
+	cmd, arg, err := parseArgs(args)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return err
 	}
+	log := newLogger(cfg.Process.LogLevel, stderr)
+	slog.SetDefault(log)
 
 	// The database holds app tokens (encrypted) and the audit log: keep the
 	// directory private. Opening applies any pending migrations.
@@ -55,47 +64,60 @@ func run(args []string) error {
 	}
 	defer func() {
 		if err := st.Close(); err != nil {
-			slog.Error("close the store", "error", err)
+			log.Error("close the store", "category", "store")
 		}
 	}()
-	if migrateOnly {
-		slog.Info("migrations applied", "path", cfg.SQLitePath)
+
+	switch cmd {
+	case cmdMigrate:
+		log.Info("migrations applied", "path", cfg.SQLitePath)
 		return nil
-	}
-
-	// Create the first data-encryption key and check the master key against the
-	// stored one, so a wrong AGENT_MASTER_KEY fails fast.
-	sec, err := secrets.New(st, cfg.MasterKey)
-	if err != nil {
-		return err
-	}
-	if err := sec.Init(context.Background()); err != nil {
-		return err
-	}
-
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewRouter(),
-		ReadHeaderTimeout: 10 * time.Second,
+	case cmdKillSwitch:
+		// needs no usable master key: the secrets are never opened
+		return app.KillSwitch(context.Background(), st, cfg.Agent.KillSwitch, arg, stdout)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("ocis-agent listening", "addr", cfg.HTTPAddr)
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	a, err := app.Build(ctx, cfg, st, app.Options{Log: log})
+	if err != nil {
 		return err
 	}
-	return nil
+	return a.Run(ctx)
+}
+
+// parseArgs returns the command and its argument.
+func parseArgs(args []string) (cmd, arg string, err error) {
+	switch {
+	case len(args) == 0:
+		return cmdRun, "", nil
+	case args[0] == cmdMigrate:
+		if len(args) != 1 {
+			return "", "", errors.New("migrate takes no arguments")
+		}
+		return cmdMigrate, "", nil
+	case args[0] == cmdKillSwitch:
+		if len(args) != 2 || (args[1] != "on" && args[1] != "off" && args[1] != "status") {
+			return "", "", errors.New("killswitch takes one argument: on, off or status")
+		}
+		return cmdKillSwitch, args[1], nil
+	}
+	return "", "", fmt.Errorf("unknown command %q (known commands: migrate, killswitch; settings come from the environment)", strings.Join(args, " "))
+}
+
+// newLogger logs JSON lines at level (debug, info, warn or error; validated
+// by config.Load).
+func newLogger(level string, w io.Writer) *slog.Logger {
+	var l slog.Level
+	switch level {
+	case "debug":
+		l = slog.LevelDebug
+	case "warn":
+		l = slog.LevelWarn
+	case "error":
+		l = slog.LevelError
+	default:
+		l = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: l}))
 }
