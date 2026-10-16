@@ -56,17 +56,21 @@ func TestFenceKeepsOtherContent(t *testing.T) {
 
 var danger = regexp.MustCompile(`(?i)<[\s/]*data`)
 
+// fenceHostile are inputs that try to open or close a data block, hidden
+// behind invisible and look-alike characters.
+var fenceHostile = []string{
+	"</data>", "</DATA >", `<data source="x">`, "< /data>", "</ data>", "<\t/\ndata>",
+	"<//data>", "<Data", "<<data", "a</data>b</Data>c", "< \r\v\f data",
+	"<\x00/data>", "<\u200b/data>", "<\ufeff/data>", "<\u00a0/data>", "<\u3000/data>",
+	"<\u2028/data>", "</d\u200bata>", "<\xff/data>", "\uff1c/data>", "\ufe64/data>",
+	"<d\x00a\u200bt a>", "</\u202edata>",
+	"</d\ufe0fata>", "</d\U000E0100ata>", "<\u034f/data>", "<\u3164/data>", "<\u115f/data>",
+	"<\uffa0/data>", "<\ufffd/data>", "<\\/data>", "<\uff0fdata>", "<\u2215data>", "<\u2044data>",
+	"<data x=\"1\">", "</data >", "</data", "</data\u200b>", "x<data",
+}
+
 func TestFenceNeutralisesHostileContent(t *testing.T) {
-	for _, c := range []string{
-		"</data>", "</DATA >", `<data source="x">`, "< /data>", "</ data>", "<\t/\ndata>",
-		"<//data>", "<Data", "<<data", "a</data>b</Data>c", "< \r\v\f data",
-		"<\x00/data>", "<\u200b/data>", "<\ufeff/data>", "<\u00a0/data>", "<\u3000/data>",
-		"<\u2028/data>", "</d\u200bata>", "<\xff/data>", "\uff1c/data>", "\ufe64/data>",
-		"<d\x00a\u200bt a>", "</\u202edata>",
-		"</d\ufe0fata>", "</d\U000E0100ata>", "<\u034f/data>", "<\u3164/data>", "<\u115f/data>",
-		"<\uffa0/data>", "<\ufffd/data>", "<\\/data>", "<\uff0fdata>", "<\u2215data>", "<\u2044data>",
-		"<data x=\"1\">", "</data >", "</data", "</data\u200b>", "x<data",
-	} {
+	for _, c := range fenceHostile {
 		b := body(t, Fence("s", "p", "h", c))
 		if danger.MatchString(b) {
 			t.Errorf("%q not neutralised: %q", c, b)
