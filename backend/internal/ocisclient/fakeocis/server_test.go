@@ -366,6 +366,33 @@ func TestFaultInjection(t *testing.T) {
 	}
 }
 
+func TestALostResponseStillAppliesTheRequest(t *testing.T) {
+	s := newFake(t)
+	s.LoseResponse("PUT", dav+"/a.md", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "PUT", s.URL+dav+"/a.md", strings.NewReader("x"))
+	req.SetBasicAuth("einstein", pass)
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("a lost response must not reach the client")
+	}
+	if data, _, ok := s.File(drv, "/a.md"); !ok || string(data) != "x" {
+		t.Fatalf("the PUT must land: %q %v", data, ok)
+	}
+	if st := status(t, s, "PUT", dav+"/a.md", einstein, nil, "y"); st != 204 {
+		t.Fatalf("after the fault is used up = %d", st)
+	}
+	// a lost response for a request that fails is still a lost response
+	s.LoseResponse("PUT", dav+"/missing/b.md", 1)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+	req, _ = http.NewRequestWithContext(ctx2, "PUT", s.URL+dav+"/missing/b.md", strings.NewReader("x"))
+	req.SetBasicAuth("einstein", pass)
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("a lost response must not reach the client")
+	}
+}
+
 func TestRequestsAreRecordedWithoutQueries(t *testing.T) {
 	s := newFake(t)
 	call(t, s, "DELETE", "/auth-app/tokens?token=abc", einstein, map[string]string{"Last-Event-ID": "7"}, "")

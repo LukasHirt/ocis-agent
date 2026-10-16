@@ -59,6 +59,7 @@ type fault struct {
 	status         int
 	times          int
 	hang           bool
+	lose           bool // handle the request, then withhold the response
 }
 
 type sseEvent struct{ id, name, data string }
@@ -146,6 +147,16 @@ func (s *Server) Hang(method, pathPrefix string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.faults = append(s.faults, &fault{method: method, prefix: pathPrefix, times: -1, hang: true})
+}
+
+// LoseResponse makes matching requests take effect as usual but never
+// answers them (the response is lost, like a connection that drops after the
+// server committed the change), times times (a negative number means
+// forever). The client sees a timeout or its own cancellation.
+func (s *Server) LoseResponse(method, pathPrefix string, times int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faults = append(s.faults, &fault{method: method, prefix: pathPrefix, times: times, lose: true})
 }
 
 // Requests returns a copy of the recorded requests.
@@ -281,6 +292,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.reqs = append(s.reqs, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
 	f := s.matchFault(r)
 	s.mu.Unlock()
+	if f != nil && f.lose {
+		s.handle(httptest.NewRecorder(), r)
+		select {
+		case <-r.Context().Done():
+		case <-s.closing:
+		}
+		return
+	}
 	if f != nil {
 		if f.hang {
 			select {
@@ -292,7 +311,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(f.status)
 		return
 	}
+	s.handle(w, r)
+}
 
+// handle serves a request that no fault intercepted.
+func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	acct := s.authenticate(r)
 	if acct == nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="fakeocis"`)
