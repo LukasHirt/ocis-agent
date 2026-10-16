@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +48,7 @@ func TestDecodeDistrustsToolNamesAndIDs(t *testing.T) {
 			t.Errorf("id %q: err = %v, want ErrMalformed", id, err)
 		}
 	}
-	for _, name := range []string{"files___list", "a____b", "Files__List", "rm -rf", "files\u202elist", strings.Repeat("a", 5000)} {
+	for _, name := range []string{"files___list", "files.list", "a____b", "Files__List", "rm -rf", "files\u202elist", strings.Repeat("a", 5000)} {
 		resp, err := run(mk("c1", name))
 		if err != nil {
 			t.Errorf("name %.20q: %v", name, err)
@@ -94,9 +93,6 @@ func TestNewOpenAIHardening(t *testing.T) {
 	}
 	if _, err := NewOpenAI(OpenAIConfig{BaseURL: "https://API.Example.COM/v1", APIKey: "k", Model: "m", AllowedHosts: []string{"api.example.com"}}); err != nil {
 		t.Errorf("upper-case host: %v", err)
-	}
-	if u, _ := url.Parse("https://x"); u == nil {
-		t.Fatal()
 	}
 }
 

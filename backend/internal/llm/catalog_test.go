@@ -41,6 +41,9 @@ func TestNewCatalogRefusesBadInput(t *testing.T) {
 		"bidi in label":     {"d", []ModelInfo{{ID: "a", Label: "x\u202ey"}}},
 		"line separator":    {"d", []ModelInfo{{ID: "a", Label: "x\u2028y"}}},
 		"invalid utf8":      {"d", []ModelInfo{{ID: "a", Label: "x\xffy"}}},
+		"paragraph sep":     {"d", []ModelInfo{{ID: "a", Label: "x\u2029y"}}},
+		"blank label":       {"d", []ModelInfo{{ID: "a", Label: " "}}},
+		"nbsp-only label":   {"d", []ModelInfo{{ID: "a", Label: "\u00a0"}}},
 		"too many":          {"d", many},
 	}
 	for label, c := range cases {
@@ -67,5 +70,11 @@ func TestCatalogResolveFallsBackToTheDefault(t *testing.T) {
 	}
 	if got := (Catalog{}).Resolve("x"); got != "" {
 		t.Errorf("zero catalog Resolve = %q", got)
+	}
+}
+
+func TestNewCatalogAcceptsA64RuneMultibyteLabel(t *testing.T) {
+	if _, err := NewCatalog("d", []ModelInfo{{ID: "a", Label: strings.Repeat("é", 64)}}); err != nil {
+		t.Errorf("64-rune label refused: %v", err)
 	}
 }

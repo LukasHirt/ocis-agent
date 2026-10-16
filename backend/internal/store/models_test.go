@@ -10,7 +10,7 @@ func modelsTestNow() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.U
 
 func TestModelTaskFor(t *testing.T) {
 	cases := map[string]string{
-		"chat":       ModelTaskChat,
+		TriggerChat:  ModelTaskChat,
 		"file_event": ModelTaskProactive,
 		"schedule":   ModelTaskProactive,
 		"":           ModelTaskProactive,
@@ -45,5 +45,11 @@ func TestPolicyValidateChecksModelPreferences(t *testing.T) {
 		if err := q.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: Validate = %v, want an ErrInvalid error", label, err)
 		}
+	}
+}
+
+func TestTriggerChatIsTheChatTriggerKind(t *testing.T) {
+	if TriggerChat != "chat" {
+		t.Errorf("TriggerChat = %q", TriggerChat)
 	}
 }

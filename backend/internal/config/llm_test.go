@@ -94,6 +94,8 @@ func TestLLMRefusals(t *testing.T) {
 		switch name {
 		case "/empty":
 			return []byte(" \n"), nil
+		case "/badkey":
+			return []byte("sk\nX"), nil
 		case "/missing":
 			return nil, errors.New("open /missing: no such file")
 		}
@@ -136,6 +138,13 @@ func TestLLMRefusals(t *testing.T) {
 		{"credentials in the url", with(map[string]string{"AGENT_LLM_BASE_URL": "https://user:pw-secret@api.example.com"}), "AGENT_LLM_BASE_URL"},
 		{"query in the url", with(map[string]string{"AGENT_LLM_BASE_URL": "https://api.example.com/v1?key=url-secret"}), "AGENT_LLM_BASE_URL"},
 		{"fragment in the url", with(map[string]string{"AGENT_LLM_BASE_URL": "https://api.example.com/v1#x"}), "AGENT_LLM_BASE_URL"},
+		{"allow list without the host", with(map[string]string{"AGENT_LLM_ALLOWED_HOSTS": "other.example.com"}), "AGENT_LLM_ALLOWED_HOSTS"},
+		{"key with newline", with(map[string]string{"AGENT_LLM_API_KEY": "sk\nX"}), "AGENT_LLM_API_KEY"},
+		{"key file with newline", with(map[string]string{"AGENT_LLM_API_KEY": "-", "AGENT_LLM_API_KEY_FILE": "/badkey"}), "AGENT_LLM_API_KEY_FILE"},
+		{"empty hostname", with(map[string]string{"AGENT_LLM_BASE_URL": "https://:443/x"}), "AGENT_LLM_BASE_URL"},
+		{"empty host", with(map[string]string{"AGENT_LLM_BASE_URL": "https:///x"}), "AGENT_LLM_BASE_URL"},
+		{"key file alone", map[string]string{"AGENT_LLM_API_KEY_FILE": "/k"}, "AGENT_LLM_BASE_URL"},
+		{"allowed hosts alone", map[string]string{"AGENT_LLM_ALLOWED_HOSTS": "a.example.com"}, "AGENT_LLM_BASE_URL"},
 		{"not a url", with(map[string]string{"AGENT_LLM_BASE_URL": "api.example.com"}), "AGENT_LLM_BASE_URL"},
 	}
 	for _, c := range cases {
@@ -153,5 +162,49 @@ func TestLLMRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLLMPathIsKeptEscapedAndAcceptedByTheClient(t *testing.T) {
+	cfg, err := Load(llmEnv(map[string]string{
+		"AGENT_LLM_BASE_URL": "https://api.example.com/v1%3Fx/",
+		"AGENT_LLM_API_KEY":  "sk-1",
+		"AGENT_LLM_MODEL":    "m",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.BaseURL != "https://api.example.com/v1%3Fx" {
+		t.Errorf("BaseURL = %q", cfg.LLM.BaseURL)
+	}
+	if _, err := llm.NewOpenAI(llm.OpenAIConfig{BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: "m", AllowedHosts: cfg.LLM.AllowedHosts}); err != nil {
+		t.Errorf("NewOpenAI refuses what loadLLM accepted: %v", err)
+	}
+}
+
+func TestLLMProviderIsTrimmed(t *testing.T) {
+	cfg, err := Load(llmEnv(map[string]string{
+		"AGENT_LLM_BASE_URL": "https://api.example.com", "AGENT_LLM_API_KEY": "sk-1", "AGENT_LLM_MODEL": "m", "AGENT_LLM_PROVIDER": " openai ",
+	}))
+	if err != nil || cfg.LLM.Provider != "openai" {
+		t.Errorf("provider = %q, err = %v", cfg.LLM.Provider, err)
+	}
+}
+
+func TestLLMUnreadableKeyFileDoesNotLeakTheKey(t *testing.T) {
+	old := readFile
+	defer func() { readFile = old }()
+	readFile = func(name string) ([]byte, error) { return nil, errors.New("open " + name + ": permission denied") }
+	_, err := Load(llmEnv(map[string]string{
+		"AGENT_LLM_BASE_URL": "https://api.example.com", "AGENT_LLM_MODEL": "m", "AGENT_LLM_API_KEY_FILE": "/run/secrets/real-key-path",
+	}))
+	if err == nil || strings.Contains(err.Error(), "sk-real-key-value") {
+		t.Fatalf("err = %v", err)
+	}
+	_, err = Load(llmEnv(map[string]string{
+		"AGENT_LLM_BASE_URL": "https://api.example.com", "AGENT_LLM_MODEL": "m", "AGENT_LLM_API_KEY": "sk-real-key-value", "AGENT_LLM_ALLOWED_HOSTS": "other.example.com",
+	}))
+	if err == nil || strings.Contains(err.Error(), "sk-real-key-value") {
+		t.Fatalf("err = %v", err)
 	}
 }

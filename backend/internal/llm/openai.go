@@ -47,7 +47,7 @@ type OpenAI struct {
 // NewOpenAI validates the configuration and returns the client.
 func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.Hostname() == "" {
 		return nil, errors.New("llm: base URL is not a valid URL")
 	}
 	switch u.Scheme {
@@ -62,10 +62,13 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	if u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("llm: base URL must not contain credentials, a query or a fragment")
 	}
-	if cfg.Model == "" {
-		return nil, errors.New("llm: a model is required")
+	if !ValidModelID(cfg.Model) {
+		return nil, errors.New("llm: the model id is missing or invalid")
 	}
-	if !hostAllowed(u, cfg.AllowedHosts) {
+	if cfg.APIKey != "" && !ValidAPIKey(string(cfg.APIKey)) {
+		return nil, errors.New("llm: the API key contains characters outside printable ASCII")
+	}
+	if !HostAllowed(u.Host, cfg.AllowedHosts) {
 		return nil, errors.New("llm: base URL host is not on the allow-list")
 	}
 	if cfg.APIKey == "" && !IsLoopbackHost(u.Host) {
@@ -103,20 +106,38 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	return o, nil
 }
 
-func hostAllowed(u *url.URL, allowed []string) bool {
+// HostAllowed reports whether host (with or without a port) is on the
+// allow-list. An empty list allows everything. Entries match the host with or
+// without its port, case-insensitively, with or without IPv6 brackets.
+func HostAllowed(host string, allowed []string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
 	norm := func(s string) string {
 		return strings.NewReplacer("[", "", "]", "").Replace(strings.ToLower(strings.TrimSpace(s)))
 	}
+	hostname := (&url.URL{Host: host}).Hostname()
 	for _, a := range allowed {
 		a = norm(a)
-		if a != "" && (a == norm(u.Host) || a == norm(u.Hostname())) {
+		if a != "" && (a == norm(host) || a == norm(hostname)) {
 			return true
 		}
 	}
 	return false
+}
+
+// ValidAPIKey reports whether k is non-empty printable ASCII without spaces,
+// which is what an Authorization header can carry.
+func ValidAPIKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		if k[i] < 0x21 || k[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // IsLoopbackHost reports whether host (with or without a port) is localhost or

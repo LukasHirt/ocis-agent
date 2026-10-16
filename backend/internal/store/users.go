@@ -12,11 +12,14 @@ const (
 	ModelTaskProactive = "proactive"
 )
 
+// TriggerChat is the trigger kind of an interactive chat job.
+const TriggerChat = "chat"
+
 // ModelTaskFor maps a job's trigger kind to the task kind that selects the
 // model: interactive chat jobs use the chat preference, everything else
 // (file events, scheduled sweeps) the proactive one.
 func ModelTaskFor(triggerKind string) string {
-	if triggerKind == "chat" {
+	if triggerKind == TriggerChat {
 		return ModelTaskChat
 	}
 	return ModelTaskProactive

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"errors"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -25,7 +26,7 @@ type Catalog struct {
 }
 
 func validLabel(l string) bool {
-	if l == "" || !utf8.ValidString(l) || utf8.RuneCountInString(l) > maxLabelRunes {
+	if strings.TrimSpace(l) == "" || !utf8.ValidString(l) || utf8.RuneCountInString(l) > maxLabelRunes {
 		return false
 	}
 	for _, r := range l {

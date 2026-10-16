@@ -62,6 +62,8 @@ func (r CompletionRequest) Validate() error {
 			}
 		}
 	}
+	assistantIDs := make(map[string]bool)
+	open := make(map[string]bool) // assistant calls not yet answered
 	for i, m := range r.Messages {
 		switch m.Role {
 		case RoleSystem, RoleUser:
@@ -73,14 +75,23 @@ func (r CompletionRequest) Validate() error {
 				return invalid(fmt.Sprintf("message %d: unexpected tool call id", i))
 			}
 			for _, c := range m.ToolCalls {
-				if c.ID == "" || !validName(c.Name) {
+				if !callIDRE.MatchString(c.ID) || !validName(c.Name) {
 					return invalid(fmt.Sprintf("message %d: bad tool call", i))
 				}
+				if assistantIDs[c.ID] {
+					return invalid(fmt.Sprintf("message %d: duplicate tool call id", i))
+				}
+				assistantIDs[c.ID] = true
+				open[c.ID] = true
 			}
 		case RoleTool:
-			if m.ToolCallID == "" || len(m.ToolCalls) > 0 {
+			if !callIDRE.MatchString(m.ToolCallID) || len(m.ToolCalls) > 0 {
 				return invalid(fmt.Sprintf("message %d: bad tool result", i))
 			}
+			if !open[m.ToolCallID] {
+				return invalid(fmt.Sprintf("message %d: tool result answers no open call", i))
+			}
+			delete(open, m.ToolCallID)
 		default:
 			return invalid(fmt.Sprintf("message %d: unknown role", i))
 		}

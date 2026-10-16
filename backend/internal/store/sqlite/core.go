@@ -111,7 +111,6 @@ func (t *tx) GetPolicy(userID string) (store.Policy, error) {
 	if err := json.Unmarshal([]byte(watch), &p.Watch); err != nil || p.Watch == nil {
 		p.Watch = []string{}
 	}
-	p.Models = map[string]string{}
 	if err := json.Unmarshal([]byte(models), &p.Models); err != nil || p.Models == nil {
 		p.Models = map[string]string{}
 	}

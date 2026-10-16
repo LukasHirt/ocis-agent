@@ -29,7 +29,7 @@ func (l LLMConfig) Enabled() bool { return l.BaseURL != "" }
 
 func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	baseRaw := strings.TrimSpace(getenv("AGENT_LLM_BASE_URL"))
-	provider := getenv("AGENT_LLM_PROVIDER")
+	provider := strings.TrimSpace(getenv("AGENT_LLM_PROVIDER"))
 	keyRaw := strings.TrimSpace(getenv("AGENT_LLM_API_KEY"))
 	keyFile := getenv("AGENT_LLM_API_KEY_FILE")
 	model := strings.TrimSpace(getenv("AGENT_LLM_MODEL"))
@@ -50,7 +50,7 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	}
 
 	u, err := url.Parse(baseRaw)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL must be an http(s) URL with a host")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -63,7 +63,7 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 		}
 		l.AllowHTTP = true
 	}
-	l.BaseURL = u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/")
+	l.BaseURL = u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/")
 
 	if model == "" {
 		return LLMConfig{}, errors.New("AGENT_LLM_MODEL is required")
@@ -97,6 +97,9 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 			return LLMConfig{}, errors.New("AGENT_LLM_API_KEY_FILE is empty")
 		}
 	}
+	if key != "" && !llm.ValidAPIKey(key) {
+		return LLMConfig{}, errors.New("AGENT_LLM_API_KEY (or AGENT_LLM_API_KEY_FILE) must be printable ASCII without spaces or line breaks")
+	}
 	if key == "" && !loopback {
 		return LLMConfig{}, errors.New("AGENT_LLM_API_KEY (or AGENT_LLM_API_KEY_FILE) is required")
 	}
@@ -106,6 +109,9 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			l.AllowedHosts = append(l.AllowedHosts, h)
 		}
+	}
+	if !llm.HostAllowed(u.Host, l.AllowedHosts) {
+		return LLMConfig{}, errors.New("AGENT_LLM_ALLOWED_HOSTS must contain the host of AGENT_LLM_BASE_URL")
 	}
 	return l, nil
 }
