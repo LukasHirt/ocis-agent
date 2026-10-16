@@ -292,12 +292,21 @@ func TestFenceLinear(t *testing.T) {
 		}
 		return min
 	}
-	const n = 32 << 10
+	// 16x the input: linear gives a ratio near 16, quadratic near 256. Noise
+	// only makes the small run slower or the large run slower by a bounded
+	// factor, so a case passes if any of three attempts stays under 64.
+	const n = 8 << 10
 	for name, gen := range inputs {
-		small, large := best(gen(n)), best(gen(4*n))
-		// linear gives a ratio near 4, quadratic near 16
-		if ratio := float64(large) / float64(max(small, time.Microsecond)); ratio > 10 {
-			t.Errorf("%s: 4x the input took %.1fx the time (%v vs %v): not linear", name, ratio, large, small)
+		var ratio float64
+		for attempt := 0; attempt < 3; attempt++ {
+			small, large := best(gen(n)), best(gen(16*n))
+			ratio = float64(large) / float64(max(small, time.Microsecond))
+			if ratio <= 64 {
+				break
+			}
+		}
+		if ratio > 64 {
+			t.Errorf("%s: 16x the input took %.1fx the time: not linear", name, ratio)
 		}
 	}
 }
