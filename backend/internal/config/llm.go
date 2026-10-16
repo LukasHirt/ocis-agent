@@ -1,0 +1,111 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+
+	"github.com/owncloud/ocis-agent/backend/internal/llm"
+)
+
+// readFile is replaced in tests.
+var readFile = os.ReadFile
+
+// LLMConfig is the model endpoint. It is optional until the worker role needs
+// it: with no AGENT_LLM_* variable set it is disabled.
+type LLMConfig struct {
+	Provider     string
+	BaseURL      string
+	APIKey       llm.Secret
+	Catalog      llm.Catalog // the default model and the models users may choose
+	AllowedHosts []string    // empty: the host of BaseURL
+	AllowHTTP    bool        // true only for an http:// loopback endpoint
+}
+
+// Enabled reports whether a model endpoint is configured.
+func (l LLMConfig) Enabled() bool { return l.BaseURL != "" }
+
+func loadLLM(getenv func(string) string) (LLMConfig, error) {
+	baseRaw := strings.TrimSpace(getenv("AGENT_LLM_BASE_URL"))
+	provider := getenv("AGENT_LLM_PROVIDER")
+	keyRaw := strings.TrimSpace(getenv("AGENT_LLM_API_KEY"))
+	keyFile := getenv("AGENT_LLM_API_KEY_FILE")
+	model := strings.TrimSpace(getenv("AGENT_LLM_MODEL"))
+	modelsRaw := getenv("AGENT_LLM_MODELS")
+	hostsRaw := getenv("AGENT_LLM_ALLOWED_HOSTS")
+
+	if baseRaw == "" {
+		if provider != "" || keyRaw != "" || keyFile != "" || model != "" || modelsRaw != "" || hostsRaw != "" {
+			return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL is required when other AGENT_LLM_ variables are set")
+		}
+		return LLMConfig{}, nil
+	}
+
+	var l LLMConfig
+	l.Provider = valueOr(provider, "openai")
+	if l.Provider != "openai" {
+		return LLMConfig{}, errors.New(`AGENT_LLM_PROVIDER must be "openai"`)
+	}
+
+	u, err := url.Parse(baseRaw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL must be an http(s) URL with a host")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL must not contain credentials, a query or a fragment")
+	}
+	loopback := llm.IsLoopbackHost(u.Host)
+	if u.Scheme == "http" {
+		if !loopback {
+			return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL must use https unless the host is loopback")
+		}
+		l.AllowHTTP = true
+	}
+	l.BaseURL = u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/")
+
+	if model == "" {
+		return LLMConfig{}, errors.New("AGENT_LLM_MODEL is required")
+	}
+	if !llm.ValidModelID(model) {
+		return LLMConfig{}, errors.New("AGENT_LLM_MODEL is not a valid model id")
+	}
+	var extra []llm.ModelInfo
+	for _, entry := range strings.Split(modelsRaw, ",") {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		id, label, _ := strings.Cut(entry, "=")
+		extra = append(extra, llm.ModelInfo{ID: strings.TrimSpace(id), Label: strings.TrimSpace(label)})
+	}
+	if l.Catalog, err = llm.NewCatalog(model, extra); err != nil {
+		return LLMConfig{}, errors.New("AGENT_LLM_MODELS is invalid: ids, labels, duplicates or size")
+	}
+
+	if keyRaw != "" && keyFile != "" {
+		return LLMConfig{}, errors.New("AGENT_LLM_API_KEY and AGENT_LLM_API_KEY_FILE are mutually exclusive")
+	}
+	key := keyRaw
+	if keyFile != "" {
+		b, err := readFile(keyFile)
+		if err != nil {
+			return LLMConfig{}, fmt.Errorf("AGENT_LLM_API_KEY_FILE: %w", err)
+		}
+		key = strings.TrimSpace(string(b))
+		if key == "" {
+			return LLMConfig{}, errors.New("AGENT_LLM_API_KEY_FILE is empty")
+		}
+	}
+	if key == "" && !loopback {
+		return LLMConfig{}, errors.New("AGENT_LLM_API_KEY (or AGENT_LLM_API_KEY_FILE) is required")
+	}
+	l.APIKey = llm.Secret(key)
+
+	for _, h := range strings.Split(hostsRaw, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			l.AllowedHosts = append(l.AllowedHosts, h)
+		}
+	}
+	return l, nil
+}
