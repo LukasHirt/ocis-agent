@@ -84,7 +84,7 @@ func TestValidateRefusesMalformedRequests(t *testing.T) {
 		"trailing dot":          name("a."),
 		"empty name":            name(""),
 		"hyphen":                name("a-b"),
-		"name too long":         name(strings.Repeat("a", 63)),
+		"name too long":         name(strings.Repeat("a", 65)),
 		"duplicate tool": func(r *CompletionRequest) {
 			r.Tools = append(r.Tools, r.Tools[0])
 		},

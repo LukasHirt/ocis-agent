@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 const (
-	maxTools   = 64
-	maxNameLen = 62
+	maxTools = 64
+	// maxWireNameLen bounds a tool name as sent: "." becomes "__".
+	maxWireNameLen = 64
 )
 
 // nameRE is the tool-name grammar: dot-separated segments of lower-case
@@ -17,7 +19,9 @@ const (
 // the wire is reversible.
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*$`)
 
-func validName(n string) bool { return len(n) <= maxNameLen && nameRE.MatchString(n) }
+func validName(n string) bool {
+	return len(n)+strings.Count(n, ".") <= maxWireNameLen && nameRE.MatchString(n)
+}
 
 var modelRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`)
 

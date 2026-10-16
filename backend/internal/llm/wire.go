@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -51,8 +52,8 @@ type wireResponse struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
 	} `json:"usage"`
 }
 
@@ -95,6 +96,23 @@ func (o *OpenAI) encode(r CompletionRequest) wireRequest {
 	return w
 }
 
+// UnknownTool is the name given to a model-supplied tool call whose name is not
+// a valid, reversible tool name. It satisfies the name grammar but is not a real
+// tool, so the approval gate denies it.
+const UnknownTool = "llm.invalid_tool_name"
+
+var callIDRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// safeName decodes a wire name, or returns UnknownTool when the name is not
+// one we could have sent.
+func safeName(w string) string {
+	n := decodeName(w)
+	if validName(n) && encodeName(n) == w {
+		return n
+	}
+	return UnknownTool
+}
+
 func malformed(what string) error { return fmt.Errorf("%w: %s", ErrMalformed, what) }
 
 func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
@@ -105,7 +123,7 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 	if len(w.Choices) == 0 {
 		return CompletionResponse{}, malformed("no choices")
 	}
-	ch := w.Choices[0]
+	ch := w.Choices[0] // only the first choice is used
 	if len(ch.Message.ToolCalls) > o.maxCalls {
 		return CompletionResponse{}, malformed("too many tool calls")
 	}
@@ -120,9 +138,11 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 		}
 		id := c.ID
 		if id == "" {
-			id = fmt.Sprintf("call_%d", i)
+			id = fmt.Sprintf("call_%d", i) // per response; the runner derives its own ids
+		} else if !callIDRE.MatchString(id) {
+			return CompletionResponse{}, malformed("bad tool call id")
 		}
-		if len(id) > maxCallIDLen || seen[id] {
+		if seen[id] {
 			return CompletionResponse{}, malformed("bad tool call id")
 		}
 		seen[id] = true
@@ -133,7 +153,7 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 		if strings.TrimSpace(args) == "" {
 			args = "{}"
 		}
-		msg.ToolCalls = append(msg.ToolCalls, ToolCall{ID: id, Name: decodeName(c.Function.Name), Arguments: args})
+		msg.ToolCalls = append(msg.ToolCalls, ToolCall{ID: id, Name: safeName(c.Function.Name), Arguments: args})
 	}
 
 	var stop StopReason
@@ -157,6 +177,10 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 	return CompletionResponse{
 		Message: msg,
 		Stop:    stop,
-		Usage:   Usage{In: max(w.Usage.PromptTokens, 0), Out: max(w.Usage.CompletionTokens, 0)},
+		Usage:   Usage{In: clampUsage(w.Usage.PromptTokens), Out: clampUsage(w.Usage.CompletionTokens)},
 	}, nil
 }
+
+const maxUsage = 100_000_000
+
+func clampUsage(n int64) int { return int(min(max(n, 0), maxUsage)) }

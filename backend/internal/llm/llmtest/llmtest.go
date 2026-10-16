@@ -57,7 +57,18 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	req.Messages = append([]llm.Message(nil), req.Messages...)
+	msgs := make([]llm.Message, len(req.Messages))
+	for i, m := range req.Messages {
+		m.ToolCalls = append([]llm.ToolCall(nil), m.ToolCalls...)
+		msgs[i] = m
+	}
+	req.Messages = msgs
+	tools := make([]llm.ToolSpec, len(req.Tools))
+	for i, t := range req.Tools {
+		t.Schema = append([]byte(nil), t.Schema...)
+		tools[i] = t
+	}
+	req.Tools = tools
 	p.seen = append(p.seen, req)
 	if len(p.steps) == 0 {
 		return llm.CompletionResponse{}, errors.New("llmtest: script exhausted")

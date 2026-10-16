@@ -17,7 +17,7 @@ import (
 const (
 	defaultMaxResponse  = 4 << 20
 	defaultMaxToolCalls = 16
-	maxCallIDLen        = 128
+	maxResponseCap      = 64 << 20
 	defaultTimeout      = 120 * time.Second
 )
 
@@ -53,13 +53,13 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	switch u.Scheme {
 	case "https":
 	case "http":
-		if !cfg.AllowHTTP {
-			return nil, errors.New("llm: base URL must use https")
+		if !cfg.AllowHTTP || !IsLoopbackHost(u.Host) {
+			return nil, errors.New("llm: base URL must use https (http only for a loopback host)")
 		}
 	default:
 		return nil, errors.New("llm: base URL must start with https://")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("llm: base URL must not contain credentials, a query or a fragment")
 	}
 	if cfg.Model == "" {
@@ -77,6 +77,9 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		c := *cfg.HTTPClient
 		client = &c
 	}
+	if client.Timeout == 0 {
+		client.Timeout = defaultTimeout
+	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 	o := &OpenAI{
@@ -89,6 +92,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	if o.maxResponse <= 0 {
 		o.maxResponse = defaultMaxResponse
 	}
+	o.maxResponse = min(o.maxResponse, maxResponseCap)
 	if o.maxCalls <= 0 {
 		o.maxCalls = defaultMaxToolCalls
 	}
@@ -103,9 +107,12 @@ func hostAllowed(u *url.URL, allowed []string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
+	norm := func(s string) string {
+		return strings.NewReplacer("[", "", "]", "").Replace(strings.ToLower(strings.TrimSpace(s)))
+	}
 	for _, a := range allowed {
-		a = strings.ToLower(strings.TrimSpace(a))
-		if a != "" && (a == strings.ToLower(u.Host) || a == strings.ToLower(u.Hostname())) {
+		a = norm(a)
+		if a != "" && (a == norm(u.Host) || a == norm(u.Hostname())) {
 			return true
 		}
 	}
