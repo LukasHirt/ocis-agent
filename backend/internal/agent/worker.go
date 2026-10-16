@@ -131,22 +131,6 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// RunPool runs n workers (nil ones are skipped) until ctx ends and waits for
-// all of them. ctx is each worker's Run context, so with a JobContext in the
-// workers' config it stops claiming only and RunPool returns once the
-// running jobs have finished.
-func RunPool(ctx context.Context, n int, newWorker func(i int) *Worker) {
-	var wg sync.WaitGroup
-	for i := range n {
-		w := newWorker(i)
-		if w == nil {
-			continue
-		}
-		wg.Go(func() { w.Run(ctx) })
-	}
-	wg.Wait()
-}
-
 // process runs one claim under a context derived from ctx (the job
 // context, not the claim context) with its lease renewed, then settles what
 // the runner left: the renewal goroutine has ended before process returns.

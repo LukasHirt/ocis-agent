@@ -194,6 +194,15 @@ func (f *workerFixture) worker(id string) *Worker {
 	return w
 }
 
+// runAll runs the workers until ctx ends and waits for all of them.
+func runAll(ctx context.Context, ws ...*Worker) {
+	var wg sync.WaitGroup
+	for _, w := range ws {
+		wg.Go(func() { w.Run(ctx) })
+	}
+	wg.Wait()
+}
+
 // start runs w until the returned stop is called (or the test ends) and
 // checks that Run returns and leaves no goroutine behind.
 func (f *workerFixture) start(ws ...*Worker) (stop func()) {
@@ -202,7 +211,7 @@ func (f *workerFixture) start(ws ...*Worker) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunPool(ctx, len(ws), func(i int) *Worker { return ws[i] })
+		runAll(ctx, ws...)
 	}()
 	var once sync.Once
 	stop = func() {
@@ -891,11 +900,11 @@ func TestTheSettleWritesAreBounded(t *testing.T) {
 type draining struct {
 	stopClaiming context.CancelFunc // cancels the context given to Run
 	stopJobs     context.CancelFunc // cancels WorkerConfig.JobContext
-	done         chan struct{}      // closed when RunPool returned
+	done         chan struct{}      // closed when Run returned
 	w            *Worker
 }
 
-// startDraining runs one worker through RunPool with a JobContext of its
+// startDraining runs one worker with a JobContext of its
 // own; setup may adjust the worker before it starts. At the end of the test
 // both contexts are cancelled and the worker must have stopped without
 // leaving a goroutine behind.
@@ -911,7 +920,7 @@ func (f *workerFixture) startDraining(setup func(*Worker)) *draining {
 	d := &draining{stopClaiming: stopClaiming, stopJobs: stopJobs, done: make(chan struct{}), w: w}
 	go func() {
 		defer close(d.done)
-		RunPool(claimCtx, 1, func(int) *Worker { return w })
+		w.Run(claimCtx)
 	}()
 	f.t.Cleanup(func() {
 		stopClaiming()
