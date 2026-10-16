@@ -49,3 +49,19 @@ func TestIsReserved(t *testing.T) {
 		}
 	}
 }
+
+func TestIsReservedIgnoresCase(t *testing.T) {
+	for _, p := range []string{
+		"/.OCIS-AGENT", "/.OCIS-AGENT/", "/.Ocis-Agent/Memory/Profile.md", "/.ocis-AGENT/memory/notes/X.md",
+		"/DOCS/../.OCIS-agent/x", "//.oCiS-aGeNt//README.md", ".OCIS-AGENT",
+	} {
+		if !IsReserved(p) {
+			t.Errorf("IsReserved(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"/.OCIS-AGENT2/x", "/Docs/.OCIS-AGENT/x", "/.OCIS-AGENTX"} {
+		if IsReserved(p) {
+			t.Errorf("IsReserved(%q) = true, want false", p)
+		}
+	}
+}
