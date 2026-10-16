@@ -53,10 +53,18 @@ func run(args []string) error {
 	log := newLogger(cfg.Process.LogLevel, stderr)
 	slog.SetDefault(log)
 
-	// The database holds app tokens (encrypted) and the audit log: keep the
-	// directory private. Opening applies any pending migrations.
-	if err := os.MkdirAll(filepath.Dir(cfg.SQLitePath), 0o700); err != nil {
-		return fmt.Errorf("create the data directory: %w", err)
+	if cmd == cmdKillSwitch {
+		// never create a database here: a switch set in a database nobody
+		// reads (a wrong AGENT_DATA_DIR) would be reported as success
+		if fi, err := os.Stat(cfg.SQLitePath); err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("no database at %s: check AGENT_DATA_DIR / AGENT_SQLITE_PATH (run migrate to create one)", cfg.SQLitePath)
+		}
+	} else {
+		// The database holds app tokens (encrypted) and the audit log: keep
+		// the directory private. Opening applies any pending migrations.
+		if err := os.MkdirAll(filepath.Dir(cfg.SQLitePath), 0o700); err != nil {
+			return fmt.Errorf("create the data directory: %w", err)
+		}
 	}
 	st, err := sqlite.Open(cfg.SQLitePath)
 	if err != nil {
@@ -79,6 +87,10 @@ func run(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// after the first signal the default behaviour returns, so a second
+	// SIGINT or SIGTERM ends the process at once instead of waiting for the
+	// drain
+	context.AfterFunc(ctx, stop)
 	a, err := app.Build(ctx, cfg, st, app.Options{Log: log})
 	if err != nil {
 		return err

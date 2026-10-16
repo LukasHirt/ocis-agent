@@ -177,3 +177,39 @@ func TestLogsAreJSONAtTheConfiguredLevel(t *testing.T) {
 		t.Errorf("info logged at level error: %q", errOut.String())
 	}
 }
+
+// The kill switch command never creates a database: a wrong data directory
+// must fail instead of reporting a switch nobody reads.
+func TestKillSwitchRefusesAMissingDatabase(t *testing.T) {
+	for _, sub := range []string{"on", "off", "status"} {
+		dir, out, _ := setup(t)
+		// no data directory at all
+		err := run([]string{"killswitch", sub})
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "agent.db")) {
+			t.Errorf("%s without a data dir: err = %v, want one naming the database path", sub, err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s created the data directory: %v", sub, err)
+		}
+		// the directory exists, the database does not
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := run([]string{"killswitch", sub}); err == nil {
+			t.Errorf("%s without a database: no error", sub)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("%s created %d files", sub, len(entries))
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s printed %q", sub, out.String())
+		}
+		// a migrated database works
+		if err := run([]string{"migrate"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := run([]string{"killswitch", sub}); err != nil {
+			t.Errorf("%s with a database: %v", sub, err)
+		}
+	}
+}
