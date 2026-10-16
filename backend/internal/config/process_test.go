@@ -206,16 +206,14 @@ func TestProcessErrorsNeverEchoTheValue(t *testing.T) {
 
 func TestProcessDurationEdges(t *testing.T) {
 	for _, c := range []struct {
-		name         string
-		min, max     time.Duration
-		get          func(ProcessConfig) time.Duration
-		step         time.Duration
-		minInclusive bool
+		name     string
+		min, max time.Duration
+		get      func(ProcessConfig) time.Duration
 	}{
-		{"AGENT_APPROVAL_TTL", time.Minute, 8760 * time.Hour, func(p ProcessConfig) time.Duration { return p.ApprovalTTL }, time.Second, true},
-		{"AGENT_TOKEN_TTL", time.Hour, 720 * time.Hour, func(p ProcessConfig) time.Duration { return p.TokenTTL }, time.Second, true},
-		{"AGENT_SHUTDOWN_DRAIN", 0, 10 * time.Minute, func(p ProcessConfig) time.Duration { return p.ShutdownDrain }, time.Second, true},
-		{"AGENT_TOKEN_SWEEP_INTERVAL", time.Minute, 24 * time.Hour, func(p ProcessConfig) time.Duration { return p.SweepInterval }, time.Second, true},
+		{"AGENT_APPROVAL_TTL", time.Minute, 8760 * time.Hour, func(p ProcessConfig) time.Duration { return p.ApprovalTTL }},
+		{"AGENT_TOKEN_TTL", time.Hour, 720 * time.Hour, func(p ProcessConfig) time.Duration { return p.TokenTTL }},
+		{"AGENT_SHUTDOWN_DRAIN", 0, 10 * time.Minute, func(p ProcessConfig) time.Duration { return p.ShutdownDrain }},
+		{"AGENT_TOKEN_SWEEP_INTERVAL", time.Minute, 24 * time.Hour, func(p ProcessConfig) time.Duration { return p.SweepInterval }},
 	} {
 		for _, ok := range []time.Duration{c.min, c.max} {
 			cfg, err := Load(llmEnv(map[string]string{c.name: ok.String()}))
@@ -223,7 +221,7 @@ func TestProcessDurationEdges(t *testing.T) {
 				t.Errorf("%s=%s: %v, %v", c.name, ok, c.get(cfg.Process), err)
 			}
 		}
-		for _, bad := range []time.Duration{c.min - c.step, c.max + c.step} {
+		for _, bad := range []time.Duration{c.min - time.Second, c.max + time.Second} {
 			if _, err := Load(llmEnv(map[string]string{c.name: bad.String()})); err == nil {
 				t.Errorf("%s=%s: no error", c.name, bad)
 			}

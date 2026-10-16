@@ -38,8 +38,8 @@ func writeStatus(w http.ResponseWriter, code int, body string) {
 }
 
 // ready reports whether the process can do its work: the shutdown has not
-// begun, the secrets service is initialised, the store answers a read and, with the worker role, at least
-// one worker goroutine runs.
+// begun, the secrets service is initialised, the store answers a read and,
+// with the worker role, at least one worker goroutine runs.
 func (a *App) ready(ctx context.Context) bool {
 	if a.stopping.Load() || !a.secretsReady.Load() {
 		return false
