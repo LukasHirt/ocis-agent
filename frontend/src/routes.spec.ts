@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { defineComponent } from 'vue'
 import { buildRoutes } from './routes'
 import { APPID } from './appid'
 
@@ -23,5 +24,13 @@ describe('buildRoutes', () => {
     const [root] = buildRoutes(gettext)
     const paths = (root.children ?? []).map((c) => c.path)
     expect(paths).toContain('approvals')
+  })
+})
+
+describe('buildRoutes layout', () => {
+  it('uses the given layout as the root component', () => {
+    const layout = defineComponent({ render: () => null })
+    const [root] = buildRoutes(gettext, layout)
+    expect(root.component).toBe(layout)
   })
 })
