@@ -21,7 +21,7 @@ describe('buildRoutes', () => {
     }
   })
 
-  it('has the approvals inbox, the chat, the tasks, the activity and the settings as children of the layout', () => {
+  it('has the approvals inbox, the chat, the tasks, the activity, the memory and the settings as children of the layout', () => {
     const [root] = buildRoutes(gettext, layout)
     const children = (root.children ?? []).map((c) => [c.path, c.name, c.meta?.title])
     // the host prefixes the names with the app id (agent-approvals, agent-settings)
@@ -32,6 +32,8 @@ describe('buildRoutes', () => {
       ['tasks', 'tasks', 'Tasks'],
       ['tasks/:id', 'tasks-job', 'Tasks'],
       ['activity', 'activity', 'Activity'],
+      ['memory', 'memory', 'Memory'],
+      ['memory/:name+', 'memory-file', 'Memory'],
       ['settings', 'settings', 'Settings']
     ])
     for (const child of root.children ?? []) {
@@ -50,6 +52,15 @@ describe('buildRoutes', () => {
     expect(approvalsProps({ query: { job: ['a', 'b'] } })).toEqual({ job: undefined })
   })
 
+  it('passes the memory file name joined from its segments', () => {
+    const [root] = buildRoutes(gettext, layout)
+    const memoryProps = (root.children ?? []).find((c) => c.name === 'memory-file')!.props as (r: unknown) => unknown
+    expect(memoryProps({ params: { name: ['notes', 'a.md'] } })).toEqual({ name: 'notes/a.md' })
+    expect(memoryProps({ params: { name: ['profile.md'] } })).toEqual({ name: 'profile.md' })
+    expect(memoryProps({ params: { name: 'profile.md' } })).toEqual({ name: 'profile.md' })
+    expect(memoryProps({ params: {} })).toEqual({ name: undefined })
+  })
+
   it('uses the given layout as the root component', () => {
     const [root] = buildRoutes(gettext, layout)
     expect(root.component).toBe(layout)
@@ -57,7 +68,7 @@ describe('buildRoutes', () => {
 })
 
 describe('buildNavItems', () => {
-  it('links the approvals, the chat, the tasks, the activity and the settings, without a badge', () => {
+  it('links the approvals, the chat, the tasks, the activity, the memory and the settings, without a badge', () => {
     let user = false
     const items = buildNavItems(gettext, () => user)
     expect(items.map((i) => [i.name, i.icon, i.route])).toEqual([
@@ -65,6 +76,7 @@ describe('buildNavItems', () => {
       ['Chat', 'chat-3', { path: `/${APPID}/chat` }],
       ['Tasks', 'task', { path: `/${APPID}/tasks` }],
       ['Activity', 'history', { path: `/${APPID}/activity` }],
+      ['Memory', 'brain', { path: `/${APPID}/memory` }],
       ['Settings', 'settings-4', { path: `/${APPID}/settings` }]
     ])
     expect(items.every((i) => i.isVisible?.() === false)).toBe(true)

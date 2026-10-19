@@ -61,6 +61,23 @@ export const buildRoutes = (
         meta: { authContext: 'user', title: gettext('Activity') }
       },
       {
+        path: 'memory',
+        name: 'memory',
+        component: () => import('./views/Memory.vue'),
+        meta: { authContext: 'user', title: gettext('Memory') }
+      },
+      {
+        // notes/<slug>.md arrives as two segments
+        path: 'memory/:name+',
+        name: 'memory-file',
+        component: () => import('./views/Memory.vue'),
+        props: (route) => {
+          const n: unknown = route.params.name
+          return { name: Array.isArray(n) ? n.join('/') : typeof n === 'string' ? n : undefined }
+        },
+        meta: { authContext: 'user', title: gettext('Memory') }
+      },
+      {
         path: 'settings',
         name: 'settings',
         component: () => import('./views/Settings.vue'),
@@ -103,6 +120,13 @@ export const buildNavItems = (
     route: { path: `/${APPID}/activity` },
     isVisible,
     priority: 18
+  },
+  {
+    name: gettext('Memory'),
+    icon: 'brain',
+    route: { path: `/${APPID}/memory` },
+    isVisible,
+    priority: 19
   },
   {
     name: gettext('Settings'),

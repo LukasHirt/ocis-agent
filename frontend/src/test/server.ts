@@ -13,6 +13,7 @@ export interface Call {
   path: string
   query: URLSearchParams
   body: unknown
+  headers: Headers
 }
 
 export type Handler = (c: Call) => Response | Promise<Response> | undefined
@@ -25,7 +26,8 @@ export const fakeServer = (handler: Handler = () => undefined) => {
       method: init?.method ?? 'GET',
       path: u.pathname.replace(/^\/agent-api\/v1/, ''),
       query: u.searchParams,
-      body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      headers: new Headers(init?.headers)
     }
     calls.push(c)
     const r = await handler(c)
