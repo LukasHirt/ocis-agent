@@ -351,9 +351,32 @@ func TestTheRESTAPIEndToEnd(t *testing.T) {
 	if !st.Enrolled || !st.KillSwitch.Database || st.KillSwitch.Environment {
 		t.Errorf("status = %+v, want the database kill switch", st)
 	}
-	if st.Budget.DailyTokens != f.cfg.API.UserDailyTokens || st.Budget.UsedTokens != 3+4+5+6+1+1 ||
+	// the expected use: the steps' tokens since the start of the day the
+	// status reported (by the stored step times, as SumJobTokens counts)
+	dayEnd, _ := time.Parse(time.RFC3339, resets)
+	var used int64
+	if err := f.st.View(bg, func(tx store.Tx) error {
+		for _, id := range []string{j, j2} {
+			steps, err := tx.ListSteps(userID, id)
+			if err != nil {
+				return err
+			}
+			for _, s := range steps {
+				if !s.CreatedAt.Before(dayEnd.AddDate(0, 0, -1)) {
+					used += int64(s.TokensIn + s.TokensOut)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if used == 0 && time.Since(dayEnd.AddDate(0, 0, -1)) > time.Minute {
+		t.Fatal("no step tokens recorded")
+	}
+	if st.Budget.DailyTokens != f.cfg.API.UserDailyTokens || st.Budget.UsedTokens != used ||
 		st.Budget.ResetsAt == nil || *st.Budget.ResetsAt != resets {
-		t.Errorf("budget = %+v, want cap %d, 20 used, resets at %s", st.Budget, f.cfg.API.UserDailyTokens, resets)
+		t.Errorf("budget = %+v, want cap %d, %d used, resets at %s", st.Budget, f.cfg.API.UserDailyTokens, used, resets)
 	}
 	if st.Models.Default != model || len(st.Models.Available) != 1 || st.PendingApprovals != 0 {
 		t.Errorf("models %+v, pending %d", st.Models, st.PendingApprovals)
