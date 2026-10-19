@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient/fakeocis"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -248,24 +249,28 @@ func TestMemoryContentLimits(t *testing.T) {
 	}
 	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"a\u0000b"}`), 400, "invalid_request")
 	wantError(t, s.do(http.MethodPost, memBase, `{"name":"notes/n.md","content":"`+big+`"}`), 413, "too_large")
-	// a body over the route limit (96 KiB)
-	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 97<<10)+`"}`), 413, "too_large")
-	// invalid UTF-8 inside a JSON string is replaced by the decoder: what is
-	// written is always valid text
-	r2 := httptest.NewRequest(http.MethodPut, memBase+"/profile.md", strings.NewReader("{\"content\":\"a\xffb\"}"))
-	r2.Header.Set("Authorization", "Bearer "+fakeocis.OIDCToken("einstein"))
-	r2.Header.Set("Origin", testOrigin)
-	r2.Header.Set("Content-Type", "application/json")
-	r2.Header.Set("If-Match", et)
-	if rec := s.serve(r2); rec.Code == 200 {
-		b, _, _ := s.fake.File(einsteinDrive, einsteinMD)
-		if !utf8.Valid(b) {
-			t.Error("invalid UTF-8 reached oCIS")
-		}
-		et = s.memETag(t, einsteinDrive, einsteinMD)
-	} else if rec.Code != 400 {
-		t.Errorf("invalid utf-8 = %d %s", rec.Code, rec.Body)
+	// a body over the route limit (400 KiB)
+	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 401<<10)+`"}`), 413, "too_large")
+	// content over the limit but a body within it: the content check refuses it
+	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat(`\n`, 64<<10+1)+`"}`), 413, "too_large")
+	// invalid UTF-8 and lone surrogates are refused by the body decoder
+	for _, body := range []string{"{\"content\":\"a\xffb\"}", `{"content":"a\ud800b"}`} {
+		r2 := httptest.NewRequest(http.MethodPut, memBase+"/profile.md", strings.NewReader(body))
+		r2.Header.Set("Authorization", "Bearer "+fakeocis.OIDCToken("einstein"))
+		r2.Header.Set("Origin", testOrigin)
+		r2.Header.Set("Content-Type", "application/json")
+		r2.Header.Set("If-Match", et)
+		wantError(t, s.serve(r2), 400, "invalid_request")
 	}
+	// a valid 64 KiB file of newlines (a ~128 KiB body) and of control
+	// characters (a ~384 KiB body) passes
+	for _, esc := range []string{`\n`, `\u0001`} {
+		body := `{"content":"` + strings.Repeat(esc, 64<<10) + `"}`
+		if rec := s.putMem("einstein", "profile.md", s.memETag(t, einsteinDrive, einsteinMD), body); rec.Code != 200 {
+			t.Errorf("64 KiB of %s = %d %.200s", esc, rec.Code, rec.Body)
+		}
+	}
+	et = s.memETag(t, einsteinDrive, einsteinMD)
 	// exactly 64 KiB works
 	if rec := s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 64<<10)+`"}`); rec.Code != 200 {
 		t.Errorf("64 KiB = %d %s", rec.Code, rec.Body)
@@ -443,4 +448,122 @@ func jsonStr(t *testing.T, v string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestMemoryGetOfABigFileIsTruncatedAndNotEditable(t *testing.T) {
+	s := memStack(t)
+	big := strings.Repeat("é", 40<<10) // 80 KiB, over the 64 KiB edit limit
+	s.fake.PutFile(einsteinDrive, einsteinMD, []byte(big))
+	var g struct {
+		Content   string
+		Truncated bool
+		Editable  bool
+	}
+	rec := s.do(http.MethodGet, memBase+"/profile.md", "")
+	mustDecode(t, rec, &g)
+	if rec.Code != 200 || !g.Truncated || g.Editable || len(g.Content) != 64<<10 || !utf8.ValidString(g.Content) {
+		t.Fatalf("get = %d truncated=%v editable=%v len=%d", rec.Code, g.Truncated, g.Editable, len(g.Content))
+	}
+	s.fake.PutFile(einsteinDrive, einsteinMD, []byte("small\n"))
+	g.Content = ""
+	mustDecode(t, s.do(http.MethodGet, memBase+"/profile.md", ""), &g)
+	if g.Truncated || !g.Editable || g.Content != "small\n" {
+		t.Fatalf("small file = %+v", g)
+	}
+}
+
+func TestMemoryFilesOverTheReadLimitAre422(t *testing.T) {
+	s := memStack(t)
+	s.fake.PutFile(einsteinDrive, einsteinMD, []byte(strings.Repeat("a", 2<<20+1)))
+	et := s.memETag(t, einsteinDrive, einsteinMD)
+	wantError(t, s.do(http.MethodGet, memBase+"/profile.md", ""), 422, "file_too_large")
+	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"x"}`), 422, "file_too_large")
+}
+
+// stubMemory records calls; the API must not reach it for invalid names.
+type stubMemory struct {
+	calls   int
+	replace func(ctx context.Context) error
+}
+
+func (m *stubMemory) List(context.Context, memory.Session) ([]memory.Info, error) {
+	m.calls++
+	return nil, nil
+}
+func (m *stubMemory) Peek(context.Context, memory.Session, string) (memory.File, error) {
+	m.calls++
+	return memory.File{}, nil
+}
+func (m *stubMemory) Replace(ctx context.Context, _ memory.Session, name, content, _ string) (memory.Change, error) {
+	m.calls++
+	if m.replace != nil {
+		if err := m.replace(ctx); err != nil {
+			return memory.Change{}, err
+		}
+	}
+	return memory.Change{Name: name, After: content, Diff: "+" + content, ETag: `"9"`}, nil
+}
+func (m *stubMemory) Create(context.Context, memory.Session, string, string) (memory.Change, error) {
+	m.calls++
+	return memory.Change{}, nil
+}
+func (m *stubMemory) Limits() memory.Limits { return memory.DefaultLimits() }
+
+func TestMemoryInvalidNamesNeverReachTheService(t *testing.T) {
+	stub := &stubMemory{}
+	f := newFixture(t, func(d *Deps) { d.Memory = stub })
+	names := []string{"Profile.md", "a%2Fb.md", "notes%2F..%2Fx.md", "notes/" + strings.Repeat("a", 65) + ".md", "%2A", "README.md", "notes/A.md"}
+	for _, n := range names {
+		for _, m := range []string{http.MethodGet, http.MethodPut} {
+			body := ""
+			if m == http.MethodPut {
+				body = `{"content":"x"}`
+			}
+			r := f.req(m, memBase+"/"+n, body)
+			r.Header.Set("If-Match", `"1"`)
+			if rec := f.serve(r); rec.Code != 400 && rec.Code != 404 {
+				t.Errorf("%s %s = %d", m, n, rec.Code)
+			}
+		}
+		wantError(t, f.do(http.MethodPost, memBase, `{"name":`+jsonStr(t, mustUnescape(t, n))+`,"content":"x"}`), 400, "invalid_request")
+	}
+	// the single-segment routes answer 400 itself
+	wantError(t, f.do(http.MethodGet, memBase+"/Profile.md", ""), 400, "invalid_request")
+	wantError(t, f.do(http.MethodGet, memBase+"/a%2Fb.md", ""), 400, "invalid_request")
+	if stub.calls != 0 {
+		t.Fatalf("the service was called %d times for invalid names", stub.calls)
+	}
+	// a valid name does reach it
+	f.do(http.MethodGet, memBase+"/profile.md", "")
+	if stub.calls != 1 {
+		t.Fatalf("calls = %d", stub.calls)
+	}
+}
+
+func TestMemoryAuditSurvivesTheClientLeaving(t *testing.T) {
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	stub := &stubMemory{replace: func(context.Context) error { cancel(); return nil }}
+	f := newFixture(t, func(d *Deps) { d.Memory = stub })
+	r := f.req(http.MethodPut, memBase+"/profile.md", `{"content":"x\n"}`).WithContext(ctx)
+	r.Header.Set("If-Match", `"1"`)
+	rec := f.serve(r)
+	if rec.Code != 200 {
+		t.Fatalf("put = %d %s", rec.Code, rec.Body)
+	}
+	var n int
+	if err := f.st.View(bg, func(tx store.Tx) error {
+		recs, err := tx.ReadAudit(aliceID.UserID, 0, 100)
+		for _, a := range recs {
+			if a.Kind == "memory_edited" {
+				n++
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("memory_edited rows = %d, the audit was dropped with the request context", n)
+	}
 }

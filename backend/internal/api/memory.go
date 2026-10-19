@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -22,15 +23,18 @@ import (
 // nor revokes the model's right to replace it.
 
 const (
-	// memoryMaxBody: a 64 KiB file with every character escaped as \uXXXX is
-	// larger than the body limit of other routes, so PUT and POST get 96 KiB.
-	memoryMaxBody = 96 << 10
+	// memoryMaxBody: a valid 64 KiB file of control characters escapes to
+	// \u00XX (6x) and one of newlines, quotes or backslashes to 2x, so the
+	// body of a valid file reaches ~385 KiB. The content limit (64 KiB) is
+	// checked by the service after the body is decoded.
+	memoryMaxBody = 400 << 10
 	// maxDiffResponse caps the diff in the response of an edit.
 	maxDiffResponse = 16 << 10
 	// maxDiffAudit caps the diff bytes in the audit detail; the audit log
 	// holds names and a short diff, never the file.
 	maxDiffAudit = 1500
 	maxETagLen   = 256
+	auditTimeout = 5 * time.Second
 )
 
 type memoryFileView struct {
@@ -45,10 +49,16 @@ type memoryListView struct {
 }
 
 // memoryFileDoc is the body of GET /memory/{name}. Content is untrusted.
+//
+// A file larger than the edit limit (MaxFileBytes) is shown cut at that
+// size on a rune boundary with truncated=true and editable=false: saving the
+// cut text would destroy the rest.
 type memoryFileDoc struct {
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	ETag    string `json:"etag"`
+	Name      string `json:"name"`
+	Content   string `json:"content"`
+	ETag      string `json:"etag"`
+	Truncated bool   `json:"truncated"`
+	Editable  bool   `json:"editable"`
 }
 
 type memoryEditView struct {
@@ -116,8 +126,12 @@ func memoryError(err error, write bool) error {
 		return errAlreadyExists
 	case errors.Is(err, memory.ErrNotFound):
 		return errNotFound
+	case errors.Is(err, memory.ErrFileTooLarge):
+		return errFileTooLarge
 	case write && errors.Is(err, memory.ErrTooLarge):
 		return errTooLarge
+	case !write && errors.Is(err, memory.ErrTooLarge):
+		return errFileTooLarge
 	}
 	return err
 }
@@ -170,7 +184,11 @@ func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) error {
 		return memoryError(err, false)
 	}
 	w.Header().Set("ETag", f.ETag)
-	writeJSON(w, http.StatusOK, memoryFileDoc{Name: f.Name, Content: f.Content, ETag: f.ETag})
+	doc := memoryFileDoc{Name: f.Name, Content: f.Content, ETag: f.ETag, Editable: true}
+	if max := svc.Limits().MaxFileBytes; int64(len(f.Content)) > max {
+		doc.Content, doc.Truncated, doc.Editable = cutBytes(f.Content, int(max)), true, false
+	}
+	writeJSON(w, http.StatusOK, doc)
 	return nil
 }
 
@@ -251,13 +269,21 @@ func editView(ch memory.Change) memoryEditView {
 }
 
 // auditMemoryEdit records memory_edited after the write to oCIS succeeded. It
-// is best effort in its own transaction: the file is already changed, so a
-// failing append is logged by category and the response stays 200/201 (an
-// error response would make the client retry an edit that happened). The
-// detail holds the name and the first 1500 bytes of the diff, never the file.
+// is best effort in its own transaction, on a context that outlives the
+// request (with a short timeout): the file is already changed, so a failing
+// append is logged by category and the response stays 200/201 (an error
+// response would make the client retry an edit that happened). Known limit:
+// a PUT whose outcome is uncertain (timeout or lost response from oCIS)
+// returns an error and is not audited, although the file may have changed.
+// The detail holds the name and the first 1500 bytes of the diff, never the
+// file.
 func (s *Server) auditMemoryEdit(r *http.Request, p Principal, ch memory.Change, outcome string) {
 	detail := "name=" + ch.Name + "; diff=" + cutBytes(ch.Diff, maxDiffAudit)
-	err := s.d.Store.InTx(r.Context(), func(tx store.Tx) error {
+	// the write happened: a client that disconnected or a route deadline that
+	// ended must not drop the record
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
+	defer cancel()
+	err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
 		return s.appendAudit(tx, p.UserID, "memory_edited", outcome, detail)
 	})
 	if err != nil {

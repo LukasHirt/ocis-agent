@@ -1,11 +1,10 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
-
-	"context"
 
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 )
@@ -13,6 +12,11 @@ import (
 // ErrInvalid is returned for a request the caller must correct (for example
 // an empty or wildcard If-Match).
 var ErrInvalid = errors.New("memory: invalid request")
+
+// ErrFileTooLarge: the existing file is larger than the read limit, so Replace
+// cannot show what it overwrites. It also matches ErrTooLarge; check it
+// first to tell it from content that is too large.
+var ErrFileTooLarge = errors.New("memory: the existing file is too large to read")
 
 // ErrAlreadyExists: Create found the file.
 var ErrAlreadyExists = errors.New("memory: the file already exists")
@@ -38,6 +42,9 @@ func (s *Service) Replace(ctx context.Context, sess Session, name, content, ifMa
 		return Change{}, ErrInvalid
 	}
 	data, etag, err := s.files.Get(ctx, sess.Creds, sess.DriveID, p, s.lim.MaxReadBytes)
+	if errors.Is(err, ocisclient.ErrTooLarge) {
+		return Change{}, fmt.Errorf("memory: read %s: %w: %w", name, ErrFileTooLarge, err)
+	}
 	if err != nil {
 		return Change{}, fmt.Errorf("memory: read %s: %w", name, err)
 	}

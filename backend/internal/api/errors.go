@@ -28,6 +28,7 @@ var errorMessages = map[string]string{
 	"already_exists":         "That file already exists.",
 	"precondition_required":  "The If-Match header with the file's ETag is required.",
 	"precondition_failed":    "The file changed since you loaded it; reload it.",
+	"file_too_large":         "The file is too large to open.",
 	"not_text":               "The file is not UTF-8 text.",
 	"job_ended":              "The job has already ended.",
 	"stale_arguments":        "The action is not the one you were shown; reload it.",
@@ -74,6 +75,7 @@ var (
 	errPreconditionFailed   = newAPIError(http.StatusPreconditionFailed, "precondition_failed")
 	errAlreadyExists        = newAPIError(http.StatusConflict, "already_exists")
 	errNotText              = newAPIError(http.StatusUnprocessableEntity, "not_text")
+	errFileTooLarge         = newAPIError(http.StatusUnprocessableEntity, "file_too_large")
 )
 
 // Errors of chat.

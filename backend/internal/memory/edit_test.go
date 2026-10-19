@@ -144,3 +144,34 @@ func TestEditsNeverTouchTheETagCacheAndTheModelMustReadAgain(t *testing.T) {
 		t.Fatalf("model write of a user-created file = %v, want ErrNotRead", err)
 	}
 }
+
+func TestReplaceSendsIfMatchOnThePut(t *testing.T) {
+	e := ready(t, Limits{})
+	e.fake.PutFile("drive1", profile, []byte("v1\n"))
+	_, etag, _ := e.fake.File("drive1", profile)
+	e.fake.ResetRequests()
+	if _, err := e.svc.Replace(bg, e.sess, "profile.md", "v2\n", etag); err != nil {
+		t.Fatal(err)
+	}
+	puts := 0
+	for _, r := range e.fake.Requests() {
+		if r.Method == "PUT" {
+			puts++
+			if got := r.Header.Get("If-Match"); got != etag {
+				t.Errorf("PUT If-Match = %q, want %q", got, etag)
+			}
+		}
+	}
+	if puts != 1 {
+		t.Fatalf("%d PUTs", puts)
+	}
+}
+
+func TestReplaceOfAFileOverTheReadLimitIsErrFileTooLarge(t *testing.T) {
+	e := ready(t, Limits{MaxReadBytes: 100})
+	e.fake.PutFile("drive1", profile, []byte(strings.Repeat("a", 200)))
+	_, etag, _ := e.fake.File("drive1", profile)
+	if _, err := e.svc.Replace(bg, e.sess, "profile.md", "x", etag); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -69,6 +69,7 @@ func TestErrorMappingTable(t *testing.T) {
 		{errPreconditionFailed, 412, "precondition_failed"},
 		{errAlreadyExists, 409, "already_exists"},
 		{errNotText, 422, "not_text"},
+		{errFileTooLarge, 422, "file_too_large"},
 		{&apiError{status: 418, code: "rate_limited"}, 418, "rate_limited"},
 		{errors.New("SECRET"), 500, "internal"},
 		{store.ErrFenceLost, 500, "internal"},
