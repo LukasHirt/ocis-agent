@@ -2,7 +2,7 @@ import { beforeEach } from 'vitest'
 import { config } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createGettext } from 'vue3-gettext'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, ref } from 'vue'
 
 export { makePlatform } from './src/test/platform'
 
@@ -184,7 +184,70 @@ const OcSelect = defineComponent({
   }
 })
 
+// OcTextarea, like the real one, keeps attribute inheritance: attributes
+// land on the root AND on the textarea. It emits change on Enter without
+// Ctrl or Shift unless submitOnEnter is false, emits every keydown (so a
+// keydown listener is not an attribute) and exposes focus().
+const OcTextarea = defineComponent({
+  name: 'OcTextarea',
+  props: {
+    modelValue: { type: String, default: null },
+    label: { type: String, default: null },
+    errorMessage: { type: String, default: null },
+    descriptionMessage: { type: String, default: null },
+    submitOnEnter: { type: Boolean, default: true }
+  },
+  emits: ['update:modelValue', 'change', 'keydown', 'focus'],
+  setup(props, { emit, attrs, expose }) {
+    const id = nextId()
+    const el = ref<HTMLTextAreaElement | null>(null)
+    expose({ focus: () => el.value?.focus() })
+    return () => {
+      const message = props.errorMessage || props.descriptionMessage
+      return h('div', { 'data-stub': 'OcTextarea' }, [
+        h('label', { for: id }, props.label ?? ''),
+        h('textarea', {
+          ...attrs,
+          ...(message ? { 'aria-describedby': `${id}-message` } : {}),
+          id,
+          ref: el,
+          value: props.modelValue,
+          'aria-invalid': props.errorMessage ? 'true' : 'false',
+          onInput: (e: Event) => emit('update:modelValue', (e.target as HTMLTextAreaElement).value),
+          onFocus: () => emit('focus', true),
+          onKeydown: (e: KeyboardEvent) => {
+            if (props.submitOnEnter && e.key?.toLowerCase() === 'enter' && !e.ctrlKey && !e.shiftKey) {
+              emit('change', (e.target as HTMLTextAreaElement).value)
+            }
+            emit('keydown', e)
+          }
+        }),
+        message ? h('div', [h('span', { id: `${id}-message` }, message)]) : null
+      ])
+    }
+  }
+})
+
+// RouterLink renders a link; data-to holds the target it was given (the
+// host's router resolves it at runtime).
+const RouterLink = defineComponent({
+  name: 'RouterLink',
+  props: { to: { type: [String, Object], required: true } },
+  setup(props, { slots }) {
+    return () =>
+      h(
+        'a',
+        { href: typeof props.to === 'string' ? props.to : '#', 'data-to': JSON.stringify(props.to) },
+        slots.default?.()
+      )
+  }
+})
+
 config.global.stubs = {
+  'oc-textarea': OcTextarea,
+  OcTextarea,
+  'router-link': RouterLink,
+  RouterLink,
   'oc-button': OcButton,
   OcButton,
   'oc-icon': OcIcon,

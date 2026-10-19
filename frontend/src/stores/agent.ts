@@ -66,7 +66,29 @@ interface Session {
   client: ApiClient
   events: EventClient
   abort: AbortController
+  handle: SessionHandle
 }
+
+// SessionHandle is what screen stores use of a running session: one object
+// per session, so comparing handles tells whether the session is still the
+// same. signal aborts when the session ends.
+export interface SessionHandle {
+  readonly client: ApiClient
+  readonly platform: Platform
+  readonly gettext: Gettext
+  readonly signal: AbortSignal
+}
+
+// StoreEvent is told to subscribers: 'changed' for the kinds of a change
+// event, 'refresh' when everything should be read again (fresh after a
+// ready, since changes may have been missed), 'reset' when the session
+// ended (a later one may be another user's).
+export type StoreEvent =
+  | { type: 'changed'; kinds: ChangeKind[] }
+  | { type: 'refresh'; fresh: boolean }
+  | { type: 'reset' }
+
+export type StoreListener = (e: StoreEvent) => void | Promise<void>
 
 const globalTimers: Timers = {
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -119,6 +141,31 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   const lastRefreshed = ref<number | null>(null)
 
   let session: Session | null = null
+  const listeners = new Set<StoreListener>()
+
+  // subscribe registers a screen store for the session's events; it
+  // returns the function that ends the subscription.
+  const subscribe = (fn: StoreListener): (() => void) => {
+    listeners.add(fn)
+    return () => {
+      listeners.delete(fn)
+    }
+  }
+
+  // tell calls every listener; a failing one never stops the others or
+  // the store's own refresh.
+  const tell = (e: StoreEvent): Promise<void> =>
+    Promise.all(
+      [...listeners].map(async (fn) => {
+        try {
+          await fn(e)
+        } catch {
+          // a screen store's problem: it keeps its own error state
+        }
+      })
+    ).then(() => undefined)
+
+  const currentSession = (): SessionHandle | null => session?.handle ?? null
   const inflight = new Map<Resource, Promise<void>>()
   const inflightDepth = new Map<Resource, Depth>()
   const queued = new Map<Resource, Promise<void>>()
@@ -325,9 +372,15 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     const events = make({
       platform: opts.platform,
       client,
-      onReady: guard(() => refreshAll({ fresh: true })),
-      onPoll: guard(() => refreshAll()),
-      onChanged: guard((kinds: ChangeKind[]) => onChanged(kinds)),
+      onReady: guard(() =>
+        Promise.all([refreshAll({ fresh: true }), tell({ type: 'refresh', fresh: true })]).then(() => undefined)
+      ),
+      onPoll: guard(() =>
+        Promise.all([refreshAll(), tell({ type: 'refresh', fresh: false })]).then(() => undefined)
+      ),
+      onChanged: guard((kinds: ChangeKind[]) =>
+        Promise.all([onChanged(kinds), tell({ type: 'changed', kinds: [...kinds] })]).then(() => undefined)
+      ),
       onState: guard((st: StreamState) => {
         connection.value = st
       }),
@@ -340,7 +393,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       timers: opts.timers ?? globalTimers,
       client,
       events,
-      abort
+      abort,
+      handle: Object.freeze({ client, platform: opts.platform, gettext: opts.gettext, signal: abort.signal })
     }
     session = s
     connection.value = 'streaming'
@@ -360,6 +414,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       deferred = null
     }
     reset()
+    void tell({ type: 'reset' })
   }
 
   const active = (): Session => {
@@ -519,6 +574,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     revokeToken,
     previewRevokeAll,
     revokeAll,
+    subscribe,
+    session: currentSession,
     start,
     stop
   }

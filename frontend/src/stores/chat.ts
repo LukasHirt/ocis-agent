@@ -1,0 +1,707 @@
+import { defineStore } from 'pinia'
+import { computed, reactive, ref, shallowRef } from 'vue'
+import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
+import { ApiError, describeError, isAbortError } from '../api/errors'
+import type { Approval, Conversation, JobState, Message, PauseReason, Sent } from '../api/types'
+import { MAX_MESSAGE_BYTES, MAX_TITLE_CHARS, checkMessage, checkTitle, type TextProblem } from '../util/chatText'
+import { formatDuration } from '../util/format'
+
+// Page sizes (the server caps chat pages at 100).
+export const CONVERSATION_PAGE = 50
+export const MESSAGE_PAGE = 50
+export const JOB_APPROVALS_LIMIT = 20
+// The server's per-user pause between two sends; a refused send uses it too.
+export const SEND_COOLDOWN_MS = 1_000
+
+// Why the agent will not answer a message right away, from the 202.
+export type AgentNotice = 'paused' | 'killed' | 'credentials'
+
+export interface SendError {
+  code: string // the server's code, or empty, too_long, control, cooldown
+  message: string // a fixed text
+  retryAfter?: number // seconds, as the server said
+}
+
+export interface JobApprovals {
+  items: Approval[]
+  more: boolean // more pending approvals than were read
+  error: string | null
+}
+
+// The states in which a question is still unanswered.
+const LIVE_STATES: readonly string[] = [
+  'queued' satisfies JobState,
+  'running' satisfies JobState,
+  'waiting_approval' satisfies JobState
+]
+
+export const isLiveJob = (state: string | undefined): boolean => state !== undefined && LIVE_STATES.includes(state)
+
+const noticeOf = (a: Sent['agent'] | undefined): AgentNotice | undefined => {
+  if (!a || typeof a !== 'object') return undefined
+  if (a.kill_switch === true) return 'killed'
+  if (a.paused !== true) return undefined
+  const reason = String(a.pause_reason ?? '')
+  const credential: readonly string[] = [
+    'credential_invalid' satisfies PauseReason,
+    'credential_revoked' satisfies PauseReason,
+    'credential_expired' satisfies PauseReason
+  ]
+  return credential.includes(reason) ? 'credentials' : 'paused'
+}
+
+const byId = <T extends { id: string }>(list: T[]) => new Set(list.map((x) => x.id))
+
+// mergeHead merges a freshly read first page into a list read before (both
+// newest first): entries the head does not hold are kept behind it, as long
+// as the head reaches into the old list; otherwise there is a gap and the
+// older entries are dropped. The cursor for older entries is the old one
+// when old entries are kept, else the head's.
+export const mergeHead = <T extends { id: string }>(
+  existing: T[],
+  head: { items: T[]; next: string | null },
+  olderCursor: string | null
+): { items: T[]; cursor: string | null } => {
+  if (head.next === null || head.items.length === 0) return { items: head.items, cursor: head.next }
+  const last = head.items[head.items.length - 1].id
+  const at = existing.findIndex((x) => x.id === last)
+  if (at < 0) return { items: head.items, cursor: head.next }
+  const seen = byId(head.items)
+  const tail = existing.slice(at + 1).filter((x) => !seen.has(x.id))
+  return { items: [...head.items, ...tail], cursor: tail.length > 0 ? olderCursor : head.next }
+}
+
+// coalesce runs fn once at a time: a call while it runs queues ONE more
+// run, shared by every caller meanwhile.
+const coalesce = (fn: () => Promise<void>) => {
+  let running: Promise<void> | null = null
+  let queued: Promise<void> | null = null
+  const run = (): Promise<void> => {
+    if (!running) {
+      const p = fn().finally(() => {
+        if (running === p) running = null
+      })
+      running = p
+      return p
+    }
+    if (!queued) {
+      const q: Promise<void> = running.then(() => {
+        if (queued === q) queued = null
+        return run()
+      })
+      queued = q
+    }
+    return queued
+  }
+  return Object.assign(run, {
+    clear: () => {
+      running = null
+      queued = null
+    }
+  })
+}
+
+const listOf = <T>(v: unknown, key: string): { items: T[]; next: string | null } => {
+  const doc = v as Record<string, unknown> | null
+  const items = doc?.[key]
+  if (!Array.isArray(items)) throw new ApiError(502, 'internal')
+  const next = doc?.next_cursor
+  return { items: items as T[], next: typeof next === 'string' && next !== '' ? next : null }
+}
+
+// useChatStore holds the chat screen's data: the conversation list, the
+// open conversation's messages and the send state. It refreshes on the
+// agent store's events only while attached (the chat screen is mounted).
+// Errors are fixed texts; nothing is optimistic: a sent message shows when
+// the server lists it.
+export const useChatStore = defineStore('ocis-agent-chat', () => {
+  const agent = useAgentStore()
+
+  const conversations = shallowRef<Conversation[]>([])
+  const conversationsCursor = ref<string | null>(null)
+  const conversationsLoading = ref(false)
+  const conversationsLoaded = ref(false)
+  const conversationsError = ref<string | null>(null)
+
+  const current = ref<string | null>(null)
+  const detail = shallowRef<Conversation | null>(null) // the open one, if not listed
+  const messages = shallowRef<Message[]>([]) // newest first, as the API lists them
+  const olderCursor = ref<string | null>(null)
+  const messagesLoading = ref(false)
+  const messagesLoaded = ref(false)
+  const messagesError = ref<string | null>(null)
+  const olderLoading = ref(false)
+  const olderError = ref<string | null>(null)
+  const missing = ref(false) // the open conversation does not exist (any more)
+
+  const sending = ref(false)
+  const sendError = shallowRef<SendError | null>(null)
+  const blockedUntil = ref(0)
+  const needsEnrol = ref(false)
+  const actionError = ref<string | null>(null)
+  const draftByConversation = reactive<Record<string, string>>({})
+  const notices = reactive<Record<string, AgentNotice>>({})
+  const jobApprovals = reactive<Record<string, JobApprovals>>({})
+
+  // the chronological thread (oldest first)
+  const thread = computed(() => [...messages.value].reverse())
+  const currentConversation = computed(
+    () => conversations.value.find((c) => c.id === current.value) ?? detail.value ?? null
+  )
+
+  let bound: SessionHandle | null = null // the session the data belongs to
+  let gen = 0 // grows on reset and on every open: older answers are dropped
+
+  // session returns the running session, resetting the data first if it
+  // belongs to an earlier one.
+  const session = (): SessionHandle | null => {
+    const s = agent.session()
+    if (s !== bound) {
+      if (bound !== null) reset()
+      bound = s
+    }
+    return s
+  }
+
+  const describe = (s: SessionHandle, e: unknown) => describeError(e, s.gettext)
+  const fmtSeconds = (secs: number) => formatDuration(Math.max(1, secs) * 1000)
+
+  // --- conversations
+
+  const applyConversations = (head: { items: Conversation[]; next: string | null }) => {
+    const r = mergeHead(conversations.value, head, conversationsCursor.value)
+    conversations.value = r.items
+    conversationsCursor.value = r.cursor
+  }
+
+  const conversationsRefresh = coalesce(async () => {
+    const s = session()
+    if (!s) return
+    const g = gen
+    conversationsLoading.value = true
+    try {
+      const v = await s.client.listConversations({ limit: CONVERSATION_PAGE }, s.signal)
+      if (g !== gen) return
+      applyConversations(listOf<Conversation>(v, 'conversations'))
+      conversationsError.value = null
+      conversationsLoaded.value = true
+    } catch (e) {
+      if (g !== gen || isAbortError(e)) return
+      conversationsError.value = describe(s, e)
+    } finally {
+      if (g === gen) conversationsLoading.value = false
+    }
+  })
+
+  // loadConversations reads the first page (merged with the pages already
+  // read, see mergeHead).
+  const loadConversations = (): Promise<void> => conversationsRefresh()
+
+  let moreInflight: Promise<void> | null = null
+  const loadMoreConversations = (): Promise<void> => {
+    if (moreInflight) return moreInflight
+    const s = session()
+    const cursor = conversationsCursor.value
+    if (!s || cursor === null) return Promise.resolve()
+    const g = gen
+    conversationsLoading.value = true
+    const p = (async () => {
+      try {
+        const v = await s.client.listConversations({ limit: CONVERSATION_PAGE, cursor }, s.signal)
+        if (g !== gen) return
+        const page = listOf<Conversation>(v, 'conversations')
+        const seen = byId(conversations.value)
+        conversations.value = [...conversations.value, ...page.items.filter((c) => !seen.has(c.id))]
+        conversationsCursor.value = page.next
+        conversationsError.value = null
+      } catch (e) {
+        if (g !== gen || isAbortError(e)) return
+        conversationsError.value = describe(s, e)
+      } finally {
+        if (g === gen) conversationsLoading.value = false
+        moreInflight = null
+      }
+    })()
+    moreInflight = p
+    return p
+  }
+
+  // dropConversation takes a conversation that is gone off the list; its
+  // draft stays (the user may still want the text) unless the user deleted
+  // it here.
+  const dropConversation = (id: string, forgetDraft = false) => {
+    conversations.value = conversations.value.filter((c) => c.id !== id)
+    if (forgetDraft) delete draftByConversation[id]
+  }
+
+  const replaceConversation = (c: Conversation) => {
+    conversations.value = conversations.value.map((x) => (x.id === c.id ? c : x))
+    if (detail.value?.id === c.id) detail.value = c
+  }
+
+  // --- the open conversation
+
+  const clearThread = () => {
+    messages.value = []
+    olderCursor.value = null
+    messagesLoaded.value = false
+    messagesLoading.value = false
+    messagesError.value = null
+    olderLoading.value = false
+    olderError.value = null
+    missing.value = false
+    detail.value = null
+    for (const k of Object.keys(jobApprovals)) delete jobApprovals[k]
+  }
+
+  const approvalsInflight = new Map<string, Promise<void>>()
+
+  // loadJobApprovals reads the pending approvals of the jobs that wait for
+  // one, for the inline list; the others are forgotten.
+  const loadJobApprovals = (s: SessionHandle, g: number) => {
+    const waiting = new Set<string>()
+    for (const m of messages.value) {
+      if (m.job && m.job.state === ('waiting_approval' satisfies JobState)) waiting.add(m.job.id)
+    }
+    for (const k of Object.keys(jobApprovals)) if (!waiting.has(k)) delete jobApprovals[k]
+    return Promise.all(
+      [...waiting].map((jobId) => {
+        const running = approvalsInflight.get(jobId)
+        if (running) return running
+        const p = s.client
+          .listApprovals({ jobId, limit: JOB_APPROVALS_LIMIT }, s.signal)
+          .then(
+            (v) => {
+              if (g !== gen) return
+              const page = listOf<Approval>(v, 'approvals')
+              jobApprovals[jobId] = { items: page.items, more: page.next !== null, error: null }
+            },
+            (e: unknown) => {
+              if (g !== gen || isAbortError(e)) return
+              const prev = jobApprovals[jobId]
+              jobApprovals[jobId] = { items: prev?.items ?? [], more: prev?.more ?? false, error: describe(s, e) }
+            }
+          )
+          .finally(() => approvalsInflight.delete(jobId))
+        approvalsInflight.set(jobId, p)
+        return p
+      })
+    ).then(() => undefined)
+  }
+
+  const threadRefresh = coalesce(async () => {
+    const s = session()
+    const id = current.value
+    if (!s || id === null) return
+    const g = gen
+    messagesLoading.value = true
+    try {
+      const v = await s.client.listMessages(id, { limit: MESSAGE_PAGE }, s.signal)
+      if (g !== gen) return
+      const r = mergeHead(messages.value, listOf<Message>(v, 'messages'), olderCursor.value)
+      messages.value = r.items
+      olderCursor.value = r.cursor
+      messagesError.value = null
+      messagesLoaded.value = true
+      missing.value = false
+    } catch (e) {
+      if (g !== gen || isAbortError(e)) return
+      if (e instanceof ApiError && e.status === 404) {
+        missing.value = true
+        messages.value = []
+        olderCursor.value = null
+        dropConversation(id)
+        messagesError.value = null
+      } else {
+        messagesError.value = describe(s, e)
+      }
+      return
+    } finally {
+      if (g === gen) messagesLoading.value = false
+    }
+    await loadJobApprovals(s, g)
+  })
+
+  // refreshOpen reads the first page of the open conversation again (and
+  // the approvals of its waiting questions).
+  const refreshOpen = (): Promise<void> => threadRefresh()
+
+  // openConversation shows the conversation with this id; the answers for
+  // the one shown before are dropped.
+  const openConversation = async (id: string): Promise<void> => {
+    if (!session()) return
+    gen++
+    threadRefresh.clear()
+    approvalsInflight.clear()
+    clearThread()
+    current.value = id
+    sendError.value = null
+    actionError.value = null
+    const g = gen
+    const s = session()!
+    if (!conversations.value.some((c) => c.id === id)) {
+      // opened by its address: read its title
+      s.client.getConversation(id, s.signal).then(
+        (c) => {
+          if (g === gen && c && typeof c.id === 'string') detail.value = c
+        },
+        () => {} // the messages tell whether it exists
+      )
+    }
+    await threadRefresh()
+  }
+
+  const closeConversation = () => {
+    gen++
+    threadRefresh.clear()
+    approvalsInflight.clear()
+    clearThread()
+    current.value = null
+    sendError.value = null
+  }
+
+  const loadOlder = async (): Promise<void> => {
+    const s = session()
+    const id = current.value
+    const cursor = olderCursor.value
+    if (!s || id === null || cursor === null || olderLoading.value) return
+    const g = gen
+    olderLoading.value = true
+    olderError.value = null
+    try {
+      const v = await s.client.listMessages(id, { limit: MESSAGE_PAGE, cursor }, s.signal)
+      if (g !== gen) return
+      const page = listOf<Message>(v, 'messages')
+      const seen = byId(messages.value)
+      messages.value = [...messages.value, ...page.items.filter((m) => !seen.has(m.id))]
+      olderCursor.value = page.next
+    } catch (e) {
+      if (g !== gen || isAbortError(e)) return
+      olderError.value = describe(s, e)
+    } finally {
+      if (g === gen) olderLoading.value = false
+    }
+  }
+
+  // --- actions
+
+  const textProblem = (s: SessionHandle, p: TextProblem): string => {
+    switch (p) {
+      case 'empty':
+        return s.gettext('Write a message first.')
+      case 'too_long':
+        return s.gettext('The message is longer than %{max} bytes. Shorten it.').replace(
+          '%{max}',
+          String(MAX_MESSAGE_BYTES)
+        )
+      case 'control':
+        return s.gettext('The message contains control characters, which cannot be sent. Remove them.')
+    }
+  }
+
+  const sendErrorOf = (s: SessionHandle, e: unknown): SendError => {
+    if (!(e instanceof ApiError)) return { code: 'internal', message: describe(s, e) }
+    const retry = e.retryAfter !== undefined ? { retryAfter: e.retryAfter } : {}
+    const base = { code: e.code, ...retry }
+    const t = s.gettext
+    if (e.status === 429) {
+      switch (e.code) {
+        case 'too_many_pending':
+          return { ...base, message: t('You have too many questions waiting. Wait for an answer, then try again.') }
+        case 'budget_exhausted':
+          return { ...base, message: describe(s, e) }
+        case 'limit_reached':
+          return {
+            ...base,
+            message:
+              e.retryAfter !== undefined
+                ? t("You have reached today's limit of questions. You can ask again in %{time}.").replace(
+                    '%{time}',
+                    fmtSeconds(e.retryAfter)
+                  )
+                : t("You have reached today's limit of questions. Try again tomorrow.")
+          }
+        case 'rate_limited':
+          return {
+            ...base,
+            message:
+              e.retryAfter !== undefined
+                ? t('You are sending messages too quickly. Try again in %{time}.').replace(
+                    '%{time}',
+                    fmtSeconds(e.retryAfter)
+                  )
+                : describe(s, e)
+          }
+      }
+    }
+    if (e.status === 404) return { ...base, message: t('This conversation no longer exists.') }
+    return { ...base, message: describe(s, e) }
+  }
+
+  // send sends text to the open conversation. It refuses while a send is
+  // in flight or the cooldown runs, and text the server would refuse. After
+  // the 202 the draft is cleared and the thread read again; on a refusal
+  // the draft stays and sendError has the fixed text.
+  const send = async (text: string): Promise<boolean> => {
+    const s = session()
+    const id = current.value
+    if (!s || id === null || sending.value) return false
+    const problem = checkMessage(text)
+    if (problem) {
+      sendError.value = { code: problem, message: textProblem(s, problem) }
+      return false
+    }
+    const now = s.platform.now()
+    if (now < blockedUntil.value) {
+      const secs = Math.ceil((blockedUntil.value - now) / 1000)
+      sendError.value = {
+        code: 'cooldown',
+        message: s.gettext('Wait %{time} before sending again.').replace('%{time}', fmtSeconds(secs))
+      }
+      return false
+    }
+    const g = gen
+    sending.value = true
+    sendError.value = null
+    try {
+      const res = await s.client.sendMessage(id, text, s.signal)
+      if (g !== gen) return false
+      blockedUntil.value = s.platform.now() + SEND_COOLDOWN_MS
+      delete draftByConversation[id]
+      needsEnrol.value = false
+      const notice = noticeOf(res?.agent)
+      const mid = res?.message?.id
+      if (notice && typeof mid === 'string') notices[mid] = notice
+      await Promise.all([threadRefresh(), conversationsRefresh()])
+      return true
+    } catch (e) {
+      if (g !== gen || isAbortError(e)) return false
+      const err = sendErrorOf(s, e)
+      const wait = e instanceof ApiError && e.status === 429 && e.retryAfter !== undefined ? e.retryAfter * 1000 : 0
+      blockedUntil.value = s.platform.now() + Math.max(SEND_COOLDOWN_MS, wait)
+      if (err.code === 'not_enrolled') needsEnrol.value = true
+      if (e instanceof ApiError && e.status === 404) {
+        missing.value = true
+        dropConversation(id)
+      }
+      sendError.value = err
+      return false
+    } finally {
+      if (g === gen) sending.value = false
+    }
+  }
+
+  // createConversation creates one (untitled unless given a title) at the
+  // top of the list; null after a refusal (actionError says why).
+  const createConversation = async (title?: string): Promise<Conversation | null> => {
+    const s = session()
+    if (!s) return null
+    actionError.value = null
+    try {
+      const c = await s.client.createConversation(title, s.signal)
+      if (bound !== s || !c || typeof c.id !== 'string') return null
+      conversations.value = [c, ...conversations.value.filter((x) => x.id !== c.id)]
+      needsEnrol.value = false
+      return c
+    } catch (e) {
+      if (bound !== s || isAbortError(e)) return null
+      if (e instanceof ApiError && e.status === 409 && e.code === 'limit_reached') {
+        actionError.value = s.gettext(
+          'You have 200 conversations, the most there can be. Delete one to start a new one.'
+        )
+      } else {
+        if (e instanceof ApiError && e.code === 'not_enrolled') needsEnrol.value = true
+        actionError.value = describe(s, e)
+      }
+      return null
+    }
+  }
+
+  const titleProblem = (s: SessionHandle, p: TextProblem): string => {
+    switch (p) {
+      case 'empty':
+        return s.gettext('Enter a title.')
+      case 'too_long':
+        return s.gettext('The title can have at most %{max} characters.').replace('%{max}', String(MAX_TITLE_CHARS))
+      case 'control':
+        return s.gettext('The title cannot contain control or text direction characters.')
+    }
+  }
+
+  // checkTitleText returns the fixed text of what is wrong with a title the
+  // user typed (trimmed), or null.
+  const titleError = (title: string): string | null => {
+    const s = session()
+    if (!s) return null
+    const p = checkTitle(title.trim())
+    return p ? titleProblem(s, p) : null
+  }
+
+  const rename = async (id: string, title: string): Promise<boolean> => {
+    const s = session()
+    if (!s) return false
+    const t = title.trim()
+    const p = checkTitle(t)
+    if (p) {
+      actionError.value = titleProblem(s, p)
+      return false
+    }
+    actionError.value = null
+    try {
+      const c = await s.client.renameConversation(id, t, s.signal)
+      if (bound !== s) return false
+      if (c && typeof c.id === 'string') replaceConversation(c)
+      return true
+    } catch (e) {
+      if (bound !== s || isAbortError(e)) return false
+      if (e instanceof ApiError && e.status === 404) dropConversation(id)
+      actionError.value = describe(s, e)
+      return false
+    }
+  }
+
+  // remove deletes a conversation after the user confirmed it; one that is
+  // already gone counts as deleted.
+  const remove = async (id: string): Promise<boolean> => {
+    const s = session()
+    if (!s) return false
+    actionError.value = null
+    const ok = await s.platform.confirm({
+      title: s.gettext('Delete this conversation?'),
+      message: s.gettext(
+        'Its messages are deleted. Questions in it that are still waiting or being answered are cancelled. This cannot be undone.'
+      ),
+      confirmText: s.gettext('Delete'),
+      danger: true
+    })
+    if (!ok || bound !== s) return false
+    try {
+      await s.client.deleteConversation(id, s.signal)
+    } catch (e) {
+      if (bound !== s || isAbortError(e)) return false
+      if (!(e instanceof ApiError && e.status === 404)) {
+        actionError.value = describe(s, e)
+        return false
+      }
+    }
+    if (bound !== s) return false
+    dropConversation(id, true)
+    if (current.value === id) closeConversation()
+    // its live jobs were cancelled: their approvals are gone
+    void agent.refreshApprovals()
+    void agent.refreshStatus()
+    return true
+  }
+
+  // enrol enables the agent after a not_enrolled refusal.
+  const enrol = async (): Promise<boolean> => {
+    const s = session()
+    if (!s) return false
+    try {
+      await agent.enrol()
+      needsEnrol.value = false
+      actionError.value = null
+      return true
+    } catch (e) {
+      if (bound === s && !isAbortError(e)) actionError.value = describe(s, e)
+      return false
+    }
+  }
+
+  // --- live updates
+
+  const hasLiveJob = () => messages.value.some((m) => isLiveJob(m.job?.state))
+
+  const onEvent = async (e: StoreEvent) => {
+    if (e.type === 'reset') {
+      reset()
+      return
+    }
+    if (!session()) return
+    const work: Promise<void>[] = []
+    if (e.type === 'refresh') {
+      work.push(conversationsRefresh())
+      if (current.value !== null) work.push(threadRefresh())
+    } else {
+      const msgs = e.kinds.includes('messages')
+      if (msgs) work.push(conversationsRefresh())
+      if (current.value !== null && (msgs || (e.kinds.includes('jobs') && hasLiveJob()))) {
+        work.push(threadRefresh())
+      }
+    }
+    await Promise.all(work)
+  }
+
+  // attach subscribes to the agent store's events while the chat screen is
+  // shown; it returns the function that detaches again.
+  const attach = (): (() => void) => {
+    session() // drop data of an earlier session
+    return agent.subscribe(onEvent)
+  }
+
+  // reset forgets everything, drafts too: a later session may be another
+  // user's.
+  const reset = () => {
+    gen++
+    conversationsRefresh.clear()
+    threadRefresh.clear()
+    approvalsInflight.clear()
+    moreInflight = null
+    conversations.value = []
+    conversationsCursor.value = null
+    conversationsLoading.value = false
+    conversationsLoaded.value = false
+    conversationsError.value = null
+    clearThread()
+    current.value = null
+    sending.value = false
+    sendError.value = null
+    blockedUntil.value = 0
+    needsEnrol.value = false
+    actionError.value = null
+    for (const k of Object.keys(draftByConversation)) delete draftByConversation[k]
+    for (const k of Object.keys(notices)) delete notices[k]
+    bound = agent.session()
+  }
+
+  return {
+    conversations,
+    conversationsCursor,
+    conversationsLoading,
+    conversationsLoaded,
+    conversationsError,
+    current,
+    currentConversation,
+    messages,
+    thread,
+    olderCursor,
+    messagesLoading,
+    messagesLoaded,
+    messagesError,
+    olderLoading,
+    olderError,
+    missing,
+    sending,
+    sendError,
+    blockedUntil,
+    needsEnrol,
+    actionError,
+    draftByConversation,
+    notices,
+    jobApprovals,
+    attach,
+    loadConversations,
+    loadMoreConversations,
+    openConversation,
+    closeConversation,
+    createConversation,
+    titleError,
+    rename,
+    remove,
+    enrol,
+    loadOlder,
+    send,
+    refreshOpen,
+    reset
+  }
+})

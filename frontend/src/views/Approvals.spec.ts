@@ -51,10 +51,10 @@ const serve = (
   }
 }
 
-const setup = async (handler: Handler) => {
+const setup = async (handler: Handler, props: { job?: string } = {}) => {
   const server = fakeServer(handler)
   const { store, platform } = await startStore(server)
-  wrapper = mount(Approvals, { global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
+  wrapper = mount(Approvals, { props, global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
   await flushPromises()
   return { w: wrapper, server, platform, store }
 }
@@ -74,6 +74,24 @@ describe('Approvals', () => {
     )
     expect(w.find('h1').text()).toBe('Approvals (2)')
     expect(w.text()).not.toContain('Nothing needs your approval')
+  })
+
+  it('shows only the approvals of one job when filtered, with a way back to all', async () => {
+    const { w } = await setup(
+      serve({ pending: [approvalOf('a1', { job_id: 'j1' }), approvalOf('a2', { job_id: 'j2' })] }),
+      { job: 'j2' }
+    )
+    expect(w.findAll('.agent-group')).toHaveLength(1)
+    expect(w.find('.agent-approvals-filter').text()).toContain('Showing the approvals of one task.')
+    const all = w.find('.agent-approvals-filter a')
+    expect(all.text()).toBe('Show all approvals')
+    expect(JSON.parse(all.attributes('data-to')!)).toEqual({ name: 'agent-approvals' })
+  })
+
+  it('says so when the filtered job has nothing waiting', async () => {
+    const { w } = await setup(serve({ pending: [approvalOf('a1', { job_id: 'j1' })] }), { job: 'gone' })
+    expect(w.findAll('.agent-group')).toHaveLength(0)
+    expect(w.text()).toContain('Nothing of this task needs your approval')
   })
 
   it('shows a spinner while the approvals load', async () => {

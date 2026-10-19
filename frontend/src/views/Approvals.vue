@@ -16,6 +16,10 @@
 
     <section class="agent-pending" aria-labelledby="agent-pending-h">
       <h2 id="agent-pending-h" v-text="$gettext('Waiting for your decision')" />
+      <p v-if="job" class="agent-approvals-filter">
+        <span v-text="$gettext('Showing the approvals of one task.')" />
+        <router-link :to="{ name: `${APPID}-approvals` }" v-text="$gettext('Show all approvals')" />
+      </p>
       <div v-if="store.errors.approvals" class="agent-approvals-error">
         <p role="alert" v-text="store.errors.approvals" />
         <oc-button
@@ -30,9 +34,11 @@
           v-if="groups.length === 0 && !store.errors.approvals"
           class="agent-approvals-empty"
           v-text="
-            verify.length > 0
-              ? $gettext('No other actions are waiting for your decision')
-              : $gettext('Nothing needs your approval')
+            job
+              ? $gettext('Nothing of this task needs your approval')
+              : verify.length > 0
+                ? $gettext('No other actions are waiting for your decision')
+                : $gettext('Nothing needs your approval')
           "
         />
         <JobGroup v-for="g in groups" :key="g.jobId" :job-id="g.jobId" :items="g.items" :goal="goals[g.jobId]" />
@@ -88,6 +94,10 @@ import type { Approval, ApprovalState } from '../api/types'
 import ApprovalCard from './approvals/ApprovalCard.vue'
 import JobGroup from './approvals/JobGroup.vue'
 import { provideDecisions } from './approvals/decisions'
+import { APPID } from '../appid'
+
+// job (the route's ?job=) shows only that job's pending approvals.
+const props = defineProps<{ job?: string }>()
 
 // HISTORY_PAGE is the page size of the history and of the scan for
 // settled actions that need verification.
@@ -135,6 +145,7 @@ watch(
 const groups = computed(() => {
   const byJob = new Map<string, Approval[]>()
   for (const a of store.approvals.pending) {
+    if (props.job && a.job_id !== props.job) continue
     const list = byJob.get(a.job_id)
     if (list) list.push(a)
     else byJob.set(a.job_id, [a])

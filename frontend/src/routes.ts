@@ -24,7 +24,22 @@ export const buildRoutes = (
         path: 'approvals',
         name: 'approvals',
         component: () => import('./views/Approvals.vue'),
+        // ?job=<id> shows only that job's approvals
+        props: (route) => ({ job: typeof route.query.job === 'string' ? route.query.job : undefined }),
         meta: { authContext: 'user', title: gettext('Approvals') }
+      },
+      {
+        path: 'chat',
+        name: 'chat',
+        component: () => import('./views/Chat.vue'),
+        meta: { authContext: 'user', title: gettext('Chat') }
+      },
+      {
+        path: 'chat/:id',
+        name: 'chat-conversation',
+        component: () => import('./views/Chat.vue'),
+        props: true,
+        meta: { authContext: 'user', title: gettext('Chat') }
       },
       {
         path: 'settings',
@@ -48,6 +63,13 @@ export const buildNavItems = (
     route: { path: `/${APPID}/approvals` },
     isVisible,
     priority: 10
+  },
+  {
+    name: gettext('Chat'),
+    icon: 'chat-3',
+    route: { path: `/${APPID}/chat` },
+    isVisible,
+    priority: 15
   },
   {
     name: gettext('Settings'),
