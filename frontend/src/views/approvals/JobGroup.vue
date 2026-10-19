@@ -14,12 +14,14 @@
       <oc-button
         appearance="outline"
         :disabled="bulkDisabled"
+        :aria-label="bulkAria('approve')"
         @click="decisions.decideAll(live, 'approve')"
         v-text="bulkLabel($gettext('Approve all %{count}'))"
       />
       <oc-button
         appearance="outline"
         :disabled="bulkDisabled"
+        :aria-label="bulkAria('reject')"
         @click="decisions.decideAll(live, 'reject')"
         v-text="bulkLabel($gettext('Reject all %{count}'))"
       />
@@ -46,6 +48,7 @@ import ApprovalCard from './ApprovalCard.vue'
 import { MAX_BULK, useDecisions } from './decisions'
 import { shortId } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
+import { quote } from './targets'
 import type { Approval } from '../../api/types'
 
 // JobGroup shows the pending approvals of one job with the job's goal
@@ -61,6 +64,28 @@ const tooMany = computed(() => live.value.length > MAX_BULK)
 const bulkDisabled = computed(() => tooMany.value || live.value.some((a) => decisions.busy(a.id)))
 
 const bulkLabel = (msgid: string) => interpolate(msgid, { count: live.value.length }, true)
+
+// GOAL_LABEL_CHARS caps the goal in the bulk buttons' labels.
+const GOAL_LABEL_CHARS = 80
+
+// bulkAria names the task, so the bulk buttons of different groups differ.
+const bulkAria = (d: 'approve' | 'reject') => {
+  const count = live.value.length
+  if (props.goal) {
+    const chars = Array.from(props.goal)
+    const task = quote(chars.length > GOAL_LABEL_CHARS ? chars.slice(0, GOAL_LABEL_CHARS).join('') + '…' : props.goal)
+    const msgid =
+      d === 'approve'
+        ? $gettext('Approve all %{count} actions of the task %{task}')
+        : $gettext('Reject all %{count} actions of the task %{task}')
+    return interpolate(msgid, { count, task }, true)
+  }
+  const msgid =
+    d === 'approve'
+      ? $gettext('Approve all %{count} actions of task %{id}')
+      : $gettext('Reject all %{count} actions of task %{id}')
+  return interpolate(msgid, { count, id: visibleText(shortId(props.jobId)).text }, true)
+}
 
 const fallbackTitle = computed(() =>
   interpolate($gettext('Task %{id}'), { id: visibleText(shortId(props.jobId)).text }, true)

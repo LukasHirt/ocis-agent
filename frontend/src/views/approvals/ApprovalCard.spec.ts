@@ -150,10 +150,109 @@ describe('ApprovalCard', () => {
     expect(platform.confirm).toHaveBeenCalledTimes(1)
     const opts = platform.confirm.mock.calls[0][0]
     expect(opts.danger).toBe(true)
-    expect(opts.message).toContain('files.delete')
-    expect(opts.message).toContain(risk === 'destructive' ? 'Destructive' : 'Outward')
-    expect(opts.message).toContain('/Docs/<b>x\\u{202E}.txt')
+    expect(opts.message).toContain('Tool: "files.delete"')
+    expect(opts.message).toContain(risk === 'destructive' ? 'Risk: Destructive' : 'Risk: Outward')
+    expect(opts.message).toContain('Affects: "/Docs/<b>x\\u{202E}.txt"')
+    expect(opts.message).not.toContain('\n')
     expect(decisions(server)).toHaveLength(1)
+  })
+
+  it('keeps a target that looks like other fields inside its quotes', async () => {
+    const a = approvalOf('a1', {
+      tool: 'files.delete',
+      risk: 'destructive',
+      preview: { paths: ['/x.txt" — Tool: "files.write" — Risk: Write'] }
+    })
+    const { w, platform } = await setup(a)
+    platform.confirm.mockResolvedValueOnce(false)
+    await button(w, 'Approve').trigger('click')
+    await flushPromises()
+    const msg = platform.confirm.mock.calls[0][0].message
+    expect(msg).toBe(
+      'Tool: "files.delete" — Risk: Destructive — Affects: "/x.txt\\" — Tool: \\"files.write\\" — Risk: Write"'
+    )
+  })
+
+  it('opens one confirmation and sends one request for a double click on a destructive approve', async () => {
+    let answer!: (ok: boolean) => void
+    const a = approvalOf('a1', { risk: 'destructive' })
+    const { w, server, platform } = await setup(a, (c) =>
+      c.path === '/approvals/a1/decision' ? json({ ...a, state: 'approved' }) : undefined
+    )
+    platform.confirm.mockImplementation(() => new Promise<boolean>((r) => (answer = r)))
+    await button(w, 'Approve').trigger('click')
+    await button(w, 'Approve').trigger('click')
+    await flushPromises()
+    expect(platform.confirm).toHaveBeenCalledTimes(1)
+    answer(true)
+    await flushPromises()
+    expect(decisions(server)).toHaveLength(1)
+  })
+
+  it('sends the hash that was shown when the approval changes while the confirmation is open', async () => {
+    let answer!: (ok: boolean) => void
+    const a = approvalOf('a1', { risk: 'destructive', args_hash: 'sha256:seen' })
+    const { w, server, platform } = await setup(a, (c) =>
+      c.path === '/approvals/a1/decision' ? apiErr(409, 'stale_arguments') : undefined
+    )
+    platform.confirm.mockImplementation(() => new Promise<boolean>((r) => (answer = r)))
+    await button(w, 'Approve').trigger('click')
+    await w.setProps({ approval: { ...a, args: { path: '/other' }, args_hash: 'sha256:new' } })
+    answer(true)
+    await flushPromises()
+    expect(decisions(server)[0].body).toEqual({ decision: 'approve', args_hash: 'sha256:seen' })
+    expect(platform.notify).toHaveBeenCalledWith('error', 'The action changed; review the updated request')
+  })
+
+  it('keeps the buttons disabled when the card is mounted again during a decision', async () => {
+    let release!: (r: Response) => void
+    const a = approvalOf('a1')
+    const { w, server, platform } = await setup(a, (c) =>
+      c.path === '/approvals/a1/decision' ? new Promise<Response>((r) => (release = r)) : undefined
+    )
+    await button(w, 'Approve').trigger('click')
+    w.unmount()
+    wrapper = mount(ApprovalCard, {
+      props: { approval: a },
+      global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+    })
+    expect(button(wrapper, 'Approve').attributes('disabled')).toBeDefined()
+    await button(wrapper, 'Approve').trigger('click')
+    release(json({ ...a, state: 'approved' }))
+    await flushPromises()
+    expect(decisions(server)).toHaveLength(1)
+    expect(button(wrapper, 'Approve').attributes('disabled')).toBeUndefined()
+  })
+
+  it('renders a read action without a warning', async () => {
+    const { w } = await setup(approvalOf('a1', { risk: 'read' }))
+    expect(w.find('.agent-risk-read').exists()).toBe(true)
+    expect(w.find('.agent-card-warning').exists()).toBe(false)
+    expect(w.classes()).not.toContain('agent-card-danger')
+  })
+
+  it.each([
+    ['approved', 'Approved, waiting to run'],
+    ['executing', 'Running'],
+    ['weird', 'State: weird']
+  ])('shows the state of a %s approval that has no outcome yet', async (state, label) => {
+    const { w } = await setup(approvalOf('a1', { state, decided_at: '2026-01-01T10:00:00Z' }))
+    expect(w.find('.agent-card-state').text()).toBe(label)
+    expect(w.findAll('button').filter((b) => ['Approve', 'Reject'].includes(b.text()))).toHaveLength(0)
+    expect(w.find('.agent-card-preview').text()).toContain('What was requested')
+  })
+
+  it('labels the preview of a pending approval as what will happen', async () => {
+    const { w } = await setup(approvalOf('a1'))
+    expect(w.find('.agent-card-preview').text()).toContain('What will happen')
+    expect(w.find('.agent-card-state').exists()).toBe(false)
+  })
+
+  it('warns when a number in the arguments cannot be shown exactly', async () => {
+    const { w } = await setup(approvalOf('a1', { args: { path: '/a', size: 2 ** 60 } }))
+    expect(w.find('.agent-card-lossy').exists()).toBe(true)
+    const ok = await setup(approvalOf('a2', { args: { path: '/a', size: 42 } }))
+    expect(ok.w.find('.agent-card-lossy').exists()).toBe(false)
   })
 
   it('sends nothing when the confirmation is cancelled', async () => {

@@ -10,6 +10,7 @@
       <span v-if="expiry" class="agent-card-expiry" v-text="expiry" />
       <span v-if="decidedAt" class="agent-card-decided" v-text="decidedAt" />
     </header>
+    <p v-if="stateLabel" class="agent-card-state" v-text="stateLabel" />
     <p
       v-if="approval.needs_verification"
       class="agent-card-verify"
@@ -22,9 +23,18 @@
     <div class="agent-card-args">
       <span class="agent-label" v-text="$gettext('Exact arguments')" />
       <JsonBlock :value="approval.args" />
+      <p
+        v-if="lossy"
+        class="agent-card-lossy"
+        v-text="
+          $gettext(
+            'Some numbers in these arguments are too large to be shown exactly here; the agent would use the exact values.'
+          )
+        "
+      />
     </div>
     <div class="agent-card-preview">
-      <span class="agent-label" v-text="$gettext('What will happen')" />
+      <span class="agent-label" v-text="pending ? $gettext('What will happen') : $gettext('What was requested')" />
       <JsonBlock :value="approval.preview" />
     </div>
     <div v-if="approval.rationale" class="agent-card-rationale">
@@ -112,6 +122,31 @@ const expiry = computed(() => {
   if (left <= 0) return $gettext('expired')
   return interpolate($gettext('expires in %{duration}'), { duration: formatDuration(left) }, true)
 })
+
+// stateLabel names the state of a decided approval that has no outcome
+// yet (approved, executing).
+const stateLabel = computed(() => {
+  const a = props.approval
+  if (pending.value || a.outcome) return ''
+  switch (a.state) {
+    case 'approved':
+      return $gettext('Approved, waiting to run')
+    case 'executing':
+      return $gettext('Running')
+  }
+  return interpolate($gettext('State: %{state}'), { state: visibleText(String(a.state)).text }, true)
+})
+
+// lossy: the arguments hold an integer that JSON parsing may have rounded,
+// so the display can differ from the stored value.
+const hasUnsafeNumber = (v: unknown, depth = 0): boolean => {
+  if (depth > 64) return false
+  if (typeof v === 'number') return Number.isInteger(v) && !Number.isSafeInteger(v)
+  if (Array.isArray(v)) return v.some((x) => hasUnsafeNumber(x, depth + 1))
+  if (v !== null && typeof v === 'object') return Object.values(v).some((x) => hasUnsafeNumber(x, depth + 1))
+  return false
+}
+const lossy = computed(() => hasUnsafeNumber(props.approval.args))
 
 const decidedAt = computed(() => {
   const at = props.approval.executed_at ?? props.approval.decided_at

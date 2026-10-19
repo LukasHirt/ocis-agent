@@ -4,11 +4,17 @@ import { usePlatform } from '../../platform'
 import { useAgentStore } from '../../stores/agent'
 import { ApiError, describeError, isAbortError } from '../../api/errors'
 import type { Approval, Decision } from '../../api/types'
-import { visibleText } from '../../util/visibleText'
-import { targetsOf } from './targets'
+import { quote, targetsOf } from './targets'
 
 // The most approvals one bulk decision may carry (the server's limit).
 export const MAX_BULK = 100
+// The most items a bulk confirmation lists.
+export const MAX_CONFIRM_ITEMS = 10
+
+// inflight holds the ids of the approvals being decided, shared by every
+// page and card, so a page mounted again during a decision keeps them
+// locked.
+const inflight = reactive(new Set<string>())
 
 // Risks whose approval needs an explicit confirmation. Unknown risks are
 // treated like the dangerous ones.
@@ -30,7 +36,6 @@ const createDecisions = (): Decisions => {
   const store = useAgentStore()
   const platform = usePlatform()
   const { $gettext, interpolate } = useGettext()
-  const inflight = reactive(new Set<string>())
 
   const riskLabel = (risk: string) => {
     switch (risk) {
@@ -43,19 +48,26 @@ const createDecisions = (): Decisions => {
       case 'read':
         return $gettext('Read')
     }
-    return interpolate($gettext('Unknown (%{risk})'), { risk: visibleText(risk).text }, true)
+    return interpolate($gettext('Unknown (%{risk})'), { risk: quote(risk) }, true)
   }
 
   // the values are already plain text with visible control characters,
   // and the dialog shows text: no HTML escaping
   const line = (msgid: string, ctx: Record<string, string | number>) => interpolate(msgid, ctx, true)
 
-  const describe = (a: Approval) =>
-    [
-      line($gettext('Tool: %{tool}'), { tool: visibleText(a.tool).text }),
-      line($gettext('Risk: %{risk}'), { risk: riskLabel(a.risk) }),
-      ...targetsOf(a.preview, a.args).map((t) => line($gettext('Affects: %{target}'), { target: t }))
-    ].join('\n')
+  // describe is one line (the dialog collapses newlines): fixed labels and
+  // separators, every untrusted value quoted.
+  const describe = (a: Approval) => {
+    const parts = [
+      line($gettext('Tool: %{tool}'), { tool: quote(a.tool) }),
+      line($gettext('Risk: %{risk}'), { risk: riskLabel(a.risk) })
+    ]
+    const targets = targetsOf(a.preview, a.args)
+    if (targets.length > 0) {
+      parts.push(line($gettext('Affects: %{targets}'), { targets: targets.map(quote).join(', ') }))
+    }
+    return parts.join(' — ')
+  }
 
   const report = (e: unknown) => {
     if (isAbortError(e)) return
@@ -114,8 +126,11 @@ const createDecisions = (): Decisions => {
             line($gettext('%{count} of them cannot be undone or are visible to other people:'), {
               count: dangerous.length
             }),
-            ...dangerous.map(describe)
-          ].join('\n\n'),
+            ...dangerous.slice(0, MAX_CONFIRM_ITEMS).map((a, i) => line($gettext('[%{n}] %{action}'), { n: i + 1, action: describe(a) })),
+            ...(dangerous.length > MAX_CONFIRM_ITEMS
+              ? [line($gettext('… and %{count} more'), { count: dangerous.length - MAX_CONFIRM_ITEMS })]
+              : [])
+          ].join('  '),
           confirmText: line($gettext('Approve all %{count}'), { count: items.length }),
           danger: true
         })

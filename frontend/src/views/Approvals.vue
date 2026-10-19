@@ -2,7 +2,7 @@
   <section class="agent-approvals oc-p-m">
     <h1 v-text="title" />
 
-    <section v-if="store.approvals.verify.length > 0" class="agent-verify" aria-labelledby="agent-verify-h">
+    <section v-if="verify.length > 0" class="agent-verify" aria-labelledby="agent-verify-h">
       <h2 id="agent-verify-h" v-text="$gettext('Outcome unknown — please verify')" />
       <p
         v-text="
@@ -11,7 +11,7 @@
           )
         "
       />
-      <ApprovalCard v-for="a in store.approvals.verify" :key="a.id" :approval="a" />
+      <ApprovalCard v-for="a in verify" :key="a.id" :approval="a" />
     </section>
 
     <section class="agent-pending" aria-labelledby="agent-pending-h">
@@ -29,7 +29,11 @@
         <p
           v-if="groups.length === 0 && !store.errors.approvals"
           class="agent-approvals-empty"
-          v-text="$gettext('Nothing needs your approval')"
+          v-text="
+            verify.length > 0
+              ? $gettext('No other actions are waiting for your decision')
+              : $gettext('Nothing needs your approval')
+          "
         />
         <JobGroup v-for="g in groups" :key="g.jobId" :job-id="g.jobId" :items="g.items" :goal="goals[g.jobId]" />
         <p
@@ -85,8 +89,13 @@ import ApprovalCard from './approvals/ApprovalCard.vue'
 import JobGroup from './approvals/JobGroup.vue'
 import { provideDecisions } from './approvals/decisions'
 
-// HISTORY_PAGE is the page size of the history.
+// HISTORY_PAGE is the page size of the history and of the scan for
+// settled actions that need verification.
 const HISTORY_PAGE = 50
+const VERIFY_SCAN_PAGE = 100
+// GOAL_RETRY_MS: a failed goal lookup is tried again on a later change of
+// the list, at most this often.
+const GOAL_RETRY_MS = 60_000
 
 // The approvals inbox: actions whose outcome must be verified first, then
 // the pending approvals grouped by job (newest first), then the decided
@@ -105,12 +114,14 @@ const title = computed(() =>
   interpolate($gettext('Approvals (%{count})'), { count: store.approvals.counts.live }, true)
 )
 
-// loaded: the pending list has been read (or failed) at least once.
-const loaded = ref(!store.loading.approvals)
+// loaded: the pending list has been read (or failed) at least once in
+// this session. A reset store (no status) has not loaded anything yet.
+const loaded = ref(store.status !== null && !store.loading.approvals)
 watch(
-  () => store.loading.approvals,
-  (busy) => {
-    if (!busy) loaded.value = true
+  () => [store.status === null, store.loading.approvals] as const,
+  ([reset, busy]) => {
+    if (reset) loaded.value = false
+    else if (!busy) loaded.value = true
   }
 )
 
@@ -125,27 +136,52 @@ const groups = computed(() => {
 })
 
 // goals: a job's goal, null when it could not be read; absent while
-// unknown. Each job is looked up once.
+// unknown. Each job is looked up once (the API has no lighter view of one
+// job than its detail); a failed lookup is tried again on a later change
+// of the list, at most once per GOAL_RETRY_MS.
 const goals = reactive<Record<string, string | null>>({})
-const asked = new Set<string>()
+const asked = new Map<string, number | 'ok'>() // failure time, or 'ok'
 watch(
   groups,
   (gs) => {
     for (const { jobId } of gs) {
-      if (asked.has(jobId)) continue
-      asked.add(jobId)
+      const prev = asked.get(jobId)
+      if (prev === 'ok' || (prev !== undefined && platform.now() - prev < GOAL_RETRY_MS)) continue
+      asked.set(jobId, 'ok')
       client.getJob(jobId, abort.signal).then(
         (j) => {
           goals[jobId] = typeof j?.goal === 'string' && j.goal !== '' ? j.goal : null
         },
         () => {
-          goals[jobId] = null
+          asked.set(jobId, platform.now())
+          if (!(jobId in goals)) goals[jobId] = null
         }
       )
     }
   },
   { immediate: true }
 )
+
+// settled: executed or failed approvals whose outcome is unknown too (the
+// stored result was unreadable); the store lists state unknown only. The
+// newest page of each is scanned once per mount, and history pages add
+// what they find.
+const settled = ref<Approval[]>([])
+const addSettled = (list: Approval[]) => {
+  const seen = new Set(settled.value.map((a) => a.id))
+  const add = list.filter((a) => a.needs_verification && a.state !== 'unknown' && !seen.has(a.id))
+  if (add.length > 0) settled.value = [...settled.value, ...add]
+}
+for (const state of ['executed', 'failed']) {
+  client.listApprovals({ state, limit: VERIFY_SCAN_PAGE }, abort.signal).then(
+    (page) => addSettled(Array.isArray(page?.approvals) ? page.approvals : []),
+    () => {} // best effort: the history shows them too
+  )
+}
+const verify = computed(() => {
+  const ids = new Set(store.approvals.verify.map((a) => a.id))
+  return [...store.approvals.verify, ...settled.value.filter((a) => !ids.has(a.id))]
+})
 
 const historyOpen = ref(false)
 const history = ref<Approval[]>([])
@@ -166,6 +202,7 @@ const loadHistory = async () => {
     const list = Array.isArray(page?.approvals) ? page.approvals : []
     const seen = new Set(history.value.map((a) => a.id))
     history.value = [...history.value, ...list.filter((a) => a.state !== 'pending' && !seen.has(a.id))]
+    addSettled(list)
     historyCursor.value = typeof page?.next_cursor === 'string' ? page.next_cursor : null
     historyDone.value = true
   } catch (e) {

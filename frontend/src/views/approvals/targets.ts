@@ -29,11 +29,16 @@ const collect = (v: unknown, out: string[], key: string | null, depth: number) =
 
 // targetsOf returns the first path- or recipient-like strings of an
 // approval's preview (or, when the preview names none, its arguments),
-// with control and bidi characters made visible, for a confirmation that
-// is shown as plain text.
+// clipped; show them only through quote.
 export const targetsOf = (preview: unknown, args: unknown): string[] => {
   const out: string[] = []
   collect(preview, out, null, 0)
   if (out.length === 0) collect(args, out, null, 0)
-  return out.slice(0, MAX_TARGETS).map((s) => visibleText(clip(s)).text)
+  return out.slice(0, MAX_TARGETS).map(clip)
 }
+
+// quote renders an untrusted value for plain text that may be shown on one
+// line: as a JSON string (a quote inside it is escaped, so it cannot end
+// the value and fake the fields after it) with the remaining control and
+// bidi characters made visible.
+export const quote = (s: string): string => visibleText(JSON.stringify(s)).text

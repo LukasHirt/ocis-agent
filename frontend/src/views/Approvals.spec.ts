@@ -351,6 +351,174 @@ describe('Approvals', () => {
     expect(w.find('h1').text()).toBe('Approvals (1)')
   })
 
+  it('approves a dangerous bulk with every hash once the confirmation is accepted', async () => {
+    const items = [
+      approvalOf('a1', { risk: 'destructive', args_hash: 'h1' }),
+      approvalOf('a2', { risk: 'outward', args_hash: 'h2' }),
+      approvalOf('a3', { args_hash: 'h3' })
+    ]
+    const { w, server, platform } = await setup(
+      serve({ pending: items }, {}, (c) =>
+        c.path === '/approvals/bulk-decision' ? json({ approvals: items }) : undefined
+      )
+    )
+    await button(w, 'Approve all 3')!.trigger('click')
+    await flushPromises()
+    expect(platform.confirm).toHaveBeenCalledTimes(1)
+    const bulk = server.calls.filter((c) => c.path === '/approvals/bulk-decision')
+    expect(bulk).toHaveLength(1)
+    expect(bulk[0].body).toEqual({
+      decision: 'approve',
+      items: [
+        { id: 'a1', args_hash: 'h1' },
+        { id: 'a2', args_hash: 'h2' },
+        { id: 'a3', args_hash: 'h3' }
+      ]
+    })
+  })
+
+  it('numbers the dangerous items of a bulk confirmation and lists at most ten', async () => {
+    const items = Array.from({ length: 12 }, (_, i) =>
+      approvalOf('d' + i, { tool: 'files.delete', risk: 'destructive', preview: { paths: ['/f' + i] } })
+    )
+    const { w, platform } = await setup(serve({ pending: items }))
+    platform.confirm.mockResolvedValueOnce(false)
+    await button(w, 'Approve all 12')!.trigger('click')
+    await flushPromises()
+    const msg = platform.confirm.mock.calls[0][0].message
+    expect(msg).toContain('[1] Tool: "files.delete" — Risk: Destructive — Affects: "/f0"')
+    expect(msg).toContain('[10] Tool: "files.delete"')
+    expect(msg).not.toContain('[11]')
+    expect(msg).not.toContain('"/f10"')
+    expect(msg).toContain('… and 2 more')
+    expect(msg).not.toContain('\n')
+  })
+
+  it('names the task in the bulk button labels', async () => {
+    const { w } = await setup(
+      serve(
+        {
+          pending: [
+            approvalOf('a1', { job_id: 'ja' }),
+            approvalOf('a2', { job_id: 'ja' }),
+            approvalOf('b1', { job_id: 'jb-12345678' }),
+            approvalOf('b2', { job_id: 'jb-12345678' })
+          ]
+        },
+        { ja: 'tidy up' }
+      )
+    )
+    const labels = w
+      .findAll('button')
+      .filter((b) => b.text() === 'Approve all 2' || b.text() === 'Reject all 2')
+      .map((b) => b.attributes('aria-label'))
+    expect(labels).toEqual([
+      'Approve all 2 actions of the task "tidy up"',
+      'Reject all 2 actions of the task "tidy up"',
+      'Approve all 2 actions of task jb-12345',
+      'Reject all 2 actions of task jb-12345'
+    ])
+  })
+
+  it('looks a failed goal up again only after a minute, on a later refresh', async () => {
+    let fail = true
+    const { w, server, store, platform } = await setup(
+      serve({ pending: [approvalOf('a1', { job_id: 'ja' })] }, {}, (c) =>
+        c.path === '/jobs/ja' ? (fail ? apiErr(503, 'unavailable') : json(jobOf('ja', 'later goal'))) : undefined
+      )
+    )
+    expect(server.count('GET', '/jobs/ja')).toBe(1)
+    fail = false
+    await store.refreshApprovals()
+    await flushPromises()
+    expect(server.count('GET', '/jobs/ja')).toBe(1)
+    platform.now.mockReturnValue(Date.UTC(2026, 0, 1, 12, 1, 1))
+    await store.refreshApprovals()
+    await flushPromises()
+    expect(server.count('GET', '/jobs/ja')).toBe(2)
+    expect(w.find('.agent-group-goal').text()).toContain('later goal')
+  })
+
+  it('also asks to verify executed or failed actions whose outcome is unknown', async () => {
+    const odd = approvalOf('x1', {
+      state: 'executed',
+      needs_verification: true,
+      args: { path: '/Docs/odd.txt' },
+      outcome: { state: 'unknown', summary: '', reason: 'The stored outcome is unreadable.', diff: '' }
+    })
+    const fine = approvalOf('x2', {
+      state: 'failed',
+      outcome: { state: 'failed', summary: '', reason: 'nope', diff: '' }
+    })
+    const { w, server } = await setup(
+      serve({}, {}, (c) => {
+        const st = c.query.get('state')
+        if (c.path === '/approvals' && st === 'executed') return json({ approvals: [odd], next_cursor: null })
+        if (c.path === '/approvals' && st === 'failed') return json({ approvals: [fine], next_cursor: null })
+        return undefined
+      })
+    )
+    expect(server.calls.some((c) => c.query.get('state') === 'executed')).toBe(true)
+    const verify = w.find('.agent-verify')
+    expect(verify.findAll('.agent-card')).toHaveLength(1)
+    expect(verify.text()).toContain('/Docs/odd.txt')
+  })
+
+  it('does not say that nothing needs attention while actions must be verified', async () => {
+    const { w } = await setup(
+      serve({
+        unknown: [
+          approvalOf('u1', {
+            state: 'unknown',
+            needs_verification: true,
+            outcome: { state: 'unknown', summary: '', reason: '', diff: '' }
+          })
+        ]
+      })
+    )
+    expect(w.text()).not.toContain('Nothing needs your approval')
+    expect(w.text()).toContain('No other actions are waiting for your decision')
+  })
+
+  it('keeps "Load more" after an empty history page that has a cursor', async () => {
+    const { w, server } = await setup(
+      serve({}, {}, (c) => {
+        if (c.query.get('state') !== 'all') return undefined
+        if (!c.query.has('cursor')) return json({ approvals: [], next_cursor: 'k1' })
+        return json({ approvals: [approvalOf('h1', { state: 'rejected' })], next_cursor: null })
+      })
+    )
+    await button(w, 'History')!.trigger('click')
+    await flushPromises()
+    expect(w.find('.agent-history').text()).not.toContain('No decided approvals yet')
+    await button(w, 'Load more')!.trigger('click')
+    await flushPromises()
+    expect(server.calls.filter((c) => c.query.get('cursor') === 'k1')).toHaveLength(1)
+    expect(w.find('.agent-history').findAll('.agent-card')).toHaveLength(1)
+  })
+
+  it('shows the spinner, not the empty state, after the store was reset', async () => {
+    let release!: (r: Response) => void
+    let hang = false
+    const { w, store, platform } = await setup(
+      serve({}, {}, (c) =>
+        hang && c.path === '/approvals' && !c.query.has('state')
+          ? new Promise<Response>((r) => (release = r))
+          : undefined
+      )
+    )
+    expect(w.text()).toContain('Nothing needs your approval')
+    hang = true
+    store.stop()
+    store.start({ platform, gettext: (s) => s, createEvents: () => ({ start() {}, stop() {} }) })
+    await flushPromises()
+    expect(w.text()).not.toContain('Nothing needs your approval')
+    expect(w.find('.agent-pending [data-stub=OcSpinner]').exists()).toBe(true)
+    release(json({ approvals: [], next_cursor: null }))
+    await flushPromises()
+    expect(w.text()).toContain('Nothing needs your approval')
+  })
+
   it('says when more approvals exist than are shown', async () => {
     const { w, store } = await setup(serve({ pending: [approvalOf('a1')] }))
     store.approvals = { ...store.approvals, complete: false }
