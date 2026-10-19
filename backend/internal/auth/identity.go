@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -43,6 +44,22 @@ type Validator struct {
 
 	mu    sync.Mutex
 	cache map[[32]byte]cacheEntry
+
+	// known holds the SHA-256 of tokens oCIS accepted, for longer than the
+	// cache (knownTTL or the token's exp), least recently used first out.
+	// Only a successful validation adds an entry and a rejection removes it,
+	// so a client cannot put a token into it.
+	maxKnown int
+	known    map[[32]byte]*list.Element // of *knownEntry
+	knownLRU *list.List
+}
+
+// knownTTL is the longest a token stays known without a new validation.
+const knownTTL = 12 * time.Hour
+
+type knownEntry struct {
+	key   [32]byte
+	until time.Time
 }
 
 type cacheEntry struct {
@@ -63,7 +80,8 @@ func WithValidatorClock(now func() time.Time) ValidatorOption {
 
 // NewValidator returns a validator over c.
 func NewValidator(c *ocisclient.Client, opts ...ValidatorOption) *Validator {
-	v := &Validator{c: c, ttl: time.Minute, now: time.Now, maxEntries: 4096, cache: map[[32]byte]cacheEntry{}}
+	v := &Validator{c: c, ttl: time.Minute, now: time.Now, maxEntries: 4096, cache: map[[32]byte]cacheEntry{},
+		maxKnown: 4096, known: map[[32]byte]*list.Element{}, knownLRU: list.New()}
 	for _, o := range opts {
 		o(v)
 	}
@@ -90,6 +108,7 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 	me, err := v.c.Me(ctx, cr)
 	if err != nil {
 		if errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ocisclient.ErrForbidden) {
+			v.forget(key)
 			return Identity{}, ErrUnauthenticated
 		}
 		return Identity{}, err
@@ -103,14 +122,80 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 	}
 	id := Identity{UserID: me.ID, Username: me.Username, DisplayName: me.DisplayName, DriveID: drive}
 
+	exp, hasExp := tokenExpiry(token.Reveal())
 	until := now.Add(v.ttl)
-	if exp, ok := tokenExpiry(token.Reveal()); ok && exp.Before(until) {
+	if hasExp && exp.Before(until) {
 		until = exp
 	}
 	if until.After(now) {
 		v.store(key, id, until)
 	}
+	knownUntil := now.Add(knownTTL)
+	if hasExp && exp.Before(knownUntil) {
+		knownUntil = exp
+	}
+	if knownUntil.After(now) {
+		v.remember(key, knownUntil)
+	}
 	return id, nil
+}
+
+// Known reports whether oCIS accepted the token in the last knownTTL (and
+// before its exp) and has not rejected it since. It never calls oCIS. A
+// known token is not authenticated by this: the caller must still Validate
+// it; Known only says the token belonged to a real user recently.
+func (v *Validator) Known(token ocisclient.Secret) bool {
+	if token == "" {
+		return false
+	}
+	key := sha256.Sum256([]byte(token.Reveal()))
+	now := v.now()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	e, ok := v.known[key]
+	if !ok {
+		return false
+	}
+	if !now.Before(e.Value.(*knownEntry).until) {
+		v.knownLRU.Remove(e)
+		delete(v.known, key)
+		return false
+	}
+	v.knownLRU.MoveToFront(e)
+	return true
+}
+
+// remember marks a validated token as known until the given time.
+func (v *Validator) remember(key [32]byte, until time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if e, ok := v.known[key]; ok {
+		e.Value.(*knownEntry).until = until
+		v.knownLRU.MoveToFront(e)
+		return
+	}
+	for len(v.known) >= v.maxKnown {
+		back := v.knownLRU.Back()
+		v.knownLRU.Remove(back)
+		delete(v.known, back.Value.(*knownEntry).key)
+	}
+	v.known[key] = v.knownLRU.PushFront(&knownEntry{key: key, until: until})
+}
+
+// forget drops a token oCIS rejected.
+func (v *Validator) forget(key [32]byte) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if e, ok := v.known[key]; ok {
+		v.knownLRU.Remove(e)
+		delete(v.known, key)
+	}
+}
+
+func (v *Validator) knownSize() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return len(v.known)
 }
 
 // Cached returns the identity of a token that Validate accepted and that is

@@ -244,3 +244,113 @@ func TestCachedIsACacheOnlyLookup(t *testing.T) {
 		t.Fatal("an expired entry is returned")
 	}
 }
+
+func TestKnownRemembersSuccessfulValidationsOnly(t *testing.T) {
+	s, c := fakeClient(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	v := NewValidator(c, WithCacheTTL(time.Minute), WithValidatorClock(func() time.Time { return now }))
+	tok := ocisclient.Secret(fakeocis.OIDCToken("einstein"))
+
+	// garbage, a rejected token and an outage never enter the set
+	for _, bad := range []ocisclient.Secret{"", "nonsense", "oidc:nobody"} {
+		_, _ = v.Validate(bg, bad)
+		if v.Known(bad) {
+			t.Errorf("%q is known", bad)
+		}
+	}
+	s.Fail("GET", "/graph/", 503, 1)
+	_, _ = v.Validate(bg, tok)
+	if v.Known(tok) {
+		t.Fatal("a token is known after an outage")
+	}
+	s.ResetRequests()
+	if _, err := v.Validate(bg, tok); err != nil {
+		t.Fatal(err)
+	}
+	s.ResetRequests()
+	if !v.Known(tok) {
+		t.Fatal("a validated token is not known")
+	}
+	if len(s.Requests()) != 0 {
+		t.Fatal("Known called oCIS")
+	}
+	// it outlives the 60s cache
+	now = now.Add(time.Hour)
+	if _, ok := v.Cached(tok); ok || !v.Known(tok) {
+		t.Fatal("known should outlive the cache")
+	}
+	// a later rejection removes it
+	s.Fail("GET", "/graph/", 401, 1)
+	if _, err := v.Validate(bg, tok); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Validate = %v", err)
+	}
+	if v.Known(tok) {
+		t.Fatal("a rejected token is still known")
+	}
+	// an outage leaves a known token known
+	if _, err := v.Validate(bg, tok); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	s.Fail("GET", "/graph/", 503, 1)
+	_, _ = v.Validate(bg, tok)
+	if !v.Known(tok) {
+		t.Fatal("an outage dropped a known token")
+	}
+}
+
+func TestKnownExpires(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		switch r.URL.Path {
+		case "/graph/v1.0/me":
+			_, _ = w.Write([]byte(`{"id":"u1","displayName":"U","onPremisesSamAccountName":"u"}`))
+		case "/graph/v1.0/me/drives":
+			_, _ = w.Write([]byte(`{"value":[{"id":"d1","driveType":"personal"}]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, _ := ocisclient.New(srv.URL)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	v := NewValidator(c, WithValidatorClock(func() time.Time { return now }))
+	opaque := ocisclient.Secret("opaque-token")
+	short := ocisclient.Secret(jwt(now.Add(time.Hour)))
+	for _, tok := range []ocisclient.Secret{opaque, short} {
+		if _, err := v.Validate(bg, tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(time.Hour)
+	if v.Known(short) {
+		t.Error("known outlives the token's exp")
+	}
+	if !v.Known(opaque) {
+		t.Error("an opaque token is forgotten before 12h")
+	}
+	now = now.Add(11 * time.Hour)
+	if v.Known(opaque) {
+		t.Error("known outlives 12h")
+	}
+}
+
+func TestKnownIsBounded(t *testing.T) {
+	_, c := fakeClient(t)
+	v := NewValidator(c)
+	v.maxKnown = 3
+	now := time.Now()
+	for i := range 10 {
+		v.remember([32]byte{byte(i)}, now.Add(time.Hour))
+	}
+	if n := v.knownSize(); n != 3 {
+		t.Fatalf("known holds %d entries, want 3", n)
+	}
+	// least recently used goes first
+	v.mu.Lock()
+	_, oldest := v.known[[32]byte{0}]
+	_, newest := v.known[[32]byte{9}]
+	v.mu.Unlock()
+	if oldest || !newest {
+		t.Errorf("eviction order: oldest kept %v, newest kept %v", oldest, newest)
+	}
+}
