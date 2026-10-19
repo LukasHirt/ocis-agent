@@ -81,6 +81,9 @@ type Tx interface {
 	// ListJobs returns the user's jobs, newest first. f.Limit <= 0 means 50;
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)
+	// ListJobSummaries is ListJobs without the checkpoints and with each
+	// job's step count, in one query (same order, filter and limits).
+	ListJobSummaries(userID string, f JobFilter) ([]JobSummary, error)
 	// CancelJob cancels a job that is not terminal yet. ErrNotFound, or
 	// ErrConflict if the job is already terminal.
 	CancelJob(userID, jobID string) error

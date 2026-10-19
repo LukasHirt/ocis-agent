@@ -124,7 +124,12 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
-	query += ` ORDER BY requested_at DESC, id DESC LIMIT ?`
+	cond, cargs, err := keysetBefore("requested_at", f.Before)
+	if err != nil {
+		return nil, err
+	}
+	query += cond + ` ORDER BY requested_at DESC, id DESC LIMIT ?`
+	args = append(args, cargs...)
 	args = append(args, limit)
 
 	rows, err := t.q.QueryContext(t.ctx, query, args...)

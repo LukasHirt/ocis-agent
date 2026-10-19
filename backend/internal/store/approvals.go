@@ -90,6 +90,10 @@ type ApprovalFilter struct {
 	States []ApprovalState
 	JobID  string
 	Limit  int
+	// Before, if set, keeps only the approvals strictly after this key in
+	// the list order (requested_at DESC, id DESC): keyset pagination with
+	// the RequestedAt and ID of the previous page's last approval.
+	Before *PageKey
 }
 
 // ApprovalPatch carries what a worker transition may record.
