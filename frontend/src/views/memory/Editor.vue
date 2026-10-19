@@ -58,6 +58,12 @@
         spellcheck="false"
       />
       <p class="agent-memory-size" v-text="size" />
+      <p
+        v-if="mem.mixedLineEndings"
+        class="agent-memory-eol"
+        role="status"
+        v-text="$gettext('This file mixes line endings. Saving it changes them all to LF (Unix style).')"
+      />
     </template>
 
     <p v-if="mem.saveError" role="alert" class="agent-memory-save-error" v-text="mem.saveError" />
@@ -78,10 +84,11 @@
 <script setup lang="ts">
 import { computed, getCurrentInstance, onBeforeUnmount, onMounted } from 'vue'
 import { useGettext } from 'vue3-gettext'
+import type { RouteLocationNormalized } from 'vue-router'
 import TextBlock from '../../components/TextBlock.vue'
 import { useMemoryStore } from '../../stores/memory'
 import { formatBytes } from '../../util/format'
-import { MAX_FILE_BYTES, checkContent, describeContentProblem } from '../../util/memoryText'
+import { MAX_FILE_BYTES, describeContentProblem } from '../../util/memoryText'
 
 // The editor of the open memory file. The draft lives in the store and is
 // never replaced while it differs from the version it started from.
@@ -94,12 +101,12 @@ const encoder = new TextEncoder()
 
 const label = computed(() => interpolate($gettext('Content of %{name}'), { name: mem.openName ?? '' }))
 const problem = computed(() => {
-  const p = checkContent(mem.draft)
+  const p = mem.contentProblem
   return p ? describeContentProblem(p, $gettext) : null
 })
 const size = computed(() =>
   interpolate($gettext('%{used} of %{max}'), {
-    used: formatBytes(encoder.encode(mem.draft).length),
+    used: formatBytes(encoder.encode(mem.toSave).length),
     max: formatBytes(MAX_FILE_BYTES)
   })
 )
@@ -107,6 +114,13 @@ const canSave = computed(() => mem.dirty && !mem.saving && problem.value === nul
 
 const instance = getCurrentInstance()
 let removeGuard: (() => void) | null = null
+
+// The host's sign-in and sign-out routes (and its redirect when access is
+// denied) pass without asking: the session may already be gone, so the
+// editor could not save anyway. The browser's beforeunload prompt still
+// covers a full page load.
+const AUTH_ROUTES: readonly string[] = ['login', 'logout', 'oidcCallback', 'oidcSilentRedirect', 'accessDenied']
+const isAuthRoute = (to: RouteLocationNormalized) => typeof to.name === 'string' && AUTH_ROUTES.includes(to.name)
 
 const onBeforeUnload = (e: BeforeUnloadEvent) => {
   if (!mem.dirty) return
@@ -118,7 +132,9 @@ const onBeforeUnload = (e: BeforeUnloadEvent) => {
 onMounted(() => {
   const router = instance?.proxy?.$router
   if (router && typeof router.beforeEach === 'function') {
-    removeGuard = router.beforeEach((to, from) => (to.fullPath === from.fullPath ? true : mem.confirmLeave()))
+    removeGuard = router.beforeEach((to, from) =>
+      to.fullPath === from.fullPath || isAuthRoute(to) ? true : mem.confirmLeave()
+    )
   }
   window.addEventListener('beforeunload', onBeforeUnload)
 })

@@ -49,6 +49,21 @@ const infosOf = (v: unknown): MemoryFileInfo[] => {
     .sort((a, b) => memoryOrder(a.name, b.name))
 }
 
+// A textarea turns every CRLF and lone CR into LF. The draft is kept with
+// LF; a file that used CRLF throughout is saved with CRLF again, a file
+// with mixed line endings is saved with LF (the editor says so).
+type Eol = 'lf' | 'crlf' | 'mixed'
+
+const normalise = (s: string): string => s.replace(/\r\n?/g, '\n')
+
+const eolOf = (s: string): Eol => {
+  const crlf = s.includes('\r\n')
+  const loneCR = /\r(?!\n)/.test(s)
+  const loneLF = /(?<!\r)\n/.test(s)
+  if (loneCR || (crlf && loneLF)) return 'mixed'
+  return crlf ? 'crlf' : 'lf'
+}
+
 const is = (e: unknown, status: number) => e instanceof ApiError && e.status === status
 
 // useMemoryStore holds the memory screen's data: the file list, the open
@@ -78,6 +93,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
   const saveError = ref<string | null>(null)
   const conflict = shallowRef<Conflict | null>(null)
   const serverChanged = ref(false)
+  const eol = ref<Eol>('lf')
 
   const creating = ref(false)
   const createError = ref<string | null>(null)
@@ -86,11 +102,16 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
   const notes = computed(() => files.value.filter((f) => !isCoreName(f.name)))
   const missingCore = computed(() => CORE_NAMES.filter((n) => !files.value.some((f) => f.name === n)))
   const canEdit = computed(() => file.value !== null && file.value.editable && !file.value.truncated)
-  const dirty = computed(() => editing.value && base.value !== null && draft.value !== base.value.content)
+  const dirty = computed(() => editing.value && base.value !== null && draft.value !== normalise(base.value.content))
+  const mixedLineEndings = computed(() => editing.value && eol.value === 'mixed')
+  // toSave is the draft as it is saved: with the file's CRLF line endings
+  const toSave = computed(() => (eol.value === 'crlf' ? draft.value.replace(/\n/g, '\r\n') : draft.value))
+  const contentProblem = computed(() => checkContent(toSave.value))
 
   let bound: SessionHandle | null = null
   let listGen = 0
   let fileGen = 0 // grows on reset and every open
+  let writeGen = 0 // grows on every write: reads that started before it are dropped
   let listed = false
   // the list etag of the open file already checked against the file: the
   // list and a read may spell an etag differently, so a mismatch is
@@ -146,6 +167,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     editing.value = false
     draft.value = ''
     base.value = null
+    eol.value = 'lf'
     saving.value = false
     saveError.value = null
     conflict.value = null
@@ -176,10 +198,11 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     const name = openName.value
     if (!s || name === null) return
     const g = fileGen
+    const w = writeGen
     fileLoading.value = true
     try {
       const f = await read(s, name)
-      if (g !== fileGen) return
+      if (g !== fileGen || w !== writeGen) return
       fileError.value = null
       if (f === null) {
         if (editing.value) {
@@ -215,11 +238,17 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
       if (!f.editable || f.truncated) {
         clearEditor()
       } else {
-        base.value = f
-        draft.value = f.content
+        setBase(f)
       }
     }
     if (changed) s.platform.notify('info', s.gettext('Updated by the agent'))
+  }
+
+  // setBase starts the draft from a version.
+  const setBase = (f: MemoryFile) => {
+    base.value = f
+    eol.value = eolOf(f.content)
+    draft.value = normalise(f.content)
   }
 
   // open shows the file with this name; answers for the one shown before
@@ -251,8 +280,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
   const startEdit = () => {
     const f = file.value
     if (!f || !canEdit.value || editing.value) return
-    base.value = f
-    draft.value = f.content
+    setBase(f)
     saveError.value = null
     conflict.value = null
     serverChanged.value = false
@@ -283,8 +311,9 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
   const saved = (s: SessionHandle, content: string, etag: string) => {
     const name = openName.value!
     const f: MemoryFile = { name, content, etag, truncated: false, editable: true }
+    writeGen++
     file.value = f
-    if (editing.value && draft.value !== content) {
+    if (typedSince(content)) {
       // typed while the save ran: keep editing on top of the saved version
       base.value = f
       conflict.value = null
@@ -294,6 +323,17 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     }
     s.platform.notify('success', s.gettext('Saved'))
     if (listed) void listRefresh()
+  }
+
+  // typedSince reports a draft that changed after content was sent.
+  const typedSince = (content: string) => editing.value && draft.value !== normalise(content)
+
+  // savedUnknown handles a write whose answer has no etag: the version is
+  // read again; a draft typed meanwhile stays (its next save conflicts).
+  const savedUnknown = async (content: string) => {
+    writeGen++
+    if (!typedSince(content)) clearEditor()
+    await fileRefresh()
   }
 
   // showConflict reads the current version after a 412 (or a 404: deleted)
@@ -316,8 +356,8 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
   // put writes the draft with the etag given; true when saved.
   const put = async (s: SessionHandle, etag: string): Promise<boolean> => {
     const name = openName.value
-    if (name === null) return false
-    const content = draft.value
+    if (name === null || saving.value) return false
+    const content = toSave.value
     const problem = checkContent(content)
     if (problem) {
       saveError.value = contentMessage(s, problem)
@@ -332,8 +372,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
       const newEtag = (v as { etag?: unknown } | null)?.etag
       if (typeof newEtag !== 'string' || newEtag === '') {
         // saved, but the new version is unknown: read it again
-        clearEditor()
-        await fileRefresh()
+        await savedUnknown(content)
         return true
       }
       saved(s, content, newEtag)
@@ -372,7 +411,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
       confirmText: s.gettext('Overwrite'),
       danger: true
     })
-    if (!ok || g !== fileGen || conflict.value?.current !== current) return false
+    if (!ok || g !== fileGen || conflict.value?.current !== current || saving.value) return false
     return put(s, current.etag)
   }
 
@@ -394,16 +433,14 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     return true
   }
 
-  // keepEditing closes the conflict view and keeps the draft, now based
-  // on the version the user was just shown.
+  // keepEditing closes the conflict view and keeps the draft. The draft
+  // stays based on the version it started from, so the next save conflicts
+  // again and shows both versions: only "Overwrite with mine" (confirmed)
+  // replaces the other version.
   const keepEditing = () => {
-    const current = conflict.value?.current
     if (conflict.value === null) return
-    if (current) {
-      base.value = current
-      file.value = current
-    }
     conflict.value = null
+    serverChanged.value = true
   }
 
   // recreate creates a file deleted meanwhile again with the draft.
@@ -411,7 +448,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     const s = session()
     const name = openName.value
     if (!s || name === null || conflict.value?.current !== null || saving.value) return false
-    const content = draft.value
+    const content = toSave.value
     const problem = checkContent(content)
     if (problem) {
       saveError.value = contentMessage(s, problem)
@@ -425,8 +462,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
       if (g !== fileGen) return false
       const etag = (v as { etag?: unknown } | null)?.etag
       if (typeof etag !== 'string' || etag === '') {
-        clearEditor()
-        await fileRefresh()
+        await savedUnknown(content)
         return true
       }
       saved(s, content, etag)
@@ -471,6 +507,8 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     } catch (e) {
       if (bound !== s || isAbortError(e)) return false
       createError.value = writeMessage(s, e)
+      // someone else created it: show it
+      if (e instanceof ApiError && e.code === 'already_exists') await listRefresh()
       return false
     } finally {
       if (bound === s) creating.value = false
@@ -567,6 +605,9 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     editing,
     draft,
     dirty,
+    mixedLineEndings,
+    contentProblem,
+    toSave,
     saving,
     saveError,
     conflict,

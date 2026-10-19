@@ -58,11 +58,24 @@ describe('Editor', () => {
   })
 
   it('does not submit on Enter', async () => {
-    const { w, server } = await setup()
+    const { w } = await setup()
     await type(w, 'new')
     await w.find('textarea').trigger('keydown', { key: 'Enter' })
-    await flushPromises()
-    expect(server.calls.filter((c) => c.method === 'PUT')).toHaveLength(0)
+    expect(w.findComponent({ name: 'OcTextarea' }).emitted('change')).toBeUndefined()
+  })
+
+  it('counts the size with the CRLF line endings that are saved', async () => {
+    const { w } = await setup(memoryState({ 'notes/a.md': 'a\r\n' }))
+    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('a\n')
+    expect(w.find('.agent-memory-size').text()).toBe('3 B of 64 KiB')
+    expect(w.find('.agent-memory-eol').exists()).toBe(false)
+  })
+
+  it('warns that mixed line endings are saved as LF', async () => {
+    const { w } = await setup(memoryState({ 'notes/a.md': 'a\r\nb\n' }))
+    expect(w.find('.agent-memory-eol').text()).toBe(
+      'This file mixes line endings. Saving it changes them all to LF (Unix style).'
+    )
   })
 
   it('shows the size used of the limit', async () => {
@@ -142,11 +155,17 @@ describe('Editor', () => {
       expect(mem.file!.content).toBe('theirs <b>x</b>')
     })
 
-    it('goes back to the draft to keep editing', async () => {
-      const { w } = await conflicted()
+    it('goes back to the draft to keep editing and compares again on save', async () => {
+      const { w, st } = await conflicted()
       await button(w, 'Keep editing')!.trigger('click')
       expect(w.find('.agent-memory-conflict').exists()).toBe(false)
       expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('mine')
+      expect(w.find('.agent-memory-changed').exists()).toBe(true)
+      await type(w, 'merged')
+      await button(w, 'Save')!.trigger('click')
+      await flushPromises()
+      expect(st.files['notes/a.md'].content).toBe('theirs <b>x</b>')
+      expect(w.find('.agent-memory-conflict').exists()).toBe(true)
     })
 
     it('offers to create a deleted file again', async () => {
@@ -206,6 +225,19 @@ describe('Editor', () => {
       const n = platform.confirm.mock.calls.length
       expect(await guard({ fullPath: '/agent/memory/notes/a.md' }, { fullPath: '/agent/memory/notes/a.md' })).toBe(true)
       expect(platform.confirm.mock.calls.length).toBe(n)
+    })
+
+    it('lets the host sign-in and sign-out routes through, and asks for every other route', async () => {
+      const { w, guards, platform } = await setup()
+      await type(w, 'mine')
+      const from = { fullPath: '/agent/memory/notes/a.md' }
+      for (const name of ['logout', 'login', 'oidcCallback', 'oidcSilentRedirect', 'accessDenied']) {
+        expect(await guards[0]({ name, fullPath: '/' + name } as never, from)).toBe(true)
+      }
+      expect(platform.confirm).not.toHaveBeenCalled()
+      platform.confirm.mockResolvedValueOnce(false)
+      expect(await guards[0]({ name: 'account', fullPath: '/account' } as never, from)).toBe(false)
+      expect(platform.confirm).toHaveBeenCalledTimes(1)
     })
 
     it('removes the guard when the editor closes', async () => {

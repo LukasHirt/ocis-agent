@@ -71,6 +71,13 @@ describe('Viewer', () => {
     expect(w.find('pre').exists()).toBe(false)
   })
 
+  it('does not show a name from the URL the server would refuse', async () => {
+    const { w } = await setup(memoryState(), 'notes/\u202Eevil.md')
+    expect(w.find('h2').exists()).toBe(false)
+    expect(w.text()).not.toContain('evil')
+    expect(w.find('.agent-memory-missing').exists()).toBe(true)
+  })
+
   it('says when a file does not exist', async () => {
     const { w } = await setup(memoryState(), 'notes/gone.md')
     expect(w.find('.agent-memory-missing').text()).toBe('This file does not exist (any more).')

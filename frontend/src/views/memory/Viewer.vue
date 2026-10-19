@@ -6,7 +6,7 @@
     </router-link>
 
     <div class="agent-memory-viewer-head">
-      <h2 class="agent-memory-viewer-name" v-text="mem.openName" />
+      <h2 v-if="validName" class="agent-memory-viewer-name"><TextBlock :text="validName" /></h2>
       <div v-if="!mem.editing" class="agent-memory-actions">
         <oc-button v-if="mem.canEdit" size="small" @click="mem.startEdit()">
           <oc-icon name="edit" size="small" />
@@ -45,7 +45,9 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
+import { isMemoryName } from '../../util/memoryText'
 import TextBlock from '../../components/TextBlock.vue'
 import Editor from './Editor.vue'
 import { useMemoryStore } from '../../stores/memory'
@@ -55,6 +57,9 @@ import { listRoute } from './route'
 // as codes, nothing interpreted), or its editor.
 const mem = useMemoryStore()
 useGettext()
+
+// the name from the route, shown only when the server would accept it
+const validName = computed(() => (mem.openName !== null && isMemoryName(mem.openName) ? mem.openName : null))
 </script>
 
 <style>
