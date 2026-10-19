@@ -122,9 +122,9 @@ func TestEnrollTwiceReplacesTheToken(t *testing.T) {
 	}
 }
 
-func TestEnrollNeedsExactlyAnEmptyObject(t *testing.T) {
+func TestEnrollNeedsAnEmptyBodyOrAnEmptyObject(t *testing.T) {
 	s := newStack(t)
-	for _, body := range []string{"", "null", "[]", `{"x":1}`, `{"user_id":"u-marie"}`, `{} {}`, `"{}"`, `{}x`} {
+	for _, body := range []string{"null", "[]", `{"x":1}`, `{"user_id":"u-marie"}`, `{} {}`, `"{}"`, `{}x`} {
 		r := s.req(http.MethodPost, "/agent-api/v1/enroll", body)
 		if body != "" {
 			r.Header.Set("Content-Type", "application/json")
@@ -147,6 +147,29 @@ func TestEnrollUpstreamFailures(t *testing.T) {
 	wantError(t, s.do(http.MethodPost, "/agent-api/v1/enroll", "{}"), http.StatusBadGateway, "upstream_unavailable")
 	if got := statusDoc(t, s.do(http.MethodGet, "/agent-api/v1/status", "")); got.Token.Status == "valid" {
 		t.Fatalf("a failed enrolment left a valid token: %+v", got)
+	}
+}
+
+func TestActionBodiesMayBeLeftOut(t *testing.T) {
+	for _, body := range []string{"", "{}"} {
+		s := newStack(t)
+		if rec := s.do(http.MethodPost, "/agent-api/v1/enroll", body); rec.Code != http.StatusCreated {
+			t.Fatalf("enroll %q = %d %s", body, rec.Code, rec.Body.String())
+		}
+		if rec := s.do(http.MethodPost, "/agent-api/v1/token/renew", body); rec.Code != http.StatusOK {
+			t.Fatalf("renew %q = %d %s", body, rec.Code, rec.Body.String())
+		}
+		if rec := s.do(http.MethodPost, "/agent-api/v1/unenroll", body); rec.Code != http.StatusNoContent {
+			t.Fatalf("unenroll %q = %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	s := newStack(t)
+	s.enroll(t, "einstein")
+	for _, body := range []string{"null", "[]", `{"x":1}`, `{"delete_memory":"yes"}`, `{"Delete_Memory":true}`, `{} {}`} {
+		wantError(t, s.do(http.MethodPost, "/agent-api/v1/unenroll", body), http.StatusBadRequest, "invalid_request")
+	}
+	if _, ok := s.user(t, einsteinID); !ok {
+		t.Fatal("a refused unenroll removed the user")
 	}
 }
 
@@ -195,7 +218,7 @@ func TestUnenrollRefusesBadBodiesAndUnknownUsers(t *testing.T) {
 	s := newStack(t)
 	wantError(t, s.do(http.MethodPost, "/agent-api/v1/unenroll", "{}"), http.StatusNotFound, "not_found")
 	s.enroll(t, "einstein")
-	for _, body := range []string{"", "null", `{"delete_memory":"true"}`, `{"delete_memory":null}`, `{"delete_memory":1}`,
+	for _, body := range []string{"null", `{"delete_memory":"true"}`, `{"delete_memory":null}`, `{"delete_memory":1}`,
 		`{"Delete_Memory":true}`, `{"delete_memory":true,"x":1}`, `{"delete_memory":true,"delete_memory":false}`} {
 		r := s.req(http.MethodPost, "/agent-api/v1/unenroll", body)
 		if body != "" {
@@ -345,10 +368,10 @@ func TestRenew(t *testing.T) {
 	if s.ours("marie") != 1 {
 		t.Fatal("renewing einstein touched marie")
 	}
-	// a body is refused, nothing renewed
-	r := s.req(http.MethodPost, "/agent-api/v1/token/renew", "{}")
-	r.Header.Set("Content-Type", "application/json")
-	wantError(t, s.serve(r), http.StatusBadRequest, "invalid_request")
+	// anything but an empty body or {} is refused, nothing renewed
+	for _, body := range []string{"null", "[]", `{"x":1}`, `{"user_id":"u-marie"}`, `{} {}`, `"{}"`, `{}x`} {
+		wantError(t, s.do(http.MethodPost, "/agent-api/v1/token/renew", body), http.StatusBadRequest, "invalid_request")
+	}
 	if s.appToken(t, einsteinID).Label != now {
 		t.Fatal("a refused renew changed the token")
 	}

@@ -66,6 +66,17 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request) error {
 		return errNoPrincipal
 	}
 	err := s.d.Store.InTx(r.Context(), func(tx store.Tx) error {
+		pol, err := tx.GetPolicy(p.UserID)
+		if err != nil {
+			return err
+		}
+		// A credential or anomaly pause is only re-raised when oCIS answers
+		// 401 or the sweep finds a token, so the user's pause must not
+		// replace it (a later resume would clear it for good). Keep it and
+		// record that the request was seen.
+		if pol.Paused && keepsPause(pol.PauseReason) {
+			return s.appendAudit(tx, p.UserID, "agent_paused", "kept_pause", "reason="+pol.PauseReason)
+		}
 		changed, err := tx.PausePolicy(p.UserID, store.PauseUser)
 		if err != nil || !changed {
 			return err
@@ -76,6 +87,15 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return s.writeStatus(w, r, p)
+}
+
+// keepsPause reports the automatic pauses that POST /pause must leave alone.
+func keepsPause(reason string) bool {
+	switch reason {
+	case store.PauseCredentialInvalid, store.PauseCredentialRevoked, store.PauseCredentialExpired, store.PauseTokenAnomaly:
+		return true
+	}
+	return false
 }
 
 type resumeBody struct {
@@ -330,6 +350,9 @@ func (s *Server) parseSettings(b settingsBody) (settingsPatch, error) {
 		m, err := s.parseModels(b.Models)
 		if err != nil {
 			return sp, err
+		}
+		if len(m) == 0 {
+			return sp, errBadJSON // an empty object would change nothing
 		}
 		sp.models = m
 	}

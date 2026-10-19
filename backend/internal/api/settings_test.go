@@ -96,27 +96,79 @@ func TestPauseSetsTheUserPauseAndAudits(t *testing.T) {
 	}
 }
 
-func TestPauseReplacesAnAutomaticPauseAndStaysSticky(t *testing.T) {
+func (s *stack) pauseFor(t *testing.T, reason string) {
+	t.Helper()
+	s.mustTx(t, func(tx store.Tx) error {
+		_, err := tx.PausePolicy(einsteinID, reason)
+		return err
+	})
+}
+
+var strongPauses = []string{store.PauseCredentialInvalid, store.PauseCredentialRevoked, store.PauseCredentialExpired, store.PauseTokenAnomaly}
+
+func TestPauseKeepsACredentialOrAnomalyPause(t *testing.T) {
+	for _, reason := range strongPauses {
+		t.Run(reason, func(t *testing.T) {
+			s := newStack(t)
+			s.enroll(t, "einstein")
+			s.pauseFor(t, reason)
+			before := s.policy(t, einsteinID)
+			if v := statusDoc(t, s.do(http.MethodPost, pausePath, "{}")); !v.Paused || v.PauseReason != reason {
+				t.Fatalf("status = %+v", v)
+			}
+			if after := s.policy(t, einsteinID); !reflect.DeepEqual(after, before) {
+				t.Fatalf("policy changed: %+v -> %+v", before, after)
+			}
+			ev := s.auditKind(t, einsteinID, "agent_paused")
+			if len(ev) != 1 || ev[0].Outcome != "kept_pause" || ev[0].Detail != "reason="+reason || ev[0].Cred != "oidc" {
+				t.Fatalf("audit = %+v", ev)
+			}
+		})
+	}
+}
+
+func TestPauseReplacesDormantAndTheUserPauseIsSticky(t *testing.T) {
 	s := newStack(t)
 	s.enroll(t, "einstein")
-	s.mustTx(t, func(tx store.Tx) error {
-		_, err := tx.PausePolicy(einsteinID, store.PauseDormant)
-		return err
-	})
-	// the store's rule: the user's pause replaces an automatic one
+	s.pauseFor(t, store.PauseDormant)
 	if v := statusDoc(t, s.do(http.MethodPost, pausePath, "{}")); v.PauseReason != store.PauseUser {
 		t.Fatalf("reason = %q", v.PauseReason)
 	}
-	// and an automatic reason never replaces it, so the user's pause survives a later credential pause
-	s.mustTx(t, func(tx store.Tx) error {
-		_, err := tx.PausePolicy(einsteinID, store.PauseCredentialRevoked)
-		return err
-	})
+	// an automatic reason never replaces the user's pause; repeating it is idempotent
+	s.pauseFor(t, store.PauseCredentialRevoked)
 	if v := statusDoc(t, s.do(http.MethodPost, pausePath, "{}")); v.PauseReason != store.PauseUser {
 		t.Fatalf("reason = %q", v.PauseReason)
 	}
-	if n := len(s.auditKind(t, einsteinID, "agent_paused")); n != 1 {
-		t.Fatalf("%d agent_paused events, want 1 (the repeat changed nothing)", n)
+	ev := s.auditKind(t, einsteinID, "agent_paused")
+	if len(ev) != 1 || ev[0].Outcome != "paused" {
+		t.Fatalf("events = %+v, want the one real pause (the repeat changed nothing)", ev)
+	}
+}
+
+// The regression: pause then resume(user) must not be a way around the
+// resume allowlist.
+func TestPauseThenResumeCannotClearAStrongPause(t *testing.T) {
+	for _, reason := range strongPauses {
+		t.Run(reason, func(t *testing.T) {
+			s := newStack(t)
+			s.enroll(t, "einstein")
+			s.pauseFor(t, reason)
+			before := s.policy(t, einsteinID)
+			statusDoc(t, s.do(http.MethodPost, pausePath, "{}"))
+			v := statusDoc(t, s.do(http.MethodPost, resumePath, `{"reason":"user"}`))
+			if !v.Paused || v.PauseReason != reason {
+				t.Fatalf("status = %+v", v)
+			}
+			if after := s.policy(t, einsteinID); !reflect.DeepEqual(after, before) {
+				t.Fatalf("policy changed: %+v -> %+v", before, after)
+			}
+			if reason == store.PauseTokenAnomaly {
+				v = statusDoc(t, s.do(http.MethodPost, resumePath, `{"reason":"token_anomaly"}`))
+				if v.Paused {
+					t.Fatalf("resume(token_anomaly) did not clear: %+v", v)
+				}
+			}
+		})
 	}
 }
 
@@ -368,8 +420,7 @@ func TestSettingsModelPreferenceSetAndClear(t *testing.T) {
 	if _, ok := p.Models[store.ModelTaskProactive]; ok || p.Models[store.ModelTaskChat] != "model-b" {
 		t.Fatalf("stored models = %v", p.Models)
 	}
-	// {} changes nothing; clearing a key that is not set is fine
-	settingsDoc(t, putSettings(s, `{"models":{}}`))
+	// clearing a key that is not set is fine
 	got = settingsDoc(t, putSettings(s, `{"models":{"chat":null,"proactive":null}}`))
 	if got.Models.Chat != nil || got.Models.Proactive != nil {
 		t.Fatalf("models = %+v", got.Models)
@@ -418,6 +469,9 @@ func TestSettingsRejectsInvalidInput(t *testing.T) {
 		{"watch C1", `{"watch":["/a\u0085b"]}`},
 		{"watch line separator", `{"watch":["/a b"]}`},
 		{"watch bidi", `{"watch":["/a‮b"]}`},
+		{"watch LRM", `{"watch":["/a‎b"]}`},
+		{"watch RLM", `{"watch":["/a‏b"]}`},
+		{"watch ALM", `{"watch":["/a؜b"]}`},
 		{"watch bidi isolate", `{"watch":["/a⁦b"]}`},
 		{"watch too long", `{"watch":["` + long + `"]}`},
 		{"watch null", `{"watch":null}`},
@@ -462,6 +516,7 @@ func TestSettingsRejectsInvalidInput(t *testing.T) {
 		{"models unknown task", `{"models":{"summary":"model-a"}}`},
 		{"models task case", `{"models":{"Chat":"model-a"}}`},
 		{"models null", `{"models":null}`},
+		{"models empty object", `{"models":{}}`},
 		{"models array", `{"models":["model-a"]}`},
 		{"models dup key", `{"models":{"chat":"model-a","chat":"model-b"}}`},
 		{"unknown field", `{"auto_approve_write":true}`},
@@ -638,6 +693,7 @@ func TestParseSettingsValidatesWithoutTheStore(t *testing.T) {
 		{"quiet hour 24", settingsBody{QuietHours: []byte(`"24:00-07:00"`)}, false},
 		{"quiet ok", settingsBody{QuietHours: []byte(`"23:59-00:00"`)}, true},
 		{"nothing", settingsBody{}, false},
+		{"empty models", settingsBody{Models: []byte(`{}`)}, false},
 	} {
 		if _, err := s.parseSettings(tc.body); (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)

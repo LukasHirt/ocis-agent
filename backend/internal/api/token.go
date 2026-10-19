@@ -43,12 +43,12 @@ func strictBool(raw json.RawMessage) (value, present bool, err error) {
 	return false, false, errBadJSON
 }
 
-// enroll is POST /agent-api/v1/enroll with the body {} (nothing else).
+// enroll is POST /agent-api/v1/enroll with an empty body or {} (nothing else).
 // 201 for a new enrolment, 200 for a re-enrolment (the token is replaced),
 // both with the status body.
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) error {
 	var body struct{}
-	if err := decodeBody(w, r, &body); err != nil {
+	if err := decodeOptionalBody(w, r, &body); err != nil {
 		return err
 	}
 	p, bearer, err := caller(r)
@@ -92,7 +92,7 @@ type unenrollBody struct {
 // (optional, default false). 204; 404 when not enrolled.
 func (s *Server) unenroll(w http.ResponseWriter, r *http.Request) error {
 	var body unenrollBody
-	if err := decodeBody(w, r, &body); err != nil {
+	if err := decodeOptionalBody(w, r, &body); err != nil {
 		return err
 	}
 	del, _, err := strictBool(body.DeleteMemory)
@@ -173,11 +173,12 @@ func (s *Server) revokeAll(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// renew is POST /agent-api/v1/token/renew without a body: replace the
+// renew is POST /agent-api/v1/token/renew with an empty body or {}: replace the
 // agent's app token now (with the app token itself, inside auth).
 // credentials_invalid (409) means the user has to enrol again.
 func (s *Server) renew(w http.ResponseWriter, r *http.Request) error {
-	if err := requireEmptyBody(r); err != nil {
+	var body struct{}
+	if err := decodeOptionalBody(w, r, &body); err != nil {
 		return err
 	}
 	p, ok := principal(r.Context())
