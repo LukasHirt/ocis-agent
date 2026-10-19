@@ -15,6 +15,7 @@ func init() {
 	register("Conversations", runConversations)
 	register("Messages", runMessages)
 	register("ChatCounts", runChatCounts)
+	register("JobStatuses", runJobStatuses)
 }
 
 func addConv(t *testing.T, st store.Store, user, title string) store.Conversation {
@@ -870,5 +871,82 @@ func runChatCounts(t *testing.T, f Factory) {
 		if got := marks("u1"); got != marks("u1") || got != m5 {
 			t.Errorf("another user's changes moved the marks: %+v -> %+v", m5, got)
 		}
+	})
+}
+
+func runJobStatuses(t *testing.T, f Factory) {
+	t.Run("job statuses of a set of ids, scoped to the user, with state and error", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		mustUser(t, st, "u2")
+		// one job per state; one lease per user, so they are claimed in turn
+		release := func(next store.JobState, msg string) store.Job {
+			j := addJob(t, st, "u1", string(next))
+			c := mustClaim(t, st, "w")
+			if c.Job.ID != j.ID {
+				t.Fatalf("claimed %s, want %s", c.Job.ID, j.ID)
+			}
+			mustTx(t, st, func(tx store.Tx) error { _, err := tx.ReleaseJob(c, next, nil, msg); return err })
+			return j
+		}
+		succeeded := release(store.JobSucceeded, "")
+		failed := release(store.JobFailed, "the job failed")
+		waiting := release(store.JobWaitingApproval, "")
+		clk.Advance(time.Second)
+		running := addJob(t, st, "u1", "running")
+		if c := mustClaim(t, st, "w"); c.Job.ID != running.ID {
+			t.Fatalf("claimed %s", c.Job.ID)
+		}
+		queued := addJob(t, st, "u1", "queued")
+		cancelled := addJob(t, st, "u1", "cancelled")
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", cancelled.ID) })
+		foreign := addJob(t, st, "u2", "foreign")
+		want := map[string]store.JobState{
+			succeeded.ID: store.JobSucceeded, failed.ID: store.JobFailed, waiting.ID: store.JobWaitingApproval,
+			running.ID: store.JobRunning, queued.ID: store.JobQueued, cancelled.ID: store.JobCancelled,
+		}
+		ids := []string{foreign.ID, "nope"}
+		for id := range want {
+			ids = append(ids, id)
+		}
+		ids = append(ids, queued.ID) // a repeated id is fine
+		_ = viewErr(st, func(tx store.Tx) error {
+			got, err := tx.JobStatuses("u1", ids)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(want) {
+				t.Errorf("got %d statuses: %+v", len(got), got)
+			}
+			for id, state := range want {
+				js, ok := got[id]
+				if !ok || js.State != state || js.CreatedAt.IsZero() || js.UpdatedAt.IsZero() {
+					t.Errorf("%s: %+v %v, want %s", id, js, ok, state)
+				}
+			}
+			if got[failed.ID].Error != "the job failed" || got[queued.ID].Error != "" {
+				t.Errorf("errors: %+v", got)
+			}
+			if _, ok := got[foreign.ID]; ok {
+				t.Error("another user's job is listed")
+			}
+			if js, err := tx.GetJobStatus("u1", failed.ID); err != nil || js.Error != "the job failed" {
+				t.Errorf("GetJobStatus = %+v, %v", js, err)
+			}
+			if got, err := tx.JobStatuses("u1", nil); err != nil || len(got) != 0 {
+				t.Errorf("no ids = %v, %v", got, err)
+			}
+			many := make([]string, store.MaxJobStatusIDs+1)
+			for i := range many {
+				many[i] = fmt.Sprint("id", i)
+			}
+			if _, err := tx.JobStatuses("u1", many); !errors.Is(err, store.ErrInvalid) {
+				t.Errorf("too many ids: %v", err)
+			}
+			if _, err := tx.JobStatuses("u1", many[:store.MaxJobStatusIDs]); err != nil {
+				t.Errorf("the maximum: %v", err)
+			}
+			return nil
+		})
 	})
 }

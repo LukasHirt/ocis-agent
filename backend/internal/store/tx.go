@@ -81,6 +81,11 @@ type Tx interface {
 	// GetJobStatus returns the user's job's state and creation and update
 	// times without reading the checkpoint (up to 1 MiB), or ErrNotFound.
 	GetJobStatus(userID, jobID string) (JobStatus, error)
+	// JobStatuses returns GetJobStatus for each of ids that is a job of the
+	// user, keyed by id, in one query (no checkpoint is read). Ids of other
+	// users or unknown ids are left out; repeats are fine. ErrInvalid for
+	// more than MaxJobStatusIDs ids.
+	JobStatuses(userID string, ids []string) (map[string]JobStatus, error)
 	// ListJobs returns the user's jobs, newest first. f.Limit <= 0 means 50;
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)

@@ -295,8 +295,25 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
+		// the states of the page's answering jobs, in one query
+		var ids []string
+		for _, m := range list[:min(len(list), limit)] {
+			if m.Role == store.RoleUser && m.JobID != "" {
+				ids = append(ids, m.JobID)
+			}
+		}
+		jobs, err := tx.JobStatuses(p.UserID, ids)
+		if err != nil {
+			return err
+		}
 		entries, next, err = encodePage(list, limit, func(m store.Message) string { return m.ID },
-			func(m store.Message) (any, error) { return messageViewOf(m), nil })
+			func(m store.Message) (any, error) {
+				v := messageViewOf(m)
+				if js, ok := jobs[m.JobID]; ok && m.Role == store.RoleUser {
+					v.Job = &messageJobView{ID: m.JobID, State: string(js.State), Error: capText(js.Error, maxReasonView)}
+				}
+				return v, nil
+			})
 		return err
 	})
 	if err != nil {
@@ -456,8 +473,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
 		}); err != nil {
 			return err
 		}
+		mv := messageViewOf(msg)
+		mv.Job = &messageJobView{ID: job.ID, State: string(job.State), Error: job.Error}
 		v = sentView{
-			Message: messageViewOf(msg),
+			Message: mv,
 			Job:     sentJobView{ID: job.ID, State: string(job.State)},
 			Agent:   agentView{Paused: pol.Paused, PauseReason: pol.PauseReason, KillSwitch: kill},
 		}

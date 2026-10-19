@@ -301,6 +301,19 @@ type messageView struct {
 	Content   string  `json:"content"` // untrusted, capped
 	JobID     string  `json:"job_id"`  // the job that answers (user) or wrote (assistant, system) it; may be empty
 	CreatedAt *string `json:"created_at"`
+	// Job is the current state of the job answering a user message (null
+	// for other roles and messages without a job). A job can end without
+	// any assistant or system message (cancelled, or failed by the
+	// reaper): the UI shows the state and error instead of waiting.
+	Job *messageJobView `json:"job"`
+}
+
+// messageJobView is the answering job of a user message. Error is the
+// runner's or the reaper's fixed text, safe to show.
+type messageJobView struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+	Error string `json:"error"`
 }
 
 // sentView is the 202 of POST /conversations/{id}/messages. The message is

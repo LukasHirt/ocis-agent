@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/agent"
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -737,5 +739,191 @@ func TestChatLogsNeverCarryContent(t *testing.T) {
 		if strings.Contains(r.Detail, marker) {
 			t.Errorf("audit carries content: %+v", r)
 		}
+	}
+}
+
+// claimAndRelease claims the user's oldest runnable job (it must be id)
+// with ttl and, unless next is running, releases it to next with msg.
+func (s *stack) claimAndRelease(t *testing.T, user, id string, ttl time.Duration, next store.JobState, msg string) {
+	t.Helper()
+	s.mustTx(t, func(tx store.Tx) error {
+		c, ok, err := tx.ClaimNextJob("w", ttl)
+		if err != nil {
+			return err
+		}
+		if !ok || c.Job.ID != id || c.Job.UserID != user {
+			return fmt.Errorf("claimed %v %+v, want %s", ok, c.Job, id)
+		}
+		if next == store.JobRunning {
+			return nil
+		}
+		_, err = tx.ReleaseJob(c, next, nil, msg)
+		return err
+	})
+}
+
+func TestMessagesCarryTheStateOfTheirJobs(t *testing.T) {
+	s := newChatStack(t)
+	c := s.newConv(t, "einstein", "{}")
+	send := func(content string) string { return s.send(t, "einstein", c.ID, content).Job.ID }
+	succeeded := send("succeeds")
+	s.claimAndRelease(t, einsteinID, succeeded, time.Hour, store.JobSucceeded, "")
+	failed := send("fails")
+	s.claimAndRelease(t, einsteinID, failed, time.Hour, store.JobFailed, agent.ReasonModelBad)
+	// the reaper fails a job whose lease ran out at its last attempt: no
+	// runner writes a system message for it
+	reaped := send("reaped")
+	s.claimAndRelease(t, einsteinID, reaped, time.Minute, store.JobRunning, "")
+	s.fake.Advance(2 * time.Minute)
+	s.mustTx(t, func(tx store.Tx) error {
+		r, err := tx.ReapExpired(1, func(int) time.Duration { return time.Minute })
+		if err == nil && r.Failed != 1 {
+			err = fmt.Errorf("reap = %+v", r)
+		}
+		return err
+	})
+	cancelled := send("cancelled")
+	s.mustTx(t, func(tx store.Tx) error { return tx.CancelJob(einsteinID, cancelled) })
+	waiting := send("waits")
+	s.claimAndRelease(t, einsteinID, waiting, time.Hour, store.JobWaitingApproval, "")
+	running := send("runs")
+	s.claimAndRelease(t, einsteinID, running, time.Hour, store.JobRunning, "")
+	queued := send("queued")
+	s.mustTx(t, func(tx store.Tx) error {
+		_, err := tx.InsertMessage(store.Message{UserID: einsteinID, ConversationID: c.ID, Role: store.RoleAssistant, Content: "answer", JobID: succeeded})
+		return err
+	})
+	want := map[string]messageJobView{
+		succeeded: {ID: succeeded, State: "succeeded"},
+		failed:    {ID: failed, State: "failed", Error: agent.ReasonModelBad},
+		reaped:    {ID: reaped, State: "failed", Error: s.getStoredJob(t, einsteinID, reaped).Error},
+		cancelled: {ID: cancelled, State: "cancelled"},
+		waiting:   {ID: waiting, State: "waiting_approval"},
+		running:   {ID: running, State: "running"},
+		queued:    {ID: queued, State: "queued"},
+	}
+	if want[reaped].Error == "" {
+		t.Fatal("the reaper left no error")
+	}
+	check := func(msgs []messageView) {
+		t.Helper()
+		for _, m := range msgs {
+			switch {
+			case m.Role != store.RoleUser:
+				if m.Job != nil {
+					t.Errorf("%s message carries a job: %+v", m.Role, m.Job)
+				}
+			case m.Job == nil:
+				t.Errorf("user message %q has no job", m.Content)
+			case *m.Job != want[m.JobID]:
+				t.Errorf("user message %q: job %+v, want %+v", m.Content, *m.Job, want[m.JobID])
+			}
+		}
+	}
+	rec := s.as("einstein", http.MethodGet, convPath+"/"+c.ID+"/messages", "")
+	var page struct {
+		Messages   []messageView `json:"messages"`
+		NextCursor *string       `json:"next_cursor"`
+	}
+	strictDecode(t, rec.Body.String(), &page)
+	if len(page.Messages) != 8 {
+		t.Fatalf("messages = %d", len(page.Messages))
+	}
+	check(page.Messages)
+	// small pages join their own jobs
+	var all []messageView
+	cursor := ""
+	for range 10 {
+		target := convPath + "/" + c.ID + "/messages?limit=3"
+		if cursor != "" {
+			target += "&cursor=" + cursor
+		}
+		rec := s.as("einstein", http.MethodGet, target, "")
+		var p struct {
+			Messages   []messageView `json:"messages"`
+			NextCursor *string       `json:"next_cursor"`
+		}
+		strictDecode(t, rec.Body.String(), &p)
+		all = append(all, p.Messages...)
+		if p.NextCursor == nil {
+			break
+		}
+		cursor = *p.NextCursor
+	}
+	if len(all) != 8 {
+		t.Fatalf("walk = %d", len(all))
+	}
+	check(all)
+	// the POST response carries the new job too
+	v := s.send(t, "einstein", c.ID, "one more")
+	if v.Message.Job == nil || *v.Message.Job != (messageJobView{ID: v.Job.ID, State: "queued"}) {
+		t.Errorf("sent message job = %+v", v.Message.Job)
+	}
+	// a user message without a job has none
+	s.mustTx(t, func(tx store.Tx) error {
+		_, err := tx.InsertMessage(store.Message{UserID: einsteinID, ConversationID: c.ID, Role: store.RoleUser, Content: "jobless"})
+		return err
+	})
+	rec = s.as("einstein", http.MethodGet, convPath+"/"+c.ID+"/messages?limit=1", "")
+	m := decode(t, rec)
+	first := m["messages"].([]any)[0].(map[string]any)
+	if j, ok := first["job"]; !ok || j != nil || first["content"] != "jobless" {
+		t.Errorf("jobless = %v", first)
+	}
+}
+
+// statusSpy counts the store's job status lookups of the message list.
+type statusSpy struct {
+	store.Store
+	mu    sync.Mutex
+	calls int
+	ids   int
+}
+
+type statusSpyTx struct {
+	store.Tx
+	s *statusSpy
+}
+
+func (s *statusSpy) View(ctx context.Context, fn func(tx store.Tx) error) error {
+	return s.Store.View(ctx, func(tx store.Tx) error { return fn(statusSpyTx{tx, s}) })
+}
+
+func (t statusSpyTx) JobStatuses(user string, ids []string) (map[string]store.JobStatus, error) {
+	t.s.mu.Lock()
+	t.s.calls++
+	t.s.ids = len(ids)
+	t.s.mu.Unlock()
+	return t.Tx.JobStatuses(user, ids)
+}
+
+func (t statusSpyTx) GetJobStatus(user, id string) (store.JobStatus, error) {
+	t.s.mu.Lock()
+	t.s.calls += 1000 // never used per message
+	t.s.mu.Unlock()
+	return t.Tx.GetJobStatus(user, id)
+}
+
+func TestMessagesJoinTheirJobsInOneQuery(t *testing.T) {
+	spy := &statusSpy{}
+	s := newStackStore(t, func(st store.Store) store.Store { spy.Store = st; return spy })
+	s.enroll(t, "einstein")
+	c := s.newConv(t, "einstein", "{}")
+	for i := range 4 {
+		id := s.send(t, "einstein", c.ID, fmt.Sprint("m", i)).Job.ID
+		s.mustTx(t, func(tx store.Tx) error { return tx.CancelJob(einsteinID, id) })
+	}
+	spy.mu.Lock()
+	spy.calls = 0
+	spy.mu.Unlock()
+	rec := s.as("einstein", http.MethodGet, convPath+"/"+c.ID+"/messages?limit=3", "")
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	// limit+1 rows are fetched, only the page's 3 are joined
+	if spy.calls != 1 || spy.ids != 3 {
+		t.Errorf("calls = %d, ids = %d", spy.calls, spy.ids)
 	}
 }
