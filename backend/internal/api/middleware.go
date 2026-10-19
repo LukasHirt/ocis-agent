@@ -44,7 +44,8 @@ import (
 //  10. the handler, under the route's deadline
 //
 // Steps 1-3 wrap everything, including unmatched paths (JSON 404/405) and
-// GET /agent-api/healthz, which skips 4-9. The route deadline (default 30s)
+// GET /agent-api/healthz, which skips 4-9; they get the default read and
+// write deadlines (30s, set before dispatch). The route deadline (default 30s)
 // starts at step 4: a context deadline plus read and write deadlines on the
 // connection through http.ResponseController.
 
@@ -162,6 +163,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(sw.Header())
 	sw.Header().Set("X-Request-Id", ri.id)
 	r = r.WithContext(context.WithValue(r.Context(), infoKey, ri))
+	// every request gets read and write deadlines, also one that never
+	// reaches a route (the server has no ReadTimeout or WriteTimeout): a body
+	// that never ends must not hold the connection; a route replaces them
+	setDeadlines(sw, s.baseTimeout)
 	defer func() {
 		v := recover()
 		abort := false
@@ -225,6 +230,16 @@ func cleanURLPath(p string) bool {
 	return c == p
 }
 
+// setDeadlines sets the connection's read deadline to now+d and its write
+// deadline to now+d+writeGrace. They are ErrNotSupported where the writer has
+// no connection (httptest recorders); a route's context deadline still
+// applies there.
+func setDeadlines(w http.ResponseWriter, d time.Duration) {
+	ctl := http.NewResponseController(w)
+	_ = ctl.SetReadDeadline(time.Now().Add(d))
+	_ = ctl.SetWriteDeadline(time.Now().Add(d + writeGrace))
+}
+
 // captureWriter takes the mux's own 404/405 response, so it can be replaced
 // by the JSON one.
 type captureWriter struct {
@@ -244,11 +259,7 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 
 		ctx, cancel := context.WithTimeout(r.Context(), rc.timeout)
 		defer cancel()
-		// ErrNotSupported where the writer has no connection (httptest
-		// recorders); the context deadline still applies
-		ctl := http.NewResponseController(w)
-		_ = ctl.SetReadDeadline(time.Now().Add(rc.timeout))
-		_ = ctl.SetWriteDeadline(time.Now().Add(rc.timeout + writeGrace))
+		setDeadlines(w, rc.timeout)
 		r = r.WithContext(ctx)
 
 		// 4: parsing and the Cached/Known lookups make no network call. A

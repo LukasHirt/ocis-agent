@@ -105,6 +105,9 @@ type Server struct {
 	userLm    *limiter
 	seen      *seenThrottle
 	verifying verifyLimiter // one audit verification per user
+	// baseTimeout is the read and write deadline of every request before a
+	// route sets its own (unmatched paths, 405, healthz); a field for tests
+	baseTimeout time.Duration
 }
 
 // NewServer checks the dependencies and registers the routes.
@@ -139,6 +142,8 @@ func NewServer(d Deps) (*Server, error) {
 		authFail: newLimiter(d.Cfg.RatePerSecond*ipRateFactor, d.Cfg.Burst*ipBurstFactor, maxLimiterKeys, d.Now),
 		userLm:   newLimiter(d.Cfg.RatePerSecond, d.Cfg.Burst, maxLimiterKeys, d.Now),
 		seen:     newSeenThrottle(seenEvery, maxLimiterKeys, d.Now),
+
+		baseTimeout: defaultTimeout,
 	}
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)
