@@ -141,14 +141,32 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 		f := &flight{done: make(chan struct{})}
 		v.flights[key] = f
 		v.mu.Unlock()
-		f.id, f.err = v.validate(ctx, token, key, now)
+		return v.lead(ctx, token, key, now, f)
+	}
+}
+
+// lead runs the validation of a flight and always ends the flight, also
+// when the validation panics: the waiters then get errValidationPanicked
+// and the panic goes on.
+func (v *Validator) lead(ctx context.Context, token ocisclient.Secret, key [32]byte, now time.Time, f *flight) (Identity, error) {
+	finished := false
+	defer func() {
+		if !finished {
+			f.id, f.err = Identity{}, errValidationPanicked
+		}
 		v.mu.Lock()
 		delete(v.flights, key)
 		v.mu.Unlock()
 		close(f.done)
-		return f.id, f.err
-	}
+	}()
+	f.id, f.err = v.validate(ctx, token, key, now)
+	finished = true
+	return f.id, f.err
 }
+
+// errValidationPanicked is what the waiters of a validation get when it
+// panicked (the panic itself goes on in the caller that ran it).
+var errValidationPanicked = errors.New("auth: the validation failed unexpectedly")
 
 func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
@@ -172,7 +190,10 @@ func (v *Validator) validate(ctx context.Context, token ocisclient.Secret, key [
 	drive, err := v.c.PersonalDriveID(ctx, cr)
 	if err != nil {
 		// oCIS refusing the drive lookup of the token it just accepted for
-		// /me is a rejection of the token (revoked in between), not an outage
+		// /me is a rejection of the token, not an outage: a 401 means it was
+		// revoked in between, and a 403 on the user's OWN personal drive
+		// list is never what a working session gets (it is how oCIS answers
+		// a token that lost its scope or user), so neither may count as valid
 		if errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ocisclient.ErrForbidden) {
 			v.forget(key)
 			return Identity{}, ErrUnauthenticated

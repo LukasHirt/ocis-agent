@@ -394,6 +394,12 @@ func TestKnownKeepsTheLatestTokensPerUser(t *testing.T) {
 // graphServer serves /me and /me/drives with a delay, counting the calls;
 // drives answers the status in driveStatus (0: 200 with a drive).
 func graphServer(t *testing.T, delay time.Duration, driveStatus *atomic.Int32) (*ocisclient.Client, *atomic.Int32, *atomic.Int32) {
+	url, me, drives := graphServerURL(t, delay, driveStatus)
+	c, _ := ocisclient.New(url)
+	return c, me, drives
+}
+
+func graphServerURL(t *testing.T, delay time.Duration, driveStatus *atomic.Int32) (string, *atomic.Int32, *atomic.Int32) {
 	var me, drives atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(delay)
@@ -411,8 +417,7 @@ func graphServer(t *testing.T, delay time.Duration, driveStatus *atomic.Int32) (
 		}
 	}))
 	t.Cleanup(srv.Close)
-	c, _ := ocisclient.New(srv.URL)
-	return c, &me, &drives
+	return srv.URL, &me, &drives
 }
 
 // Concurrent validations of one uncached token share one round trip.
@@ -509,5 +514,76 @@ func TestARejectedDriveLookupIsARejection(t *testing.T) {
 	c, _, _ := graphServer(t, 0, &drive)
 	if _, err := NewValidator(c).Validate(bg, "tok"); err == nil || errors.Is(err, ErrUnauthenticated) {
 		t.Errorf("drives 503: %v, want an outage", err)
+	}
+}
+
+// panicRT panics in its next round trip once released, else forwards.
+type panicRT struct {
+	next    http.RoundTripper
+	armed   atomic.Bool
+	release chan struct{}
+}
+
+func (p *panicRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	if p.armed.CompareAndSwap(true, false) {
+		<-p.release
+		panic("boom in the transport")
+	}
+	return p.next.RoundTrip(r)
+}
+
+// A panic in the validation leaves no flight behind: waiters get an error
+// (never an empty identity without one) and the next call validates anew.
+func TestAPanickingValidationLeavesNoFlight(t *testing.T) {
+	var drive atomic.Int32
+	base, _, _ := graphServerURL(t, 0, &drive)
+	rt := &panicRT{next: http.DefaultTransport, release: make(chan struct{})}
+	rt.armed.Store(true)
+	c, err := ocisclient.New(base, ocisclient.WithHTTPClient(&http.Client{Transport: rt}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewValidator(c)
+	leader := make(chan any, 1)
+	go func() {
+		defer func() { leader <- recover() }()
+		_, _ = v.Validate(bg, "tok")
+	}()
+	waitFor(t, func() bool { v.mu.Lock(); defer v.mu.Unlock(); return len(v.flights) == 1 })
+	waiter := make(chan error, 1)
+	go func() {
+		id, err := v.Validate(bg, "tok")
+		if err == nil && id == (Identity{}) {
+			err = errors.New("an empty identity without an error")
+		}
+		waiter <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // the waiter is waiting on the flight
+	close(rt.release)
+	if p := <-leader; p == nil {
+		t.Fatal("the panic did not propagate to the leader")
+	}
+	if err := <-waiter; !errors.Is(err, errValidationPanicked) {
+		t.Errorf("waiter = %v, want errValidationPanicked", err)
+	}
+	v.mu.Lock()
+	n := len(v.flights)
+	v.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d flights left", n)
+	}
+	if id, err := v.Validate(bg, "tok"); err != nil || id.UserID != "u1" {
+		t.Errorf("after the panic: %+v %v", id, err)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
