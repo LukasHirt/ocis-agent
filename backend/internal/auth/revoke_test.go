@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient/fakeocis"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
@@ -190,11 +191,13 @@ func TestRevokeDetectsATokenThatSurvivedTheDelete(t *testing.T) {
 
 func TestRevokeRefusesABadBearer(t *testing.T) {
 	e := enrolled(t)
+	// well-formed, but oCIS knows no such user
+	nobody := ocisclient.Secret(fakeocis.OIDCToken("nobody"))
 	for _, f := range []func() error{
-		func() error { _, err := e.svc.Revoke(bg, userID, "oidc:nobody"); return err },
-		func() error { _, err := e.svc.RevokeAll(bg, userID, "oidc:nobody", true); return err },
-		func() error { _, err := e.svc.PreviewRevokeAll(bg, "oidc:nobody"); return err },
-		func() error { return e.svc.Unenroll(bg, userID, "oidc:nobody", true) },
+		func() error { _, err := e.svc.Revoke(bg, userID, nobody); return err },
+		func() error { _, err := e.svc.RevokeAll(bg, userID, nobody, true); return err },
+		func() error { _, err := e.svc.PreviewRevokeAll(bg, nobody); return err },
+		func() error { return e.svc.Unenroll(bg, userID, nobody, true) },
 	} {
 		if err := f(); !errors.Is(err, ocisclient.ErrUnauthorized) {
 			t.Fatalf("err = %v, want ErrUnauthorized", err)
