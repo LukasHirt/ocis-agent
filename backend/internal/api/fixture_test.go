@@ -214,6 +214,8 @@ type fixture struct {
 	st    store.Store
 	clock *fakeClock
 	logs  *syncBuffer
+	// bearer is the token req sends (default goodToken)
+	bearer string
 }
 
 // newFixture builds a server over a fresh sqlite store and fakes for oCIS.
@@ -341,7 +343,11 @@ func (f *fixture) req(method, target, body string) *http.Request {
 		rd = strings.NewReader(body)
 	}
 	r := httptest.NewRequest(method, target, rd)
-	r.Header.Set("Authorization", "Bearer "+goodToken)
+	tok := f.bearer
+	if tok == "" {
+		tok = goodToken
+	}
+	r.Header.Set("Authorization", "Bearer "+tok)
 	if method != http.MethodGet && method != http.MethodHead {
 		r.Header.Set("Origin", testOrigin)
 		r.Header.Set("Sec-Fetch-Site", "same-origin")

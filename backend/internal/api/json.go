@@ -200,3 +200,24 @@ func jsonFields(t reflect.Type) map[string]reflect.Type {
 	}
 	return out
 }
+
+// requireEmptyBody refuses any request body (also a chunked one without a
+// Content-Length), for endpoints that take none.
+func requireEmptyBody(r *http.Request) error {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	var b [1]byte
+	n, err := io.ReadFull(r.Body, b[:])
+	if n > 0 {
+		return errBadJSON
+	}
+	if err != nil && err != io.EOF {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return errTooLarge
+		}
+		return errBadJSON
+	}
+	return nil
+}

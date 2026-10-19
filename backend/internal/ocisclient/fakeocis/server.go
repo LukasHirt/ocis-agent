@@ -117,8 +117,9 @@ func (s *Server) AddUser(username, password, userID, driveID string) {
 	s.drives[driveID] = map[string]*node{"/": {dir: true, etag: s.nextETag(), mod: s.clock}}
 }
 
-// OIDCToken returns the Bearer value the fake accepts for username.
-func OIDCToken(username string) string { return "oidc:" + username }
+// OIDCToken returns the Bearer value the fake accepts for username. It is a
+// token68 (like a real JWT), so it also passes the API's bearer parser.
+func OIDCToken(username string) string { return "oidc." + username }
 
 // Advance moves the fake clock forward (token expiry, modification times).
 func (s *Server) Advance(d time.Duration) {
@@ -382,8 +383,8 @@ func (s *Server) authenticate(r *http.Request) *account {
 		}
 		return nil
 	}
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer oidc:") {
-		return s.accounts[strings.TrimPrefix(h, "Bearer oidc:")]
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer oidc.") {
+		return s.accounts[strings.TrimPrefix(h, "Bearer oidc.")]
 	}
 	return nil
 }

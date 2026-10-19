@@ -138,7 +138,19 @@ func NewServer(d Deps) (*Server, error) {
 	}
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)
+	s.routes()
 	return s, nil
+}
+
+// routes registers the API's routes.
+func (s *Server) routes() {
+	s.handle("GET /agent-api/v1/status", s.getStatus)
+	s.handle("POST /agent-api/v1/enroll", s.enroll)
+	s.handle("POST /agent-api/v1/unenroll", s.unenroll)
+	s.handle("DELETE /agent-api/v1/token", s.revoke)
+	s.handle("GET /agent-api/v1/token/revoke-all/preview", s.previewRevokeAll)
+	s.handle("POST /agent-api/v1/token/revoke-all", s.revokeAll)
+	s.handle("POST /agent-api/v1/token/renew", s.renew)
 }
 
 func validOrigin(o string) bool {

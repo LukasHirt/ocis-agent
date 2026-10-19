@@ -98,6 +98,9 @@ func classify(err error) (int, string) {
 		return http.StatusConflict, "credentials_invalid"
 	case errors.Is(err, auth.ErrNotConfirmed):
 		return http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, auth.ErrRevokeIncomplete):
+		// oCIS still listed a token after its delete: nothing local changed, retry
+		return http.StatusBadGateway, "upstream_unavailable"
 	case errors.Is(err, store.ErrNotFound):
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, store.ErrInvalid):

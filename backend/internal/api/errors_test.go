@@ -42,6 +42,7 @@ func TestErrorMappingTable(t *testing.T) {
 		{auth.ErrNoLoginName, 422, "no_login_name"},
 		{auth.ErrCredentialInvalid, 409, "credentials_invalid"},
 		{auth.ErrNotConfirmed, 400, "invalid_request"},
+		{auth.ErrRevokeIncomplete, 502, "upstream_unavailable"},
 		{ocisclient.ErrUnauthorized, 502, "upstream_rejected"},
 		{ocisclient.ErrForbidden, 502, "upstream_rejected"},
 		{ocisclient.ErrNotFound, 502, "upstream_unavailable"},
