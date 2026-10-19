@@ -198,12 +198,16 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request) error
 
 type routeConfig struct {
 	timeout time.Duration
+	maxBody int64
 }
 
 type routeOption func(*routeConfig)
 
 // withTimeout replaces the route's default 30s deadline.
 func withTimeout(d time.Duration) routeOption { return func(c *routeConfig) { c.timeout = d } }
+
+// withMaxBody replaces the route's default body limit (defaultMaxBody).
+func withMaxBody(n int64) routeOption { return func(c *routeConfig) { c.maxBody = n } }
 
 // handle registers an authenticated route: steps 4-10 of the pipeline wrap
 // h. The pattern must be "METHOD /agent-api/v1/..." without a trailing
@@ -215,7 +219,7 @@ func (s *Server) handle(pattern string, h handlerFunc, opts ...routeOption) {
 		strings.HasSuffix(path, "/") || strings.Contains(path, "{$}") {
 		panic("api: invalid route pattern " + pattern)
 	}
-	rc := routeConfig{timeout: defaultTimeout}
+	rc := routeConfig{timeout: defaultTimeout, maxBody: defaultMaxBody}
 	for _, o := range opts {
 		o(&rc)
 	}

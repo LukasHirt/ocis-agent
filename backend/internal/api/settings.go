@@ -39,7 +39,7 @@ func decodeOptionalBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil
 	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r)))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {

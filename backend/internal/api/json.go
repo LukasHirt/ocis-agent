@@ -13,9 +13,24 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
-// maxBodyBytes caps every request body. The API takes small JSON documents
-// only.
-const maxBodyBytes = 1 << 20
+// defaultMaxBody caps a request body unless the route sets its own limit
+// (withMaxBody). The largest bodies of this API are a settings document with
+// 20 watch paths of 1 KiB (~21 KiB) and a bulk decision of 100 items
+// (~12 KiB). decodeBody parses a body three times generically, so the
+// memory per request is a multiple of this limit.
+const defaultMaxBody = 64 << 10
+
+// maxBodyValues caps the JSON values of a body; it is checked by a byte
+// scan before any parse (the largest legitimate bodies have a few hundred).
+const maxBodyValues = 2048
+
+// bodyLimit is the body limit of the request's route.
+func bodyLimit(r *http.Request) int64 {
+	if ri := infoFrom(r.Context()); ri != nil && ri.maxBody > 0 {
+		return ri.maxBody
+	}
+	return defaultMaxBody
+}
 
 // hasBody reports whether the method carries a request body in this API.
 func hasBody(method string) bool {
@@ -37,7 +52,7 @@ func requireJSON(r *http.Request) error {
 	if r.ContentLength == 0 {
 		return nil
 	}
-	if r.ContentLength > maxBodyBytes {
+	if r.ContentLength > bodyLimit(r) {
 		return errTooLarge
 	}
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -56,8 +71,8 @@ func requireJSON(r *http.Request) error {
 // object, no unknown fields, no duplicate or case-variant keys at any depth
 // (encoding/json would let the last duplicate win and matches field names
 // case-insensitively), nesting of at most 32 levels and at most 256 keys per
-// object (tools.Canonicalize enforces the structure), nothing after it and at
-// most maxBodyBytes. Errors are errBadJSON or errTooLarge; they never carry
+// object (tools.Canonicalize enforces the structure), at most maxBodyValues
+// values, nothing after it and at most the route's body limit. Errors are errBadJSON or errTooLarge; they never carry
 // the decoder's text, which can echo parts of the body.
 //
 // Keys must match the struct fields' JSON names exactly (checkKeyCase):
@@ -66,12 +81,15 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	if r.Body == nil {
 		return errBadJSON
 	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r)))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			return errTooLarge
 		}
+		return errBadJSON
+	}
+	if countValues(data) > maxBodyValues {
 		return errBadJSON
 	}
 	if _, err := tools.Canonicalize(data); err != nil {
@@ -199,4 +217,63 @@ func jsonFields(t reflect.Type) map[string]reflect.Type {
 		out[name] = f.Type
 	}
 	return out
+}
+
+// countValues counts the JSON values in b (object keys are not values) with
+// a byte scan that allocates nothing beyond its nesting stack. It does not
+// validate: malformed input gets some count and the parse refuses it.
+func countValues(b []byte) int {
+	n := 0
+	expect := true // a value may start here
+	inStr, esc := false, false
+	var stack []byte
+	for _, c := range b {
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case ' ', '\t', '\n', '\r':
+		case '"':
+			if expect {
+				n++
+				expect = false
+			}
+			inStr = true
+		case '{':
+			if expect {
+				n++
+			}
+			stack = append(stack, c)
+			expect = false // a key comes next
+		case '[':
+			if expect {
+				n++
+			}
+			stack = append(stack, c)
+			expect = true
+		case ':':
+			expect = true
+		case ',':
+			expect = len(stack) > 0 && stack[len(stack)-1] == '['
+		case ']', '}':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			expect = false
+		default:
+			if expect {
+				n++
+				expect = false
+			}
+		}
+	}
+	return n
 }

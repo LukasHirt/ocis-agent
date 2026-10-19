@@ -68,6 +68,7 @@ const (
 // reqInfo is what the request log line reports. It holds only ids and fixed
 // categories.
 type reqInfo struct {
+	maxBody  int64 // the route's body limit
 	id       string
 	route    string
 	user     string
@@ -255,7 +256,7 @@ func (c *captureWriter) WriteHeader(code int)        { c.status = code }
 func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ri := infoFrom(r.Context())
-		ri.route = pattern
+		ri.route, ri.maxBody = pattern, rc.maxBody
 
 		ctx, cancel := context.WithTimeout(r.Context(), rc.timeout)
 		defer cancel()
@@ -354,7 +355,7 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 			return
 		}
 		if hasBody(r.Method) && r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+			r.Body = http.MaxBytesReader(w, r.Body, rc.maxBody)
 		}
 		// 10
 		if err := h(w, r); err != nil {

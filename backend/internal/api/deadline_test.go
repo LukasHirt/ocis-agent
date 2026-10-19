@@ -45,6 +45,9 @@ func TestRequestsOutsideRoutesHaveDeadlines(t *testing.T) {
 
 // Routes keep their own deadline (the export's is longer than the default).
 func TestRouteDeadlineOverridesTheDefault(t *testing.T) {
+	old := writeGrace
+	writeGrace = 0
+	t.Cleanup(func() { writeGrace = old })
 	f := newFixture(t)
 	f.srv.baseTimeout = 50 * time.Millisecond
 	ts := httptest.NewServer(f.h)
