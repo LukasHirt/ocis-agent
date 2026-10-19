@@ -94,9 +94,10 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 // checkKeyCase refuses any object key that matches a field of the
 // destination struct only case-insensitively (encoding/json matches field
 // names case-insensitively), at any depth of nested structs, pointers,
-// slices and arrays. Keys that match no field at all are left to
-// DisallowUnknownFields. Map-typed fields (and json.RawMessage, interfaces)
-// are not checked: their keys are data, which the handler validates itself.
+// slices, arrays and map VALUES. Keys that match no field at all are left
+// to DisallowUnknownFields. Map KEYS are data, which the handler validates
+// itself; so are interfaces. A type with its own UnmarshalJSON (on the type
+// or its pointer, json.RawMessage included) decodes itself and is skipped.
 func checkKeyCase(data []byte, t reflect.Type) error {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -110,14 +111,26 @@ func checkKeyCase(data []byte, t reflect.Type) error {
 	return nil
 }
 
+var unmarshalerType = reflect.TypeFor[json.Unmarshaler]()
+
 func keyCaseOK(v any, t reflect.Type) bool {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t == nil {
+	if t == nil || t.Implements(unmarshalerType) || reflect.PointerTo(t).Implements(unmarshalerType) {
 		return true
 	}
 	switch t.Kind() {
+	case reflect.Map:
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return true
+		}
+		for _, val := range obj {
+			if !keyCaseOK(val, t.Elem()) {
+				return false
+			}
+		}
 	case reflect.Struct:
 		obj, ok := v.(map[string]any)
 		if !ok {

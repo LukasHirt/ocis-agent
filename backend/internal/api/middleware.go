@@ -27,14 +27,16 @@ import (
 //     error body; a client-supplied id is ignored
 //  3. security headers on every response
 //  4. pre-auth gate per client IP (RemoteAddr, IPv6 by /64; X-Forwarded-For
-//     is never trusted): its bucket counts failed authentications only;
-//     while it is empty only a token the validator has cached gets through
-//     (see ratelimit.go)
+//     is never trusted): a token the validator has neither cached nor known
+//     reserves a token of the IP's failure bucket before validation; while
+//     the bucket is empty only cached and known tokens get through (see
+//     ratelimit.go)
 //  5. for state-changing methods: Origin must equal the allowed origin
 //     exactly and Sec-Fetch-Site, if sent, must be same-origin; checked
 //     before auth, so a cross-site request never reaches token validation
 //  6. Authorization: Bearer <token>, validated by oCIS (TokenValidator); a
-//     missing, malformed or rejected token charges the IP's bucket
+//     missing, malformed or rejected token stays charged to the IP, as does a
+//     request whose own context ended; success and oCIS failures refund
 //  7. Seen(userID), at most once a minute per user (seen.go); a failure is
 //     logged and ignored, and retried by the next request
 //  8. per-user rate limit
@@ -91,8 +93,8 @@ func bearerFrom(ctx context.Context) (ocisclient.Secret, bool) {
 }
 
 // statusWriter records the status for the log line. It implements Unwrap,
-// so http.ResponseController reaches the connection through it (handlers
-// must use the controller rather than type assertions such as http.Flusher).
+// so http.ResponseController reaches the connection through it, and
+// FlushError/Flush, so both the controller and w.(http.Flusher) work.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -113,13 +115,17 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Flush lets handlers use w.(http.Flusher) too.
-func (w *statusWriter) Flush() {
+// FlushError flushes and returns the error; http.ResponseController.Flush
+// prefers this method, so its callers see a failed flush.
+func (w *statusWriter) FlushError() error {
 	if !w.wrote {
 		w.WriteHeader(http.StatusOK)
 	}
-	_ = http.NewResponseController(w.ResponseWriter).Flush()
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
+
+// Flush lets handlers use w.(http.Flusher) too; it cannot report errors.
+func (w *statusWriter) Flush() { _ = w.FlushError() }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
@@ -174,9 +180,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		status := sw.status
-		if !sw.wrote {
+		if !sw.wrote && !abort {
 			status = http.StatusOK
-		}
+		} // an aborted request that wrote nothing has no status (0)
 		s.d.Log.Info("api: request", "request_id", ri.id, "method", logMethod(r.Method), "route", ri.route,
 			"status", status, "duration_ms", time.Since(start).Milliseconds(), "user", ri.user, "category", ri.category)
 		if abort {
@@ -245,30 +251,44 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		_ = ctl.SetWriteDeadline(time.Now().Add(rc.timeout + writeGrace))
 		r = r.WithContext(ctx)
 
-		// 4 (parsing and the cache lookup make no network call)
+		// 4: parsing and the Cached/Known lookups make no network call. A
+		// token that is neither cached nor known RESERVES a token of the
+		// IP's failure bucket before it may reach oCIS, so concurrency
+		// cannot multiply the validator calls; the reservation is refunded
+		// when the failure was not the client's (see ratelimit.go).
 		ipKey := clientKey(r)
 		tok, tokOK := parseBearer(r.Header.Values("Authorization"))
 		var cached *auth.Identity
-		if blocked, wait := s.authFail.blocked(ipKey); blocked {
-			var id auth.Identity
-			hit := false
-			if tokOK {
-				id, hit = s.d.Validator.Cached(tok)
+		known := false
+		if tokOK {
+			if id, hit := s.d.Validator.Cached(tok); hit {
+				cached = &id
+			} else {
+				known = s.d.Validator.Known(tok)
 			}
-			if !hit {
+		}
+		reserved := false
+		if cached == nil && !known {
+			ok, wait := s.authFail.allow(ipKey)
+			if !ok {
 				rateLimited(w, r, wait)
 				return
 			}
-			cached = &id
+			reserved = true
+		}
+		refund := func() {
+			if reserved {
+				s.authFail.refund(ipKey)
+			}
 		}
 		// 5
 		if !safeMethod(r.Method) && !s.originOK(r) {
+			refund() // refused without any oCIS call
 			writeCode(w, r, http.StatusForbidden, "origin_rejected")
 			return
 		}
-		// 6
+		// 6: a missing or malformed bearer keeps its reservation
 		if !tokOK {
-			s.authFail.charge(ipKey)
 			writeCode(w, r, http.StatusUnauthorized, "unauthenticated")
 			return
 		}
@@ -279,12 +299,22 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 			var err error
 			if id, err = s.d.Validator.Validate(ctx, tok); err != nil {
 				st, code := validatorError(err)
-				if st == http.StatusUnauthorized {
-					s.authFail.charge(ipKey) // an outage (502/503) is not the client's failure
+				switch {
+				case st == http.StatusUnauthorized:
+					if !reserved {
+						s.authFail.charge(ipKey) // a known token that oCIS now rejects
+					}
+				case ctx.Err() != nil:
+					// the request's own context ended (the client hung up or
+					// the deadline passed): the reservation stays charged, or
+					// hanging up would make validation free
+				default:
+					refund() // an oCIS outage or a 422 is not the client's failure
 				}
 				writeCode(w, r, st, code)
 				return
 			}
+			refund()
 		}
 		if id.UserID == "" {
 			writeCode(w, r, http.StatusBadGateway, "upstream_unavailable")

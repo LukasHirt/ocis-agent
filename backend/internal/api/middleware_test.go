@@ -505,6 +505,7 @@ func TestSecretsNeverLeak(t *testing.T) {
 	r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
 	r.Header.Set("Authorization", "Bearer SECRET-bearer")
 	record(f.serve(r))
+	f.v.expireCache() // like the real validator, a cached token would skip oCIS
 	f.v.err = errors.New("ocisclient: GET /graph/v1.0/me: SECRET-validator")
 	rec = f.do(http.MethodGet, "/agent-api/v1/test/whoami", "")
 	wantError(t, rec, 502, "upstream_unavailable")
@@ -593,10 +594,13 @@ func TestAuthFailureLimitByIP(t *testing.T) {
 	for range failBurst {
 		send("10.0.0.1:2", "Bearer wrong") // ...which the attacker drains again
 	}
+	calls = f.v.count()
 	if rec := send("10.0.0.1:5", "Bearer "+goodToken); rec.Code != 200 {
 		t.Errorf("cached user during the flood: %d", rec.Code)
 	}
-	calls = f.v.count()
+	if f.v.count() != calls {
+		t.Error("a cached token was sent to the validator")
+	}
 	wantError(t, send("10.0.0.1:5", "Bearer "+otherToken), 429, "rate_limited")
 	if f.v.count() != calls {
 		t.Error("a blocked request reached the validator")
@@ -821,6 +825,16 @@ func TestPanicAfterTheResponseStartedAbortsTheConnection(t *testing.T) {
 			f.serve(f.req(http.MethodGet, path, ""))
 		}()
 	}
+	// an abort before anything was written is logged without a made-up 200
+	found := false
+	for _, l := range strings.Split(f.logs.String(), "\n") {
+		if strings.Contains(l, `"route":"GET /agent-api/v1/test/abort"`) && strings.Contains(l, `"msg":"api: request"`) {
+			found = strings.Contains(l, `"status":0`) && strings.Contains(l, `"category":"aborted"`)
+		}
+	}
+	if !found {
+		t.Errorf("no aborted request line with status 0: %s", f.logs.String())
+	}
 }
 
 func TestHandlersCanFlushThroughTheWrapper(t *testing.T) {
@@ -901,11 +915,20 @@ type caseDst struct {
 	Models      map[string]*string `json:"models"`
 	Raw         json.RawMessage    `json:"raw"`
 	Untagged    string
-	skipped     string               // unexported: not a JSON field
-	Ignored     string               `json:"-"`
-	Free        map[string]any       `json:"free"`
-	Deep        map[string]caseInner `json:"deep"`
+	skipped     string                 // unexported: not a JSON field
+	Ignored     string                 `json:"-"`
+	Free        map[string]any         `json:"free"`
+	Deep        map[string]caseInner   `json:"deep"`
+	DeepList    map[string][]caseInner `json:"deep_list"`
+	Custom      customUnmarshal        `json:"custom"`
 }
+
+// customUnmarshal decodes itself: its keys are its own business.
+type customUnmarshal struct {
+	Name string `json:"name"`
+}
+
+func (c *customUnmarshal) UnmarshalJSON([]byte) error { return nil }
 
 type caseInner struct {
 	Name string `json:"name"`
@@ -920,6 +943,9 @@ func TestDecodeBodyRequiresExactKeyCase(t *testing.T) {
 		`{"Untagged":"x"}`,
 		`{"free":{"Name":1}}`,
 		`{"nested":null,"list":null}`,
+		`{"deep":{"ANYKEY":{"name":"a"}}}`,
+		`{"deep_list":{"K":[{"name":"a"}]}}`,
+		`{"custom":{"NAME":1}}`,
 	}
 	bad := []string{
 		`{"Daily_Tokens":1}`,
@@ -929,6 +955,8 @@ func TestDecodeBodyRequiresExactKeyCase(t *testing.T) {
 		`{"untagged":"x"}`,
 		`{"Ignored":"x"}`,
 		`{"skipped":"x"}`,
+		`{"deep":{"x":{"NAME":"a"}}}`,
+		`{"deep_list":{"k":[{"name":"a"},{"Name":"b"}]}}`,
 	}
 	run := func(body string) error {
 		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -948,4 +976,177 @@ func TestDecodeBodyRequiresExactKeyCase(t *testing.T) {
 	// over HTTP it is a 400
 	f := newFixture(t)
 	wantError(t, f.do(http.MethodPost, "/agent-api/v1/test/echo", `{"Value":"v"}`), 400, "invalid_request")
+}
+
+func TestAuthFailureReservationBoundsConcurrentValidation(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	f.v.delay = 50 * time.Millisecond
+	const n = 200
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+			r.Header.Set("Authorization", "Bearer wrong")
+			r.RemoteAddr = "10.0.0.1:1"
+			codes <- f.serve(r).Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	count := map[int]int{}
+	for c := range codes {
+		count[c]++
+	}
+	if calls := f.v.count(); calls > ipBurstFactor {
+		t.Errorf("%d validator calls for %d concurrent bad tokens, want at most the bucket (%d)", calls, n, ipBurstFactor)
+	}
+	if count[401] != ipBurstFactor || count[429] != n-ipBurstFactor {
+		t.Errorf("codes = %v", count)
+	}
+}
+
+func TestDisconnectedClientsStayCharged(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	for range 100 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // the client sent its garbage and hung up
+		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "").WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer wrong")
+		r.RemoteAddr = "10.0.0.1:1"
+		f.serve(r)
+	}
+	if calls := f.v.count(); calls > ipBurstFactor {
+		t.Errorf("%d validator calls from hung-up clients, want at most %d", calls, ipBurstFactor)
+	}
+	r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+	r.Header.Set("Authorization", "Bearer wrong")
+	r.RemoteAddr = "10.0.0.1:1"
+	wantError(t, f.serve(r), 429, "rate_limited")
+}
+
+func TestReservationsAreRefundedWhenNotTheClientsFault(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	send := func(mod func(*http.Request)) int {
+		r := f.req(http.MethodPost, "/agent-api/v1/test/nobody", "")
+		r.Header.Set("Authorization", "Bearer some-token")
+		r.RemoteAddr = "10.0.0.1:1"
+		mod(r)
+		return f.serve(r).Code
+	}
+	for range 3 * ipBurstFactor { // a cross-site request is refused before validation
+		if c := send(func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.com") }); c != 403 {
+			t.Fatalf("cross-site: %d", c)
+		}
+	}
+	f.v.err = auth.ErrNoLoginName
+	for range 3 * ipBurstFactor {
+		if c := send(func(*http.Request) {}); c != 422 {
+			t.Fatalf("no login name: %d", c)
+		}
+	}
+	f.v.err = nil
+	// the bucket is still full: ipBurstFactor rejections fit
+	for i := range ipBurstFactor {
+		if c := send(func(*http.Request) {}); c != 401 {
+			t.Fatalf("rejection %d: %d", i, c)
+		}
+	}
+	if c := send(func(*http.Request) {}); c != 429 {
+		t.Errorf("after the bucket: %d", c)
+	}
+}
+
+// A token oCIS accepted before (auth.Validator.Known) may still be validated
+// while the IP is blocked, after its cache entry expired; an unknown one may
+// not; a known token that is now rejected is charged and forgotten.
+func TestKnownTokensWhileTheIPIsBlocked(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	send := func(tok string) int {
+		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+		r.Header.Set("Authorization", "Bearer "+tok)
+		r.RemoteAddr = "10.0.0.1:1"
+		return f.serve(r).Code
+	}
+	if c := send(goodToken); c != 200 {
+		t.Fatalf("alice: %d", c)
+	}
+	for range ipBurstFactor {
+		send("wrong")
+	}
+	f.v.expireCache()            // the 60s cache is gone, the flood goes on
+	f.clock.Advance(time.Second) // alice's own bucket refills
+	for range ipBurstFactor {
+		send("wrong")
+	}
+	calls := f.v.count()
+	if c := send(goodToken); c != 200 {
+		t.Errorf("known token while blocked: %d", c)
+	}
+	if f.v.count() != calls+1 {
+		t.Errorf("the known token was not validated (%d calls)", f.v.count()-calls)
+	}
+	calls = f.v.count()
+	if c := send(otherToken); c != 429 || f.v.count() != calls {
+		t.Errorf("unknown token while blocked: %d, %d calls", c, f.v.count()-calls)
+	}
+	// alice's token is revoked: rejected once, then unknown
+	delete(f.v.tokens, goodToken)
+	f.v.expireCache()
+	f.clock.Advance(time.Second)
+	for range ipBurstFactor {
+		send("wrong")
+	}
+	if c := send(goodToken); c != 401 {
+		t.Errorf("revoked known token: %d", c)
+	}
+	calls = f.v.count()
+	if c := send(goodToken); c != 429 || f.v.count() != calls {
+		t.Errorf("forgotten token: %d, %d calls", c, f.v.count()-calls)
+	}
+}
+
+func TestARejectedKnownTokenIsCharged(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	send := func(tok string) int {
+		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+		r.Header.Set("Authorization", "Bearer "+tok)
+		r.RemoteAddr = "10.0.0.1:1"
+		return f.serve(r).Code
+	}
+	send(goodToken)
+	delete(f.v.tokens, goodToken)
+	f.v.expireCache()
+	if c := send(goodToken); c != 401 {
+		t.Fatalf("revoked: %d", c)
+	}
+	for i := range ipBurstFactor - 1 {
+		if c := send("wrong"); c != 401 {
+			t.Fatalf("rejection %d: %d", i, c)
+		}
+	}
+	if c := send("wrong"); c != 429 {
+		t.Errorf("the known token's rejection was not charged: %d", c)
+	}
+}
+
+type flushErrWriter struct {
+	httptest.ResponseRecorder
+	err error
+}
+
+func (w *flushErrWriter) FlushError() error { return w.err }
+
+func TestFlushErrorsAreReturned(t *testing.T) {
+	broken := errors.New("broken pipe")
+	sw := &statusWriter{ResponseWriter: &flushErrWriter{ResponseRecorder: *httptest.NewRecorder(), err: broken}}
+	if err := http.NewResponseController(sw).Flush(); !errors.Is(err, broken) {
+		t.Errorf("Flush = %v, want the writer's error", err)
+	}
+	if !sw.wrote || sw.status != 200 {
+		t.Errorf("wrote=%v status=%d", sw.wrote, sw.status)
+	}
+	sw.Flush() // the http.Flusher form ignores the error
 }

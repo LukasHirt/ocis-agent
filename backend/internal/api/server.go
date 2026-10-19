@@ -19,10 +19,12 @@ import (
 )
 
 // TokenValidator checks a bearer token with oCIS (auth.Validator). Cached
-// is a lookup in its cache of accepted tokens without any network call.
+// (the identity of a recently accepted token) and Known (oCIS accepted the
+// token within the last hours) are lookups without any network call.
 type TokenValidator interface {
 	Validate(ctx context.Context, token ocisclient.Secret) (auth.Identity, error)
 	Cached(token ocisclient.Secret) (auth.Identity, bool)
+	Known(token ocisclient.Secret) bool
 }
 
 // Credentials is the part of auth.Service the API uses.

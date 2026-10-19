@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,33 +41,65 @@ type fakeValidator struct {
 	calls  int
 	tokens map[string]auth.Identity
 	err    error
+	delay  time.Duration            // each Validate takes this long (an oCIS round trip)
 	cached map[string]auth.Identity // what Validate accepted, like the real cache
+	known  map[string]bool          // like auth.Validator.Known
 }
 
-func (v *fakeValidator) Validate(_ context.Context, tok ocisclient.Secret) (auth.Identity, error) {
+// Validate behaves like auth.Validator: a context that ended is a context
+// error, an outage (err) changes nothing, a rejection forgets the token, a
+// success caches it and makes it known.
+func (v *fakeValidator) Validate(ctx context.Context, tok ocisclient.Secret) (auth.Identity, error) {
+	v.mu.Lock()
+	v.calls++
+	d := v.delay
+	v.mu.Unlock()
+	if d > 0 {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return auth.Identity{}, fmt.Errorf("ocisclient: GET /graph/v1.0/me: %w", err)
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.calls++
 	if v.err != nil {
 		return auth.Identity{}, v.err
 	}
 	id, ok := v.tokens[tok.Reveal()]
 	if !ok {
+		delete(v.known, tok.Reveal())
 		return auth.Identity{}, auth.ErrUnauthenticated
 	}
 	if v.cached == nil {
-		v.cached = map[string]auth.Identity{}
+		v.cached, v.known = map[string]auth.Identity{}, map[string]bool{}
 	}
 	v.cached[tok.Reveal()] = id
+	v.known[tok.Reveal()] = true
 	return id, nil
 }
 
-// Cached never counts as a validator call: it makes no network request.
+// Cached and Known never count as validator calls: no network request.
 func (v *fakeValidator) Cached(tok ocisclient.Secret) (auth.Identity, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	id, ok := v.cached[tok.Reveal()]
 	return id, ok
+}
+
+func (v *fakeValidator) Known(tok ocisclient.Secret) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.known[tok.Reveal()]
+}
+
+// expireCache drops the cache (its 60s TTL passed); known tokens stay.
+func (v *fakeValidator) expireCache() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.cached = map[string]auth.Identity{}
 }
 
 func (v *fakeValidator) count() int {

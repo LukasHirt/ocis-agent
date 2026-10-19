@@ -13,18 +13,27 @@ import (
 // maxLimiterKeys bounds the number of buckets a limiter keeps.
 const maxLimiterKeys = 10000
 
-// The pre-auth bucket per client IP counts FAILED authentications only
-// (missing or malformed bearer, a token oCIS rejects); successful requests
-// never touch it. When it is empty, a request whose token the validator has
-// cached still proceeds and only the per-user limit applies; anything else
-// is refused before the validator is called. So a flood of bad tokens from
-// the reverse proxy's address (all users arrive from it, X-Forwarded-For is
-// not trusted) cannot lock out users who are already signed in, and cannot
-// turn into a flood of Graph calls.
+// The pre-auth bucket per client IP (IPv6 by /64) is spent on token
+// validations that fail through the client's fault. A token that the
+// validator has neither cached (auth.Validator.Cached, about 60s) nor seen
+// accepted recently (auth.Validator.Known, up to 12h, only ever added by a
+// successful validation) reserves one token BEFORE it may reach oCIS, so
+// concurrency cannot multiply Graph calls. The reservation is refunded on
+// success and on failures that are not the client's (an oCIS outage, a 422,
+// a cross-site request refused before validation), and kept for a missing,
+// malformed or rejected bearer and for a request whose own context ended
+// (a client that hangs up right away pays like one that waits). Cached and
+// known tokens reserve nothing; a known token that oCIS now rejects is
+// charged and forgotten. Successful requests never drain the bucket.
 //
-// This is not flood protection: rate limiting all requests per real client
-// must also exist at the reverse proxy. Trusting X-Forwarded-For from listed
-// proxies (AGENT_TRUSTED_PROXIES) is future work.
+// What this protects: oCIS (Graph /me) from floods of bad tokens, bounded by
+// the bucket per IP whatever the concurrency, and users signed in through
+// this process, who keep working from the attacked (shared proxy) address.
+// What it does not: a user this process has never validated (or not within
+// 12h), in particular a first login, gets 429 while the flood keeps the
+// bucket empty. Rate limiting all requests per real client must also exist
+// at the reverse proxy; trusting X-Forwarded-For from listed proxies
+// (AGENT_TRUSTED_PROXIES) is future work.
 //
 // The failure bucket gets these multiples of the per-user rate and burst,
 // since every user behind the proxy shares it.
@@ -100,6 +109,19 @@ func (l *limiter) charge(key string) {
 	defer l.mu.Unlock()
 	b := l.get(key, now)
 	b.tokens = math.Max(0, b.tokens-1)
+}
+
+// refund gives back a token taken by allow (never above the burst). A bucket
+// evicted meanwhile is gone; a new one starts full anyway.
+func (l *limiter) refund(key string) {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.buckets[key]; ok {
+		b := e.Value.(*bucket)
+		l.refill(b, now)
+		b.tokens = math.Min(l.burst, b.tokens+1)
+	}
 }
 
 // get returns the refilled bucket of key, creating it (and making room) if
