@@ -85,24 +85,6 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 	return false, l.wait(b)
 }
 
-// blocked reports whether key has no token left, without taking one or
-// creating a bucket.
-func (l *limiter) blocked(key string) (bool, time.Duration) {
-	now := l.now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, ok := l.buckets[key]
-	if !ok {
-		return false, 0
-	}
-	b := e.Value.(*bucket)
-	l.refill(b, now)
-	if b.tokens >= 1 {
-		return false, 0
-	}
-	return true, l.wait(b)
-}
-
 // charge takes a token for key if one is left (a failed attempt).
 func (l *limiter) charge(key string) {
 	now := l.now()

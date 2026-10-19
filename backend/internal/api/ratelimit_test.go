@@ -143,23 +143,29 @@ func TestLimiterSweepsAtMostOncePerSecond(t *testing.T) {
 	}
 }
 
-func TestLimiterBlockedAndCharge(t *testing.T) {
+func TestLimiterChargeAndRefund(t *testing.T) {
 	c := &fakeClock{t: time.Unix(1000, 0)}
 	l := newLimiter(1, 2, 10, c.Now)
-	if b, _ := l.blocked("k"); b {
-		t.Error("an unknown key is blocked")
-	}
-	if l.has("k") {
-		t.Error("blocked created a bucket")
-	}
 	l.charge("k")
 	l.charge("k")
-	if b, wait := l.blocked("k"); !b || wait != time.Second {
-		t.Errorf("after two failures: blocked=%v wait=%v", b, wait)
-	}
 	l.charge("k") // never below zero
-	c.Advance(time.Second)
-	if b, _ := l.blocked("k"); b {
-		t.Error("still blocked after the refill")
+	if ok, wait := l.allow("k"); ok || wait != time.Second {
+		t.Errorf("after the charges: ok=%v wait=%v", ok, wait)
+	}
+	l.refund("k")
+	if ok, _ := l.allow("k"); !ok {
+		t.Error("a refunded token is not usable")
+	}
+	for range 5 {
+		l.refund("k") // never above the burst
+	}
+	l.allow("k")
+	l.allow("k")
+	if ok, _ := l.allow("k"); ok {
+		t.Error("refunds exceeded the burst")
+	}
+	l.refund("unknown") // no bucket: nothing to give back, none created
+	if l.has("unknown") {
+		t.Error("refund created a bucket")
 	}
 }

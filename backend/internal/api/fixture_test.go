@@ -149,7 +149,6 @@ func (c *fakeCreds) PreviewRevokeAll(context.Context, ocisclient.Secret) ([]auth
 func (c *fakeCreds) Renew(context.Context, string) (auth.Renewed, error) {
 	return auth.Renewed{}, errNotUsed
 }
-func (c *fakeCreds) HandleUnauthorized(context.Context, string) error { return errNotUsed }
 
 type fakeDecider struct{}
 

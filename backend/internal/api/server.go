@@ -39,7 +39,6 @@ type Credentials interface {
 	PreviewRevokeAll(ctx context.Context, bearer ocisclient.Secret) ([]auth.TokenSummary, error)
 	Renew(ctx context.Context, userID string) (auth.Renewed, error)
 	Seen(ctx context.Context, userID string) error
-	HandleUnauthorized(ctx context.Context, userID string) error
 }
 
 // Decider records the user's approval decisions (approvals.Gate).
@@ -84,14 +83,15 @@ type Deps struct {
 // validator returned for the bearer, never from headers, the query or the
 // body.
 type Principal struct {
-	UserID      string `json:"user_id"`
-	Username    string `json:"username"` // login name
-	DisplayName string `json:"display_name"`
-	DriveID     string `json:"drive_id"`
-	// Subject is recorded as decidedBy of approval decisions. auth.Identity
-	// has no separate OIDC subject (the validator asks Graph /me, which
-	// returns the user id), so Subject == UserID.
-	Subject string `json:"subject"`
+	UserID      string
+	Username    string // login name
+	DisplayName string
+	DriveID     string
+	// Subject is recorded as decidedBy of approval decisions. The bearer is
+	// opaque to the sidecar and auth.Identity has no separate OIDC subject
+	// (the validator asks Graph /me, which returns the user id), so Subject
+	// is the Graph user id.
+	Subject string
 }
 
 // defaultTimeout is the per-request deadline of a route.
