@@ -184,6 +184,31 @@ describe('useAuditStore: live updates', () => {
     expect(audit.hasOlder).toBe(true)
   })
 
+  it('can still load older events after a fresh lookup interrupted a running one', async () => {
+    const st = auditState({ events: eventsUpTo(1000) })
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const held = String(1000 - 2 * AUDIT_PAGE)
+    const { audit, server, events } = await setup(st, (c) =>
+      c.path === '/audit' && c.query.get('cursor') === held ? gate.then(() => auditHandler(st)(c)!) : undefined
+    )
+    await audit.refresh()
+    const older = audit.loadOlder()
+    await flushPromises()
+    // very many new events: the next change looks up the newest page afresh
+    st.events = eventsUpTo(5000)
+    events().onChanged(['activity'])
+    await flushPromises()
+    expect(audit.events[0].seq).toBe(5000)
+    release()
+    await older
+    expect(audit.events[audit.events.length - 1].seq).toBe(5000 - AUDIT_PAGE + 1) // the stale page was dropped
+    expect(audit.olderLoading).toBe(false)
+    await audit.loadOlder()
+    expect(auditReads(server.calls).at(-1)).toEqual({ cursor: String(5000 - 2 * AUDIT_PAGE), limit: String(AUDIT_PAGE) })
+    expect(audit.events).toHaveLength(2 * AUDIT_PAGE)
+  })
+
   it('ignores other change kinds and does nothing before the first read', async () => {
     const st = auditState({ events: eventsUpTo(2) })
     const { audit, server, events } = await setup(st)

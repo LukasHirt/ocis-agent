@@ -159,6 +159,8 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   // load reads the newest page from scratch.
   const load = async (s: SessionHandle) => {
     const g = ++gen
+    // a page of older events read meanwhile belongs to the old floor
+    olderInflight = null
     olderLoading.value = false
     const p = await newestPage(s)
     if (g !== gen) return
@@ -227,6 +229,7 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
         if (g !== gen || isAbortError(e)) return
         error.value = describe(s, e)
       } finally {
+        // load() and reset() drop the promise of an older generation
         if (g === gen) {
           olderLoading.value = false
           olderInflight = null

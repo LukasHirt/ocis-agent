@@ -42,6 +42,24 @@ describe('coalesce', () => {
     gate.resolve()
   })
 
+  it('drops a follow-up queued before clear', async () => {
+    const gate = deferred()
+    let runs = 0
+    const run = coalesce(async () => {
+      runs++
+      if (runs === 1) await gate.promise
+    })
+    const first = run()
+    const queued = run()
+    run.clear()
+    gate.resolve()
+    await first
+    await queued
+    expect(runs).toBe(1)
+    await run()
+    expect(runs).toBe(2)
+  })
+
   it('runs again after a failed run', async () => {
     let runs = 0
     const run = coalesce(async () => {

@@ -393,6 +393,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
   ): Promise<{ parts: Uint8Array[]; bytes: number }> => {
     const parts: Uint8Array[] = []
     let bytes = 0
+    let lastByte = -1 // of the last non-empty chunk
     try {
       if (res.body && typeof res.body.getReader === 'function') {
         const reader = res.body.getReader()
@@ -405,6 +406,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
             throwIfAborted(signal)
             const { done, value } = await reader.read()
             if (done) break
+            if (value.byteLength > 0) lastByte = value[value.byteLength - 1]
             parts.push(value)
             bytes += value.byteLength
             onProgress?.(bytes)
@@ -416,6 +418,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
         const buf = new Uint8Array(await res.arrayBuffer())
         parts.push(buf)
         bytes = buf.byteLength
+        if (bytes > 0) lastByte = buf[bytes - 1]
         onProgress?.(bytes)
       }
     } catch {
@@ -423,8 +426,9 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       throw new ApiError(0, 'unavailable')
     }
     throwIfAborted(signal)
-    const last = parts.length > 0 ? parts[parts.length - 1] : undefined
-    if (bytes > 0 && (last === undefined || last[last.length - 1] !== 0x0a)) throw new ApiError(0, 'unavailable')
+    // a cut is mostly detected by the transport error above; a body that
+    // does not end with a whole line is refused as well
+    if (bytes > 0 && lastByte !== 0x0a) throw new ApiError(0, 'unavailable')
     return { parts, bytes }
   }
 

@@ -651,6 +651,13 @@ describe('createClient: audit export', () => {
     expect(JSON.stringify({ m: e.message, e })).not.toContain('SECRET-DETAIL')
   })
 
+  it('accepts empty chunks after the last line', async () => {
+    const { client } = setup([ndjson(chunked(['{"seq":1}\n', '', '']))])
+    const got = await client.exportAudit()
+    expect(got.bytes).toBe(10)
+    expect(await got.blob.text()).toBe('{"seq":1}\n')
+  })
+
   it('treats a body that does not end with a whole line as unavailable', async () => {
     const { client } = setup([ndjson('{"seq":1}\n{"se')])
     const e = (await caught(client.exportAudit())) as ApiError

@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
 import { ApiError, describeError, isAbortError } from '../api/errors'
+import { coalesce } from '../util/coalesce'
+import { byId, listOf, mergeHead } from '../util/lists'
 import type { Approval, Conversation, JobState, Message, PauseReason, Sent } from '../api/types'
 import { MAX_MESSAGE_BYTES, MAX_TITLE_CHARS, checkMessage, checkTitle, type TextProblem } from '../util/chatText'
 import { formatDuration } from '../util/format'
@@ -51,65 +53,6 @@ const noticeOf = (a: Sent['agent'] | undefined): AgentNotice | undefined => {
     'credential_expired' satisfies PauseReason
   ]
   return credential.includes(reason) ? 'credentials' : 'paused'
-}
-
-const byId = <T extends { id: string }>(list: T[]) => new Set(list.map((x) => x.id))
-
-// mergeHead merges a freshly read first page into a list read before (both
-// newest first): entries the head does not hold are kept behind it, as long
-// as the head reaches into the old list; otherwise there is a gap and the
-// older entries are dropped. The cursor for older entries is the old one
-// when old entries are kept, else the head's.
-export const mergeHead = <T extends { id: string }>(
-  existing: T[],
-  head: { items: T[]; next: string | null },
-  olderCursor: string | null
-): { items: T[]; cursor: string | null } => {
-  if (head.next === null || head.items.length === 0) return { items: head.items, cursor: head.next }
-  const last = head.items[head.items.length - 1].id
-  const at = existing.findIndex((x) => x.id === last)
-  if (at < 0) return { items: head.items, cursor: head.next }
-  const seen = byId(head.items)
-  const tail = existing.slice(at + 1).filter((x) => !seen.has(x.id))
-  return { items: [...head.items, ...tail], cursor: tail.length > 0 ? olderCursor : head.next }
-}
-
-// coalesce runs fn once at a time: a call while it runs queues ONE more
-// run, shared by every caller meanwhile.
-const coalesce = (fn: () => Promise<void>) => {
-  let running: Promise<void> | null = null
-  let queued: Promise<void> | null = null
-  const run = (): Promise<void> => {
-    if (!running) {
-      const p = fn().finally(() => {
-        if (running === p) running = null
-      })
-      running = p
-      return p
-    }
-    if (!queued) {
-      const q: Promise<void> = running.then(() => {
-        if (queued === q) queued = null
-        return run()
-      })
-      queued = q
-    }
-    return queued
-  }
-  return Object.assign(run, {
-    clear: () => {
-      running = null
-      queued = null
-    }
-  })
-}
-
-const listOf = <T>(v: unknown, key: string): { items: T[]; next: string | null } => {
-  const doc = v as Record<string, unknown> | null
-  const items = doc?.[key]
-  if (!Array.isArray(items)) throw new ApiError(502, 'internal')
-  const next = doc?.next_cursor
-  return { items: items as T[], next: typeof next === 'string' && next !== '' ? next : null }
 }
 
 // useChatStore holds the chat screen's data: the conversation list, the

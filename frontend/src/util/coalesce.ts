@@ -16,7 +16,8 @@ export const coalesce = (fn: () => Promise<void>) => {
       const q: Promise<void> = running
         .catch(() => undefined)
         .then(() => {
-          if (queued === q) queued = null
+          if (queued !== q) return // cleared meanwhile
+          queued = null
           return run()
         })
       queued = q

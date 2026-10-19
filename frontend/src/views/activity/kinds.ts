@@ -41,16 +41,15 @@ export const DIFF_KINDS: readonly string[] = ['memory_changed', 'memory_edited']
 export const kindLabel = (kind: string, t: Gettext): string | null =>
   Object.hasOwn(KINDS, kind) ? KINDS[kind](t) : null
 
-// credLabel names who acted: the user (with their sign-in), the agent
-// (with its app token) or the agent service itself; null when unknown.
+// credLabel names who acted: the user (with their sign-in) or the agent
+// (with its app token); null for any other value. The runner's own events
+// carry no credentials ('') and name nobody.
 export const credLabel = (cred: string, t: Gettext): string | null => {
   switch (cred) {
     case 'oidc':
       return t('You')
     case 'app':
       return t('The agent')
-    case '':
-      return t('The agent service')
   }
   return null
 }

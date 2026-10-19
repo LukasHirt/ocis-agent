@@ -34,6 +34,12 @@ describe('EventRow', () => {
     expect(w.find('.agent-event-actor b').exists()).toBe(false)
   })
 
+  it('names no actor for an event without credentials', () => {
+    const w = row({ kind: 'memory_changed', cred: '' })
+    expect(w.find('.agent-event-by').exists()).toBe(false)
+    expect(w.text()).not.toContain('By')
+  })
+
   it('leaves out empty tool, risk and job', () => {
     const w = row({ tool: '', risk: '', job_id: '' })
     expect(w.find('.agent-event-tool').exists()).toBe(false)

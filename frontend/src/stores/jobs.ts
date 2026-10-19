@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
-import { mergeHead } from './chat'
 import { ApiError, describeError, isAbortError } from '../api/errors'
+import { coalesce } from '../util/coalesce'
+import { byId, listOf, mergeHead } from '../util/lists'
 import type { Approval, Job, JobDetail, JobState } from '../api/types'
 
 // Page sizes (the server caps job pages at 200, approval pages at 100).
@@ -34,46 +35,6 @@ export interface DetailApprovals {
   items: Approval[]
   more: boolean // more pending approvals than were read
   error: string | null
-}
-
-const byId = <T extends { id: string }>(list: T[]) => new Set(list.map((x) => x.id))
-
-// coalesce runs fn once at a time: a call while it runs queues ONE more
-// run, shared by every caller meanwhile.
-const coalesce = (fn: () => Promise<void>) => {
-  let running: Promise<void> | null = null
-  let queued: Promise<void> | null = null
-  const run = (): Promise<void> => {
-    if (!running) {
-      const p = fn().finally(() => {
-        if (running === p) running = null
-      })
-      running = p
-      return p
-    }
-    if (!queued) {
-      const q: Promise<void> = running.then(() => {
-        if (queued === q) queued = null
-        return run()
-      })
-      queued = q
-    }
-    return queued
-  }
-  return Object.assign(run, {
-    clear: () => {
-      running = null
-      queued = null
-    }
-  })
-}
-
-const listOf = <T>(v: unknown, key: string): { items: T[]; next: string | null } => {
-  const doc = v as Record<string, unknown> | null
-  const items = doc?.[key]
-  if (!Array.isArray(items)) throw new ApiError(502, 'internal')
-  const next = doc?.next_cursor
-  return { items: items as T[], next: typeof next === 'string' && next !== '' ? next : null }
 }
 
 const isJob = (v: unknown): v is Job =>
@@ -120,6 +81,7 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
   let listGen = 0 // grows on reset and filter change: older list answers are dropped
   let detailGen = 0 // grows on reset and every open
   let listed = false // the list was asked for: events refresh it
+  let moreGen = 0 // grows when a refresh replaced the list: older pages read meanwhile are dropped
 
   const session = (): SessionHandle | null => {
     const s = agent.session()
@@ -150,6 +112,11 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
       const v = await s.client.listJobs(params(), s.signal)
       if (g !== listGen) return
       const r = mergeHead(jobs.value, listOf<Job>(v, 'jobs'), cursor.value)
+      if (r.replaced) {
+        moreGen++
+        moreInflight = null
+        moreLoading.value = false
+      }
       jobs.value = r.items
       cursor.value = r.cursor
       error.value = null
@@ -172,22 +139,25 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
     const c = cursor.value
     if (!s || c === null) return Promise.resolve()
     const g = listGen
+    const mg = moreGen
     moreLoading.value = true
     const p = (async () => {
       try {
         const v = await s.client.listJobs(params(c), s.signal)
-        if (g !== listGen) return
+        if (g !== listGen || mg !== moreGen) return
         const page = listOf<Job>(v, 'jobs')
         const seen = byId(jobs.value)
         jobs.value = [...jobs.value, ...page.items.filter((j) => !seen.has(j.id))]
         cursor.value = page.next
         error.value = null
       } catch (e) {
-        if (g !== listGen || isAbortError(e)) return
+        if (g !== listGen || mg !== moreGen || isAbortError(e)) return
         error.value = describe(s, e)
       } finally {
-        if (g === listGen) moreLoading.value = false
-        if (g === listGen) moreInflight = null
+        if (g === listGen && mg === moreGen) {
+          moreLoading.value = false
+          moreInflight = null
+        }
       }
     })()
     moreInflight = p
@@ -353,7 +323,11 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
       // its approvals can no longer be decided
       void agent.refreshApprovals()
       void agent.refreshStatus()
-      if (detailId.value === id) await detailRefresh()
+      // under a state filter the job may no longer belong to the list
+      await Promise.all([
+        detailId.value === id ? detailRefresh() : undefined,
+        listed && filter.value !== '' ? listRefresh() : undefined
+      ])
       return true
     } finally {
       if (bound === s) cancelling.value = false

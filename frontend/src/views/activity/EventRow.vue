@@ -11,7 +11,7 @@
       <time class="agent-event-time" :datetime="event.ts" v-text="formatTime(event.ts)" />
     </div>
     <div class="agent-event-meta">
-      <span class="agent-event-by">
+      <span v-if="event.cred" class="agent-event-by">
         <span v-text="$gettext('By')" />
         <span class="agent-event-actor">
           <span v-if="actor" v-text="actor" />

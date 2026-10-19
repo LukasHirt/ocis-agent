@@ -46,7 +46,7 @@ describe('activity kinds', () => {
   it('names who acted', () => {
     expect(credLabel('oidc', t)).toBe('You')
     expect(credLabel('app', t)).toBe('The agent')
-    expect(credLabel('', t)).toBe('The agent service')
+    expect(credLabel('', t)).toBeNull()
     expect(credLabel('other', t)).toBeNull()
   })
 

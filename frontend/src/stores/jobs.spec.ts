@@ -149,6 +149,30 @@ describe('useJobsStore', () => {
     expect(jobs.cursor).toBeNull()
   })
 
+  it('drops a page of older jobs read while a refresh replaced the list', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let n = 0
+    const { jobs } = await setup(jobsState(), (c) => {
+      if (c.method !== 'GET' || c.path !== '/jobs') return undefined
+      n++
+      if (n === 1) return json({ jobs: [jobOf('j2'), jobOf('j1')], next_cursor: 'j1' })
+      if (c.query.get('cursor') === 'j1') return gate.then(() => json({ jobs: [jobOf('j0')], next_cursor: null }))
+      // the head no longer reaches the jobs read before: a gap
+      return json({ jobs: [jobOf('k9'), jobOf('k8')], next_cursor: 'k8' })
+    })
+    await jobs.refresh()
+    const more = jobs.loadMore()
+    await flushPromises()
+    await jobs.refresh()
+    expect(ids(jobs.jobs)).toEqual(['k9', 'k8'])
+    release()
+    await more
+    expect(ids(jobs.jobs)).toEqual(['k9', 'k8'])
+    expect(jobs.cursor).toBe('k8')
+    expect(jobs.moreLoading).toBe(false)
+  })
+
   it('refreshes the first page on a jobs change, not on other kinds', async () => {
     const st = jobsState({ jobs: [jobOf('j1', { state: 'running' })] })
     const { jobs, server, events } = await setup(st)
@@ -295,6 +319,15 @@ describe('useJobsStore', () => {
       expect(jobs.jobs[0].state).toBe('cancelled')
       expect(jobs.detail?.state).toBe('cancelled')
       expect(jobs.actionError).toBeNull()
+    })
+
+    it('reads the list again after a cancel under a state filter', async () => {
+      const st = jobsState({ jobs: [jobOf('j2', { state: 'running' }), jobOf('j1', { state: 'running' })] })
+      const { jobs } = await setup(st)
+      await jobs.setFilter('running')
+      expect(ids(jobs.jobs)).toEqual(['j2', 'j1'])
+      expect(await jobs.cancel('j1')).toBe(true)
+      expect(ids(jobs.jobs)).toEqual(['j2']) // no longer in the filtered state
     })
 
     it('does nothing when the user does not confirm', async () => {

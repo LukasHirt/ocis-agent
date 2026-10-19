@@ -12,7 +12,7 @@ import {
   userMessage,
   type ChatState
 } from '../test/chat'
-import { LOCAL_BLOCK_MAX_MS, MESSAGE_PAGE, mergeHead, useChatStore } from './chat'
+import { LOCAL_BLOCK_MAX_MS, MESSAGE_PAGE, useChatStore } from './chat'
 import type { Message } from '../api/types'
 
 let detach: (() => void) | undefined
@@ -34,31 +34,6 @@ const ids = (list: { id: string }[]) => list.map((x) => x.id)
 // many returns n user messages m<n>..m1, newest first.
 const many = (n: number): Message[] =>
   Array.from({ length: n }, (_, i) => messageOf('m' + (n - i)))
-
-describe('mergeHead', () => {
-  it('replaces everything when the head reaches the end', () => {
-    expect(mergeHead([messageOf('a')], { items: [messageOf('b')], next: null }, 'x')).toEqual({
-      items: [messageOf('b')],
-      cursor: null
-    })
-  })
-
-  it('keeps the older pages behind the head without duplicates', () => {
-    const existing = [messageOf('m5'), messageOf('m4'), messageOf('m3'), messageOf('m2'), messageOf('m1')]
-    const head = { items: [messageOf('m6'), messageOf('m5'), messageOf('m4')], next: 'm4' }
-    const r = mergeHead(existing, head, 'm1-cursor')
-    expect(ids(r.items)).toEqual(['m6', 'm5', 'm4', 'm3', 'm2', 'm1'])
-    expect(r.cursor).toBe('m1-cursor')
-  })
-
-  it('drops the older pages when the head does not reach them (a gap)', () => {
-    const existing = [messageOf('m2'), messageOf('m1')]
-    const head = { items: [messageOf('m9'), messageOf('m8')], next: 'm8' }
-    const r = mergeHead(existing, head, null)
-    expect(ids(r.items)).toEqual(['m9', 'm8'])
-    expect(r.cursor).toBe('m8')
-  })
-})
 
 describe('useChatStore', () => {
   it('loads the conversations newest first and more with the cursor', async () => {
