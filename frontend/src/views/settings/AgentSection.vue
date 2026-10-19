@@ -67,7 +67,7 @@
           )
         "
       />
-      <oc-checkbox v-model="deleteMemory" :label="$gettext('Also delete the agent\'s memory folder')" />
+      <oc-checkbox v-model="deleteMemory" :disabled="disabling" :label="$gettext('Also delete the agent\'s memory folder')" />
       <p v-if="dialogError" role="alert" class="agent-settings-error">
         <span v-text="dialogError.message" />
         <span v-if="dialogError.detail" v-text="' ' + dialogError.detail" />

@@ -27,14 +27,7 @@
       inputmode="numeric"
       :label="$gettext('Daily limit (tokens)')"
       :disabled="form.saving.value"
-      :aria-invalid="problem ? 'true' : 'false'"
-    />
-    <p
-      v-if="problem"
-      class="agent-settings-error"
-      data-testid="agent-daily-tokens-error"
-      role="alert"
-      v-text="problemText"
+      :error-message="problem ? problemText : undefined"
     />
     <p
       class="agent-settings-hint"

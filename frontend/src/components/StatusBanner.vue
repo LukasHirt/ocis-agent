@@ -5,7 +5,7 @@
       :class="['agent-banner', `agent-banner-${view.severity}`, `agent-banner-${kind}`]"
       role="status"
     >
-      <oc-icon :name="view.icon" />
+      <oc-icon :name="view.icon" :fill-type="view.fillType ?? 'fill'" />
       <span class="agent-banner-text" v-text="view.text" />
       <oc-button
         v-if="kind === 'user'"
@@ -56,7 +56,8 @@ const note = computed(() => connectionNoteOf(store.connection))
 
 type Severity = 'danger' | 'warning' | 'info'
 
-const views: Record<BannerKind, () => { severity: Severity; icon: string; text: string }> = {
+// fillType 'none' for icons the design system ships without a -fill variant
+const views: Record<BannerKind, () => { severity: Severity; icon: string; fillType?: 'none'; text: string }> = {
   killswitch: () => ({
     severity: 'danger',
     icon: 'stop-circle',
@@ -65,6 +66,7 @@ const views: Record<BannerKind, () => { severity: Severity; icon: string; text: 
   reconnect: () => ({
     severity: 'danger',
     icon: 'link-unlink',
+    fillType: 'none',
     text: $gettext('Reconnect needed: the agent has lost access to your files')
   }),
   token_anomaly: () => ({

@@ -38,11 +38,19 @@ const OcButton = defineComponent({
   }
 })
 
+// OcIcon loads icons/<name>-<fillType>.svg (or <name>.svg for 'none');
+// data-icon-file names the file it would load.
 const OcIcon = defineComponent({
   name: 'OcIcon',
-  props: { name: { type: String, default: '' } },
+  props: { name: { type: String, default: '' }, fillType: { type: String, default: 'fill' } },
   setup(props) {
-    return () => h('span', { 'data-stub': 'OcIcon', 'data-icon': props.name, 'aria-hidden': 'true' })
+    return () =>
+      h('span', {
+        'data-stub': 'OcIcon',
+        'data-icon': props.name,
+        'data-icon-file': props.fillType === 'none' ? props.name : `${props.name}-${props.fillType}`,
+        'aria-hidden': 'true'
+      })
   }
 })
 
@@ -50,32 +58,47 @@ let fieldId = 0
 const nextId = () => `stub-field-${++fieldId}`
 
 // Form stubs follow the design system's v-model contracts: oc-text-input,
-// oc-checkbox and oc-select use modelValue, oc-switch uses checked.
+// oc-checkbox and oc-select use modelValue, oc-switch uses checked. Like the
+// real components, oc-text-input and oc-select do not turn off attribute
+// inheritance: attributes and listeners land on the root AND on the inner
+// control.
 const OcTextInput = defineComponent({
   name: 'OcTextInput',
-  inheritAttrs: false,
   props: {
     modelValue: { type: String, default: '' },
     label: { type: String, default: '' },
     type: { type: String, default: 'text' },
-    disabled: { type: Boolean, default: false }
+    disabled: { type: Boolean, default: false },
+    errorMessage: { type: String, default: null }
   },
-  emits: ['update:modelValue', 'change'],
+  emits: ['update:modelValue', 'change', 'enterKeyDown'],
   setup(props, { emit, attrs }) {
     const id = nextId()
-    return () =>
-      h('div', { 'data-stub': 'OcTextInput' }, [
+    const messageId = `${id}-message`
+    return () => {
+      const { onChange, onInput, onFocus, class: _c, ...rest } = attrs
+      return h('div', { 'data-stub': 'OcTextInput' }, [
         h('label', { for: id }, props.label),
         h('input', {
-          ...attrs,
+          ...rest,
+          ...(props.errorMessage ? { 'aria-describedby': messageId } : {}),
           id,
           type: props.type,
           disabled: props.disabled,
           value: props.modelValue ?? '',
+          'aria-invalid': props.errorMessage ? 'true' : 'false',
           onInput: (e: Event) => emit('update:modelValue', (e.target as HTMLInputElement).value),
-          onChange: (e: Event) => emit('change', (e.target as HTMLInputElement).value)
-        })
+          onChange: (e: Event) => emit('change', (e.target as HTMLInputElement).value),
+          onKeydown: (e: KeyboardEvent) => {
+            ;(rest.onKeydown as ((e: KeyboardEvent) => void) | undefined)?.(e)
+            if (e.key === 'Enter') emit('enterKeyDown')
+          }
+        }),
+        props.errorMessage
+          ? h('div', { role: 'alert' }, [h('span', { id: messageId }, props.errorMessage)])
+          : null
       ])
+    }
   }
 })
 
@@ -105,35 +128,32 @@ const OcCheckbox = defineComponent({
   }
 })
 
+// OcSwitch has no disabled prop: a disabled attribute lands on its root
+// span and does nothing.
 const OcSwitch = defineComponent({
   name: 'OcSwitch',
   props: {
     checked: { type: Boolean, default: false },
-    label: { type: String, default: '' },
-    disabled: { type: Boolean, default: false }
+    label: { type: String, default: '' }
   },
   emits: ['update:checked'],
   setup(props, { emit }) {
     return () =>
-      h(
-        'button',
-        {
-          'data-stub': 'OcSwitch',
+      h('span', { 'data-stub': 'OcSwitch' }, [
+        h('span', props.label),
+        h('button', {
           type: 'button',
           role: 'switch',
           'aria-checked': String(props.checked),
-          disabled: props.disabled,
           onClick: () => emit('update:checked', !props.checked)
-        },
-        props.label
-      )
+        })
+      ])
   }
 })
 
 const OcSelect = defineComponent({
   name: 'OcSelect',
-  inheritAttrs: false,
-  props: {
+    props: {
     modelValue: { type: null, default: undefined },
     options: { type: Array, default: () => [] },
     optionLabel: { type: String, default: 'label' },

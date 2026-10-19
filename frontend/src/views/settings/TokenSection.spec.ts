@@ -175,6 +175,31 @@ describe('TokenSection', () => {
       expect(server.count('POST', '/token/revoke-all')).toBe(1)
     })
 
+    it('a reopened dialog waits for its own list', async () => {
+      const releases: Array<() => void> = []
+      const lists = [[tokens[1]], tokens]
+      let n = 0
+      const { w } = await setup(
+        incident((c) => {
+          if (c.path !== '/token/revoke-all/preview') return undefined
+          const mine = lists[n++]
+          return new Promise<Response>((r) => releases.push(() => r(json({ tokens: mine }))))
+        })
+      )
+      await button(w, 'I suspect compromise')!.trigger('click')
+      await button(w, 'Cancel')!.trigger('click')
+      await button(w, 'I suspect compromise')!.trigger('click')
+      await flushPromises()
+      releases[0]()
+      await flushPromises()
+      expect(w.find('[role="alertdialog"] [data-stub="OcSpinner"]').exists()).toBe(true)
+      expect(w.findAll('[data-testid="agent-token-row"]')).toHaveLength(0)
+      releases[1]()
+      await flushPromises()
+      expect(w.find('[role="alertdialog"] [data-stub="OcSpinner"]').exists()).toBe(false)
+      expect(w.findAll('[data-testid="agent-token-row"]')).toHaveLength(3)
+    })
+
     it('can be cancelled', async () => {
       const { w, server } = await open()
       await button(w, 'Cancel')!.trigger('click')

@@ -63,6 +63,14 @@ const save = async (w: VueWrapper) => {
 }
 const input = (w: VueWrapper, id: string) => w.find<HTMLInputElement>(`input[data-testid="${id}"]`)
 const select = (w: VueWrapper, id: string) => w.find<HTMLSelectElement>(`select[data-testid="${id}"]`)
+// fieldError is the error message the text input shows (and links to the
+// input), or null when it is valid.
+const fieldError = (w: VueWrapper, id: string): string | null => {
+  const el = input(w, id)
+  if (el.attributes('aria-invalid') !== 'true') return null
+  const msg = el.attributes('aria-describedby')
+  return msg ? w.find(`[id="${msg}"]`).text() : ''
+}
 const optionTexts = (w: VueWrapper, id: string) => select(w, id).findAll('option').map((o) => o.text())
 const choose = async (w: VueWrapper, id: string, text: string) => {
   const i = optionTexts(w, id).indexOf(text)
@@ -105,7 +113,7 @@ describe('Settings', () => {
     const { w } = await setup(s.handler)
     expect(w.html()).not.toContain('auto_approve')
     expect(w.text().toLowerCase()).not.toContain('auto-approve')
-    await w.find('[data-testid="agent-proactive"]').trigger('click')
+    await w.find('[data-testid="agent-proactive"] [role="switch"]').trigger('click')
     await input(w, 'agent-quiet-hours').setValue('22:00-07:00')
     await save(w)
     expect(s.put).toHaveLength(1)
@@ -140,8 +148,7 @@ describe('Settings', () => {
       const s = settingsServer()
       const { w } = await setup(s.handler)
       await input(w, 'agent-daily-tokens').setValue(v)
-      const err = w.find('[data-testid="agent-daily-tokens-error"]')
-      expect(err.exists()).toBe(!ok)
+      expect(fieldError(w, 'agent-daily-tokens') !== null).toBe(!ok)
       expect(button(w, 'Save')!.attributes('disabled') === undefined).toBe(ok)
       if (ok) {
         await save(w)
@@ -155,7 +162,7 @@ describe('Settings', () => {
     it('names the allowed range', async () => {
       const { w } = await setup(settingsServer({ daily_tokens_max: 70000 }).handler)
       await input(w, 'agent-daily-tokens').setValue('70001')
-      expect(w.find('[data-testid="agent-daily-tokens-error"]').text()).toMatch(/1.?000.*70.?000/)
+      expect(fieldError(w, 'agent-daily-tokens')).toMatch(/1.?000.*70.?000/)
     })
 
     it("sends null to follow the operator's limit", async () => {
@@ -218,7 +225,7 @@ describe('Settings', () => {
     it('toggles proactive work', async () => {
       const s = settingsServer()
       const { w } = await setup(s.handler)
-      await w.find('[data-testid="agent-proactive"]').trigger('click')
+      await w.find('[data-testid="agent-proactive"] [role="switch"]').trigger('click')
       await save(w)
       expect(JSON.stringify(s.put)).toBe('[{"proactive_enabled":true}]')
     })
@@ -234,12 +241,16 @@ describe('Settings', () => {
       expect(JSON.stringify(s.put)).toBe('[{"watch":["/a","/Docs"]}]')
     })
 
-    it('adds on Enter', async () => {
+    it('adds on Enter in the field only', async () => {
       const s = settingsServer()
       const { w } = await setup(s.handler)
       await input(w, 'agent-watch-new').setValue('/B')
+      // a keydown that only reaches the field's wrapper adds nothing
+      await w.find('[data-stub="OcTextInput"][data-testid="agent-watch-new"]').trigger('keydown', { key: 'Enter' })
+      expect(w.findAll('[data-testid="agent-watch-item"]')).toHaveLength(1)
       await input(w, 'agent-watch-new').trigger('keydown', { key: 'Enter' })
       expect(w.findAll('[data-testid="agent-watch-item"]')).toHaveLength(2)
+      expect(fieldError(w, 'agent-watch-new')).toBeNull()
     })
 
     it.each([
@@ -257,7 +268,7 @@ describe('Settings', () => {
       const { w } = await setup(s.handler)
       await input(w, 'agent-watch-new').setValue(p)
       await button(w, 'Add')!.trigger('click')
-      expect(w.find('[data-testid="agent-watch-error"]').text()).toContain(msg)
+      expect(fieldError(w, 'agent-watch-new')).toContain(msg)
       expect(w.findAll('[data-testid="agent-watch-item"]')).toHaveLength(1)
       expect(button(w, 'Save')!.attributes('disabled')).toBeDefined()
     })
@@ -333,7 +344,7 @@ describe('Settings', () => {
       const s = settingsServer()
       const { w } = await setup(s.handler)
       await input(w, 'agent-quiet-hours').setValue(q)
-      expect(w.find('[data-testid="agent-quiet-hours-error"]').exists()).toBe(!ok)
+      expect(fieldError(w, 'agent-quiet-hours') !== null).toBe(!ok)
       await save(w)
       expect(JSON.stringify(s.put)).toBe(ok ? `[{"quiet_hours":"${q}"}]` : '[]')
     })
@@ -351,7 +362,7 @@ describe('Settings', () => {
     it('sends exactly the changed fields together and shows the answer', async () => {
       const s = settingsServer()
       const { w, platform } = await setup(s.handler)
-      await w.find('[data-testid="agent-proactive"]').trigger('click')
+      await w.find('[data-testid="agent-proactive"] [role="switch"]').trigger('click')
       await input(w, 'agent-quiet-hours').setValue('22:00-07:00')
       await choose(w, 'agent-model-proactive', 'Model B (m2)')
       await save(w)
@@ -418,6 +429,55 @@ describe('Settings', () => {
       expect(server.count('PUT', '/settings')).toBe(1)
     })
 
+    it('ignores the proactive switch while saving', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const s = settingsServer()
+      const { w } = await setup((c) => (c.method === 'PUT' ? gate.then(() => s.handler(c)!) : s.handler(c)))
+      const sw = () => w.find('[data-testid="agent-proactive"] [role="switch"]')
+      await input(w, 'agent-quiet-hours').setValue('22:00-07:00')
+      await button(w, 'Save')!.trigger('click')
+      await sw().trigger('click')
+      expect(sw().attributes('aria-checked')).toBe('false')
+      release()
+      await flushPromises()
+      expect(JSON.stringify(s.put)).toBe('[{"quiet_hours":"22:00-07:00"}]')
+      expect(sw().attributes('aria-checked')).toBe('false')
+    })
+
+    it('keeps an emptied daily limit across a refresh', async () => {
+      const s = settingsServer()
+      const { w, store } = await setup(s.handler)
+      await input(w, 'agent-daily-tokens').setValue('')
+      await store.refreshSettings()
+      await flushPromises()
+      expect(input(w, 'agent-daily-tokens').element.value).toBe('')
+      expect(fieldError(w, 'agent-daily-tokens')).not.toBeNull()
+      expect(button(w, 'Discard changes')!.attributes('disabled')).toBeUndefined()
+      expect(w.text()).not.toContain('The settings were changed elsewhere')
+    })
+
+    it('a refresh with the same settings while editing shows no note', async () => {
+      const s = settingsServer()
+      const { w, store } = await setup(s.handler)
+      await w.find('[data-testid="agent-proactive"] [role="switch"]').trigger('click')
+      await store.refreshSettings()
+      await flushPromises()
+      expect(w.text()).not.toContain('The settings were changed elsewhere')
+      await save(w)
+      expect(JSON.stringify(s.put)).toBe('[{"proactive_enabled":true}]')
+    })
+
+    it('does not save a change that sends nothing', async () => {
+      const s = settingsServer()
+      const { w } = await setup(s.handler)
+      await input(w, 'agent-daily-tokens').setValue('050000')
+      expect(button(w, 'Discard changes')!.attributes('disabled')).toBeUndefined()
+      expect(button(w, 'Save')!.attributes('disabled')).toBeDefined()
+      await save(w)
+      expect(s.put).toHaveLength(0)
+    })
+
     it('discards the changes', async () => {
       const s = settingsServer()
       const { w } = await setup(s.handler)
@@ -442,7 +502,7 @@ describe('Settings', () => {
     it('keeps the edits and says so when the settings change elsewhere', async () => {
       const s = settingsServer()
       const { w, store } = await setup(s.handler)
-      await w.find('[data-testid="agent-proactive"]').trigger('click')
+      await w.find('[data-testid="agent-proactive"] [role="switch"]').trigger('click')
       s.set({ quiet_hours: '01:00-02:00' })
       await store.refreshSettings()
       await flushPromises()

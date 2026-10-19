@@ -168,3 +168,27 @@ export const formProblems = (d: Draft, base: Settings): FormProblems => {
   if (d.watch.length > MAX_WATCH || d.watch.some((w) => watchPathProblem(w) !== null)) p.watch = true
   return p
 }
+
+// draftsEqual compares two drafts field by field, the typed text included
+// (an emptied or invalid field is a change even though it sends nothing).
+export const draftsEqual = (a: Draft, b: Draft): boolean =>
+  a.proactive_enabled === b.proactive_enabled &&
+  sameList(a.watch, b.watch) &&
+  a.sweepSeconds === b.sweepSeconds &&
+  a.quiet_hours === b.quiet_hours &&
+  a.dailyTokens === b.dailyTokens &&
+  a.followOperator === b.followOperator &&
+  a.models.chat === b.models.chat &&
+  a.models.proactive === b.models.proactive
+
+// sameSettings compares two settings answers by value.
+export const sameSettings = (a: Settings, b: Settings): boolean =>
+  a.proactive_enabled === b.proactive_enabled &&
+  sameList(a.watch, b.watch) &&
+  a.sweep_interval === b.sweep_interval &&
+  a.quiet_hours === b.quiet_hours &&
+  a.daily_tokens === b.daily_tokens &&
+  a.daily_tokens_max === b.daily_tokens_max &&
+  a.dormancy_days === b.dormancy_days &&
+  a.models.chat === b.models.chat &&
+  a.models.proactive === b.models.proactive

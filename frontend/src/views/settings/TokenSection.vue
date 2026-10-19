@@ -201,18 +201,23 @@ const revokeError = ref<ErrorText | null>(null)
 const revokedAll = ref(false)
 const confirmed = computed(() => typed.value === CONFIRM_WORD)
 
+// listSeq numbers the preview requests: only the newest one of the open
+// dialog may fill it (a dialog closed and reopened waits for its own).
+let listSeq = 0
+
 const loadList = async () => {
+  const seq = ++listSeq
   loadingList.value = true
   listError.value = null
   try {
     const r = await store.previewRevokeAll()
-    if (!alive || !incident.value) return
+    if (!alive || seq !== listSeq) return
     list.value = Array.isArray(r?.tokens) ? r.tokens : []
   } catch (e) {
-    if (!alive || isAbortError(e)) return
+    if (!alive || seq !== listSeq || isAbortError(e)) return
     listError.value = describe(e)
   } finally {
-    loadingList.value = false
+    if (seq === listSeq) loadingList.value = false
   }
 }
 
@@ -227,6 +232,8 @@ const openIncident = () => {
 const closeIncident = () => {
   if (revoking.value) return
   incident.value = false
+  listSeq++ // a preview still in flight is for nobody now
+  loadingList.value = false
   list.value = null
   typed.value = ''
 }

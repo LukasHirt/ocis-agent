@@ -187,6 +187,22 @@ describe('AgentSection', () => {
       expect(server.count('POST', '/unenroll')).toBe(1)
     })
 
+    it('locks the memory choice while the request runs', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const { w } = await setup({}, (c) =>
+        c.method === 'POST' && c.path === '/unenroll' ? gate.then(() => apiErr(502, 'upstream_unavailable')) : undefined
+      )
+      await button(w, 'Disable agent')!.trigger('click')
+      const box = () => w.find('[role="alertdialog"] input[type="checkbox"]')
+      expect(box().attributes('disabled')).toBeUndefined()
+      await w.find('[role="alertdialog"]').findAll('button').find((b) => b.text() === 'Disable agent')!.trigger('click')
+      expect(box().attributes('disabled')).toBeDefined()
+      release()
+      await flushPromises()
+      expect(box().attributes('disabled')).toBeUndefined()
+    })
+
     it('shows a fixed error and keeps the dialog when it fails', async () => {
       const { w } = await setup({}, (c) =>
         c.method === 'POST' && c.path === '/unenroll' ? apiErr(502, 'upstream_unavailable') : undefined

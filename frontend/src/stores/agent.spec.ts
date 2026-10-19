@@ -432,6 +432,15 @@ describe('useAgentStore', () => {
     expect(s.server.calls.filter((c) => c.key === 'POST /unenroll')[1]?.body).toEqual({ delete_memory: false })
   })
 
+  it('a failed unenrol rethrows and still refreshes the status', async () => {
+    const s = (current = setup(defaultHandlers({ 'POST /unenroll': () => apiErr(502, 'upstream_unavailable') })))
+    s.start()
+    await flush()
+    const st = s.server.count('GET /status')
+    await expect(s.store.unenrol(true)).rejects.toMatchObject({ code: 'upstream_unavailable' })
+    expect(s.server.count('GET /status')).toBe(st + 1)
+  })
+
   it('the token actions call their endpoints and refresh the status', async () => {
     const s = (current = setup(
       defaultHandlers({

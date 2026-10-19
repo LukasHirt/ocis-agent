@@ -419,7 +419,13 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   // folder); everything is read again, so the enrolment shows.
   const unenrol = async (deleteMemory: boolean): Promise<void> => {
     const s = active()
-    await s.client.unenrol(deleteMemory)
+    try {
+      await s.client.unenrol(deleteMemory)
+    } catch (e) {
+      // the tokens may be gone even though a later step failed
+      await refresh('status', true)
+      throw e
+    }
     await Promise.all(RESOURCES.map((k) => refresh(k, true)))
   }
 

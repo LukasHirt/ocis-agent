@@ -59,7 +59,7 @@ import ModelSection from './settings/ModelSection.vue'
 import PolicySection from './settings/PolicySection.vue'
 import TokenSection from './settings/TokenSection.vue'
 import { provideSettingsForm } from './settings/form'
-import { buildUpdate, draftOf, formProblems, type Draft } from './settings/rules'
+import { buildUpdate, draftOf, draftsEqual, formProblems, sameSettings, type Draft } from './settings/rules'
 import { useReport, type ErrorText } from './settings/report'
 
 // The settings page. The form sections edit a draft; Save sends only the
@@ -87,8 +87,12 @@ const changedElsewhere = ref(false)
 
 const problems = computed(() => (base.value ? formProblems(draft, base.value) : {}))
 const update = computed(() => (base.value ? buildUpdate(base.value, draft) : {}))
-const dirty = computed(() => Object.keys(update.value).length > 0)
-const canSave = computed(() => dirty.value && !saving.value && Object.keys(problems.value).length === 0)
+// dirty compares the draft with the settings it was made from, typed text
+// included; Save needs an update that actually sends something.
+const dirty = computed(() => (base.value ? !draftsEqual(draft, draftOf(base.value)) : false))
+const canSave = computed(
+  () => Object.keys(update.value).length > 0 && !saving.value && Object.keys(problems.value).length === 0
+)
 
 provideSettingsForm({ base, draft, problems, saving })
 
@@ -105,7 +109,8 @@ watch(
   () => store.settings,
   (s) => {
     if (!s || saving.value || s === base.value) return
-    if (!base.value || !dirty.value) reset(s)
+    if (base.value && sameSettings(s, base.value)) base.value = s // same content: nothing to say
+    else if (!base.value || !dirty.value) reset(s)
     else changedElsewhere.value = true
   },
   { immediate: true }

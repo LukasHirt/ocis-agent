@@ -5,6 +5,8 @@ import {
   cleanWatchPath,
   dailyTokensProblem,
   draftOf,
+  draftsEqual,
+  sameSettings,
   formProblems,
   parseGoDuration,
   presetOf,
@@ -239,5 +241,39 @@ describe('formProblems', () => {
     const d = draftOf(base)
     d.watch = Array.from({ length: MAX_WATCH + 1 }, (_, i) => `/f${i}`)
     expect(formProblems(d, base)).toEqual({ watch: true })
+  })
+})
+
+describe('draftsEqual', () => {
+  const base = settingsOf({ watch: ['/a'], models: { chat: 'm', proactive: null } })
+
+  it('is true for two drafts of the same settings', () => {
+    expect(draftsEqual(draftOf(base), draftOf(base))).toBe(true)
+  })
+
+  it.each<[string, (d: ReturnType<typeof draftOf>) => void]>([
+    ['proactive', (d) => (d.proactive_enabled = !d.proactive_enabled)],
+    ['watch', (d) => d.watch.push('/b')],
+    ['watch order', (d) => (d.watch = ['/b', '/a'])],
+    ['sweep', (d) => (d.sweepSeconds = 300)],
+    ['quiet hours', (d) => (d.quiet_hours = '01:00-02:00')],
+    ['emptied daily limit', (d) => (d.dailyTokens = '')],
+    ['invalid daily limit', (d) => (d.dailyTokens = '1e')],
+    ['follow operator', (d) => (d.followOperator = true)],
+    ['model', (d) => (d.models.chat = null)]
+  ])('sees a changed %s', (_, change) => {
+    const d = draftOf(base)
+    change(d)
+    expect(draftsEqual(d, draftOf(base))).toBe(false)
+  })
+})
+
+describe('sameSettings', () => {
+  it('compares by value', () => {
+    expect(sameSettings(settingsOf({ watch: ['/a'] }), settingsOf({ watch: ['/a'] }))).toBe(true)
+    expect(sameSettings(settingsOf({ watch: ['/a'] }), settingsOf({ watch: ['/b'] }))).toBe(false)
+    expect(sameSettings(settingsOf(), settingsOf({ dormancy_days: 7 }))).toBe(false)
+    expect(sameSettings(settingsOf(), settingsOf({ models: { chat: 'x', proactive: null } }))).toBe(false)
+    expect(sameSettings(settingsOf(), settingsOf({ daily_tokens_max: 1 }))).toBe(false)
   })
 })

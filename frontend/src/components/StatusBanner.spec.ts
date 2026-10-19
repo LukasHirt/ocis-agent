@@ -30,6 +30,17 @@ describe('StatusBanner', () => {
     expect(w.find('.agent-connection').exists()).toBe(false)
   })
 
+  // icon files the design system ships (OcIcon loads <name>-<fillType>.svg)
+  it.each([
+    [statusOf({ kill_switch: { database: true, environment: false } }), 'stop-circle-fill'],
+    [statusOf({ paused: true, pause_reason: 'credential_revoked' }), 'link-unlink'],
+    [statusOf({ paused: true, pause_reason: 'token_anomaly' }), 'alarm-warning-fill'],
+    [statusOf({ paused: true, pause_reason: 'user' }), 'pause-circle-fill']
+  ])('uses an icon file that exists (%#)', (status, file) => {
+    const { w } = mountWith(status)
+    expect(banner(w).find('[data-stub="OcIcon"]').attributes('data-icon-file')).toBe(file)
+  })
+
   it('renders nothing without a status', () => {
     const { w } = mountWith(null)
     expect(banner(w).exists()).toBe(false)

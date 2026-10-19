@@ -5,8 +5,7 @@
       data-testid="agent-proactive"
       :checked="form.draft.proactive_enabled"
       :label="$gettext('Let the agent work on its own on the watched folders')"
-      :disabled="form.saving.value"
-      @update:checked="(v: boolean) => (form.draft.proactive_enabled = v)"
+      @update:checked="setProactive"
     />
 
     <h3 v-text="$gettext('Watched folders')" />
@@ -30,17 +29,11 @@
         data-testid="agent-watch-new"
         :label="$gettext('Folder in your personal space, e.g. /Projects')"
         :disabled="form.saving.value || full"
-        @keydown.enter.prevent="add"
+        :error-message="watchError ?? undefined"
+        @enter-key-down="add"
       />
       <oc-button :disabled="form.saving.value || full" @click="add" v-text="$gettext('Add')" />
     </div>
-    <p
-      v-if="watchError"
-      class="agent-settings-error"
-      data-testid="agent-watch-error"
-      role="alert"
-      v-text="watchError"
-    />
 
     <h3 v-text="$gettext('Schedule')" />
     <oc-select
@@ -60,14 +53,11 @@
       placeholder="22:00-07:00"
       :label="$gettext('Quiet hours (HH:MM-HH:MM, empty for none)')"
       :disabled="form.saving.value"
-      :aria-invalid="form.problems.value.quiet_hours ? 'true' : 'false'"
-    />
-    <p
-      v-if="form.problems.value.quiet_hours"
-      class="agent-settings-error"
-      data-testid="agent-quiet-hours-error"
-      role="alert"
-      v-text="$gettext('Use HH:MM-HH:MM in 24-hour time with two different times, or leave it empty.')"
+      :error-message="
+        form.problems.value.quiet_hours
+          ? $gettext('Use HH:MM-HH:MM in 24-hour time with two different times, or leave it empty.')
+          : undefined
+      "
     />
   </section>
 </template>
@@ -142,6 +132,12 @@ const add = () => {
   form.draft.watch.push(clean)
   newPath.value = ''
   watchError.value = null
+}
+
+// OcSwitch cannot be disabled: a toggle while saving is ignored (the form
+// is rebuilt from the server's answer afterwards).
+const setProactive = (v: boolean) => {
+  if (!form.saving.value) form.draft.proactive_enabled = v
 }
 
 const remove = (i: number) => {
