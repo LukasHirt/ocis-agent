@@ -21,7 +21,7 @@ describe('buildRoutes', () => {
     }
   })
 
-  it('has the approvals inbox, the chat and the settings as children of the layout', () => {
+  it('has the approvals inbox, the chat, the tasks and the settings as children of the layout', () => {
     const [root] = buildRoutes(gettext, layout)
     const children = (root.children ?? []).map((c) => [c.path, c.name, c.meta?.title])
     // the host prefixes the names with the app id (agent-approvals, agent-settings)
@@ -29,6 +29,8 @@ describe('buildRoutes', () => {
       ['approvals', 'approvals', 'Approvals'],
       ['chat', 'chat', 'Chat'],
       ['chat/:id', 'chat-conversation', 'Chat'],
+      ['tasks', 'tasks', 'Tasks'],
+      ['tasks/:id', 'tasks-job', 'Tasks'],
       ['settings', 'settings', 'Settings']
     ])
     for (const child of root.children ?? []) {
@@ -40,6 +42,7 @@ describe('buildRoutes', () => {
     const [root] = buildRoutes(gettext, layout)
     const byName = (n: string) => (root.children ?? []).find((c) => c.name === n)!
     expect(byName('chat-conversation').props).toBe(true)
+    expect(byName('tasks-job').props).toBe(true)
     const approvalsProps = byName('approvals').props as (r: unknown) => unknown
     expect(approvalsProps({ query: { job: 'j1' } })).toEqual({ job: 'j1' })
     expect(approvalsProps({ query: {} })).toEqual({ job: undefined })
@@ -53,12 +56,13 @@ describe('buildRoutes', () => {
 })
 
 describe('buildNavItems', () => {
-  it('links the approvals, the chat and the settings, without a badge', () => {
+  it('links the approvals, the chat, the tasks and the settings, without a badge', () => {
     let user = false
     const items = buildNavItems(gettext, () => user)
     expect(items.map((i) => [i.name, i.icon, i.route])).toEqual([
       ['Approvals', 'checkbox-circle', { path: `/${APPID}/approvals` }],
       ['Chat', 'chat-3', { path: `/${APPID}/chat` }],
+      ['Tasks', 'task', { path: `/${APPID}/tasks` }],
       ['Settings', 'settings-4', { path: `/${APPID}/settings` }]
     ])
     expect(items.every((i) => i.isVisible?.() === false)).toBe(true)

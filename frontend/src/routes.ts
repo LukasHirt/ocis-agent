@@ -42,6 +42,19 @@ export const buildRoutes = (
         meta: { authContext: 'user', title: gettext('Chat') }
       },
       {
+        path: 'tasks',
+        name: 'tasks',
+        component: () => import('./views/Tasks.vue'),
+        meta: { authContext: 'user', title: gettext('Tasks') }
+      },
+      {
+        path: 'tasks/:id',
+        name: 'tasks-job',
+        component: () => import('./views/Tasks.vue'),
+        props: true,
+        meta: { authContext: 'user', title: gettext('Tasks') }
+      },
+      {
         path: 'settings',
         name: 'settings',
         component: () => import('./views/Settings.vue'),
@@ -70,6 +83,13 @@ export const buildNavItems = (
     route: { path: `/${APPID}/chat` },
     isVisible,
     priority: 15
+  },
+  {
+    name: gettext('Tasks'),
+    icon: 'task',
+    route: { path: `/${APPID}/tasks` },
+    isVisible,
+    priority: 17
   },
   {
     name: gettext('Settings'),
