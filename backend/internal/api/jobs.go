@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -68,6 +69,22 @@ var errBadQuery = newAPIError(http.StatusBadRequest, "invalid_request")
 
 // queryValue returns the single value of key ("" if absent); a repeated
 // parameter is refused.
+// query parses the request's query string strictly: a malformed one (which
+// r.URL.Query would drop silently) or a parameter not in allowed is
+// errBadQuery.
+func query(r *http.Request, allowed ...string) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, errBadQuery
+	}
+	for k := range q {
+		if !slices.Contains(allowed, k) {
+			return nil, errBadQuery
+		}
+	}
+	return q, nil
+}
+
 func queryValue(q url.Values, key string) (string, error) {
 	v := q[key]
 	switch len(v) {
@@ -194,7 +211,10 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errNoPrincipal
 	}
-	q := r.URL.Query()
+	q, err := query(r, "state", "limit", "cursor")
+	if err != nil {
+		return err
+	}
 	state, err := queryValue(q, "state")
 	if err != nil {
 		return err

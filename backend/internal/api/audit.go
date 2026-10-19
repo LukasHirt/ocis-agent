@@ -99,7 +99,10 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errNoPrincipal
 	}
-	q := r.URL.Query()
+	q, err := query(r, "cursor", "limit", "job_id", "tool", "risk")
+	if err != nil {
+		return err
+	}
 	limit, err := limitParam(q, maxAuditPageLimit)
 	if err != nil {
 		return err
@@ -196,6 +199,9 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errNoPrincipal
 	}
+	if _, err := query(r); err != nil {
+		return err
+	}
 	if !s.verifying.acquire(p.UserID) {
 		writeCode(w, r, http.StatusTooManyRequests, "rate_limited")
 		return nil
@@ -229,7 +235,11 @@ func (s *Server) exportAudit(w http.ResponseWriter, r *http.Request) error {
 		return errNoPrincipal
 	}
 	var after int64
-	fs, err := queryValue(r.URL.Query(), "from")
+	q, err := query(r, "from")
+	if err != nil {
+		return err
+	}
+	fs, err := queryValue(q, "from")
 	if err != nil {
 		return err
 	}

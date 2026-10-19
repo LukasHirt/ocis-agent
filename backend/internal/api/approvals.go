@@ -151,7 +151,10 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errNoPrincipal
 	}
-	q := r.URL.Query()
+	q, err := query(r, "state", "job_id", "limit", "cursor")
+	if err != nil {
+		return err
+	}
 	state, err := queryValue(q, "state")
 	if err != nil {
 		return err

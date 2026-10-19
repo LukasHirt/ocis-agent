@@ -392,7 +392,15 @@ func TestAuditVerifyDetectsTheRealChainOnlyForTheCaller(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	f.do(http.MethodGet, verifyPath+"?user_id="+bobID.UserID, "")
+	// a parameter naming another user is refused outright...
+	wantError(t, f.do(http.MethodGet, verifyPath+"?user_id="+bobID.UserID, ""), 400, "invalid_request")
+	if len(asked) != 0 {
+		t.Fatalf("verified %v", asked)
+	}
+	// ...and the caller's own chain is the only one verified
+	r := f.req(http.MethodGet, verifyPath, "")
+	r.Header.Set("X-User-Id", bobID.UserID)
+	f.serve(r)
 	if len(asked) != 1 || asked[0] != aliceID.UserID {
 		t.Fatalf("verified %v", asked)
 	}
