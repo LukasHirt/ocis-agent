@@ -510,6 +510,19 @@ func TestTheShutdownDelayCoversTheRetrySettle(t *testing.T) {
 	}
 }
 
+// The API server bounds the headers and idle connections but has no write
+// timeout: long responses (the audit export) use per-request deadlines.
+func TestTheAPIServerHasTimeouts(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.build(llmtest.New())
+	srv := a.newServer(http.NotFoundHandler(), false)
+	if srv.ReadHeaderTimeout != 10*time.Second || srv.IdleTimeout != 120*time.Second ||
+		srv.MaxHeaderBytes != 64<<10 || srv.WriteTimeout != 0 || srv.ReadTimeout != 0 {
+		t.Errorf("api server: header %v idle %v max header %d write %v read %v",
+			srv.ReadHeaderTimeout, srv.IdleTimeout, srv.MaxHeaderBytes, srv.WriteTimeout, srv.ReadTimeout)
+	}
+}
+
 func TestTheDebugServerHasTimeouts(t *testing.T) {
 	f := newFixture(t, nil)
 	a := f.build(llmtest.New())

@@ -1,3 +1,6 @@
+// Package api is the sidecar's REST API (NewServer). All routes live under
+// /agent-api/: GET /agent-api/healthz and the authenticated /agent-api/v1/
+// routes. It never serves /agent/, the extension's UI routes.
 package api
 
 import (

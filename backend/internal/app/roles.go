@@ -7,13 +7,15 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/owncloud/ocis-agent/backend/internal/api"
 )
 
 const (
 	// readHeaderTimeout bounds the request headers on both listeners.
 	readHeaderTimeout = 10 * time.Second
+	// apiIdleTimeout bounds an idle keep-alive connection of the API.
+	apiIdleTimeout = 120 * time.Second
+	// apiMaxHeaderBytes caps the request headers of the API.
+	apiMaxHeaderBytes = 64 << 10
 	// apiShutdownTimeout bounds the graceful stop of the API listener.
 	apiShutdownTimeout = 10 * time.Second
 	// finalWait bounds the wait for the workers (and the scheduler) after
@@ -74,7 +76,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.shutdownDebug(debugSrv)
 	var apiSrv *http.Server
 	if a.cfg.Process.Has(RoleAPI) {
-		h := api.NewRouter()
+		h := a.api.Handler()
 		if a.apiHandler != nil {
 			h = a.apiHandler
 		}
@@ -224,13 +226,16 @@ func waitFor(done <-chan struct{}, d time.Duration) bool {
 	}
 }
 
-// newServer returns the server for h. The debug server also bounds writes and
-// idle connections; the API keeps no write timeout (long requests and event
-// streams belong to it).
+// newServer returns the server for h. The debug server also bounds writes;
+// the API has no write timeout (the audit export and event streams are long
+// responses: each route sets its own deadline, and in-flight handlers end
+// with their request contexts at shutdown) but caps its headers.
 func (a *App) newServer(h http.Handler, debug bool) *http.Server {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: readHeaderTimeout}
 	if debug {
 		srv.WriteTimeout, srv.IdleTimeout = debugWriteTimeout, debugIdleTimeout
+	} else {
+		srv.IdleTimeout, srv.MaxHeaderBytes = apiIdleTimeout, apiMaxHeaderBytes
 	}
 	return srv
 }

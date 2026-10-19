@@ -36,7 +36,8 @@ dev-down:
 spike:
 	go run -C backend ./cmd/spike -base https://localhost:$(OCIS_DEV_PORT) $(ARGS)
 
-# the sidecar listens on :9300 (nginx routes /agent-api/ to it). Local state and a stable dev master key
+# the sidecar listens on :9300 and serves the REST API under /agent-api/v1 (nginx routes /agent-api/ to it;
+# state-changing requests must come from AGENT_ALLOWED_ORIGIN, default the oCIS URL). Local state and a stable dev master key
 # live in backend/bin/data (git-ignored); delete that directory to reset. Never use this key elsewhere.
 # AGENT_ROLES defaults to the api role only here: the default (api,worker) needs a model provider, which the
 # worker role refuses to start without. To run the workers and the scheduler too, export AGENT_ROLES=api,worker
