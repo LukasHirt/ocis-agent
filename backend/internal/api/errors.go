@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
@@ -31,7 +32,10 @@ var errorMessages = map[string]string{
 	"job_ended":              "The job has already ended.",
 	"stale_arguments":        "The action is not the one you were shown; reload it.",
 	"already_decided":        "This approval has already been decided.",
-	"limit_reached":          "The job has reached its limit of actions.",
+	"limit_reached":          "A limit has been reached.",
+	"not_enrolled":           "You are not enrolled; enrol first.",
+	"budget_exhausted":       "Today's token budget is used up; it resets at midnight UTC.",
+	"too_many_pending":       "Too many messages are still waiting for an answer; try again later.",
 	"credentials_invalid":    "The agent has no valid credentials for you; enrol again.",
 	"expired":                "This has expired.",
 	"too_large":              "The request body is too large.",
@@ -71,6 +75,23 @@ var (
 	errAlreadyExists        = newAPIError(http.StatusConflict, "already_exists")
 	errNotText              = newAPIError(http.StatusUnprocessableEntity, "not_text")
 )
+
+// Errors of chat.
+var (
+	errNotEnrolled     = newAPIError(http.StatusConflict, "not_enrolled")
+	errTooManyPending  = newAPIError(http.StatusTooManyRequests, "too_many_pending")
+	errBudgetExhausted = newAPIError(http.StatusTooManyRequests, "budget_exhausted")
+)
+
+// retryAfter is an error whose response carries Retry-After (whole seconds,
+// at least 1). The handler sets the header (retryAfterHeader) before
+// returning it to the mapper.
+type retryAfter struct {
+	*apiError
+	wait time.Duration
+}
+
+func (e *retryAfter) Unwrap() error { return e.apiError }
 
 // Errors of approval decisions.
 var (
@@ -112,7 +133,7 @@ func classify(err error) (int, string) {
 		return http.StatusRequestEntityTooLarge, "too_large"
 	case errors.Is(err, approvals.ErrJobEnded):
 		return http.StatusConflict, "job_ended"
-	case errors.Is(err, approvals.ErrActionLimit):
+	case errors.Is(err, approvals.ErrActionLimit), errors.Is(err, store.ErrLimit):
 		return http.StatusConflict, "limit_reached"
 	case errors.Is(err, auth.ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthenticated"

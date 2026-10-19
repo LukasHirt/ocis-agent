@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
@@ -38,6 +39,11 @@ func TestErrorMappingTable(t *testing.T) {
 		{store.ErrExpired, 410, "expired"},
 		{approvals.ErrJobEnded, 409, "job_ended"},
 		{approvals.ErrActionLimit, 409, "limit_reached"},
+		{store.ErrLimit, 409, "limit_reached"},
+		{errNotEnrolled, 409, "not_enrolled"},
+		{errTooManyPending, 429, "too_many_pending"},
+		{errBudgetExhausted, 429, "budget_exhausted"},
+		{&retryAfter{apiError: errBudgetExhausted, wait: time.Hour}, 429, "budget_exhausted"},
 		{auth.ErrUnauthenticated, 401, "unauthenticated"},
 		{auth.ErrNoLoginName, 422, "no_login_name"},
 		{auth.ErrCredentialInvalid, 409, "credentials_invalid"},

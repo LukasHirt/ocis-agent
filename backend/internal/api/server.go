@@ -122,6 +122,7 @@ type Server struct {
 	// field for tests
 	exportPageDeadline time.Duration
 	actions            *cooldown // enrol, renew, revoke, revoke-all per user
+	messages           *cooldown // sent chat messages per user
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
@@ -160,6 +161,7 @@ func NewServer(d Deps) (*Server, error) {
 		userLm:   newLimiter(d.Cfg.RatePerSecond, d.Cfg.Burst, maxLimiterKeys, d.Now),
 		seen:     newSeenThrottle(seenEvery, maxLimiterKeys, d.Now),
 		actions:  newCooldown(actionCooldown, maxLimiterKeys, d.Now),
+		messages: newCooldown(messageCooldown, maxLimiterKeys, d.Now),
 
 		baseTimeout:        defaultTimeout,
 		exportPageDeadline: exportPageDeadline,
@@ -200,6 +202,13 @@ func (s *Server) routes() {
 	s.handle("PUT /agent-api/v1/memory/{name}", s.putMemory, withMaxBody(memoryMaxBody))
 	s.handle("PUT /agent-api/v1/memory/notes/{slug}", s.putMemory, withMaxBody(memoryMaxBody))
 	s.handle("POST /agent-api/v1/memory", s.createMemory, withMaxBody(memoryMaxBody))
+	s.handle("POST /agent-api/v1/conversations", s.createConversation)
+	s.handle("GET /agent-api/v1/conversations", s.listConversations)
+	s.handle("GET /agent-api/v1/conversations/{id}", s.getConversation)
+	s.handle("PUT /agent-api/v1/conversations/{id}", s.renameConversation)
+	s.handle("DELETE /agent-api/v1/conversations/{id}", s.deleteConversation)
+	s.handle("GET /agent-api/v1/conversations/{id}/messages", s.listMessages)
+	s.handle("POST /agent-api/v1/conversations/{id}/messages", s.sendMessage, withMaxBody(chatMessageMaxBody))
 	s.handle("GET /agent-api/v1/audit", s.listAudit)
 	s.handle("GET /agent-api/v1/audit/verify", s.verifyAudit)
 	s.handle("GET /agent-api/v1/audit/export", s.exportAudit, withTimeout(auditExportDeadline))

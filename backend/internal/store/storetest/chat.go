@@ -571,6 +571,35 @@ func runMessages(t *testing.T, f Factory) {
 		})
 	})
 
+	t.Run("a message's list key is found only in its own conversation of its own user", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		mustUser(t, st, "u2")
+		c := addConv(t, st, "u1", "c")
+		other := addConv(t, st, "u1", "other")
+		c2 := addConv(t, st, "u2", "c2")
+		clk.Advance(time.Second)
+		m := addMsg(t, st, "u1", c.ID, store.RoleUser, "hi", "")
+		f2 := addMsg(t, st, "u2", c2.ID, store.RoleUser, "foreign", "")
+		_ = viewErr(st, func(tx store.Tx) error {
+			k, err := tx.GetMessageKey("u1", c.ID, m.ID)
+			if err != nil || k.ID != m.ID || !k.At.Equal(m.CreatedAt) {
+				t.Errorf("own key = %+v, %v (message %+v)", k, err, m)
+			}
+			for name, args := range map[string][3]string{
+				"other conversation": {"u1", other.ID, m.ID},
+				"other user":         {"u2", c.ID, m.ID},
+				"foreign message":    {"u1", c.ID, f2.ID},
+				"unknown":            {"u1", c.ID, "nope"},
+			} {
+				if _, err := tx.GetMessageKey(args[0], args[1], args[2]); !errors.Is(err, store.ErrNotFound) {
+					t.Errorf("%s: %v", name, err)
+				}
+			}
+			return nil
+		})
+	})
+
 	t.Run("a multi-page walk sees every message once while rows change", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u1")

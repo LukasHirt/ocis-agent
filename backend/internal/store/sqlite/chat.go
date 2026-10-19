@@ -215,6 +215,20 @@ func (t *tx) ListMessages(userID, conversationID string, f store.MessageFilter) 
 		cond+` ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
 }
 
+// GetMessageKey implements store.Tx.
+func (t *tx) GetMessageKey(userID, conversationID, id string) (store.PageKey, error) {
+	var at int64
+	err := t.q.QueryRowContext(t.ctx, `SELECT created_at FROM messages WHERE id = ? AND user_id = ? AND conversation_id = ?`,
+		id, userID, conversationID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.PageKey{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.PageKey{}, fmt.Errorf("sqlite: get message key: %w", err)
+	}
+	return store.PageKey{At: fromMS(at), ID: id}, nil
+}
+
 // ListRecentMessages implements store.Tx.
 func (t *tx) ListRecentMessages(userID, conversationID string, n int, excludeJobID string) ([]store.Message, error) {
 	if n <= 0 {

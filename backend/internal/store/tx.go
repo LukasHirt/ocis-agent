@@ -274,6 +274,10 @@ type Tx interface {
 	// ListMessages returns the conversation's messages, newest first.
 	// ErrNotFound if the conversation is not the user's.
 	ListMessages(userID, conversationID string, f MessageFilter) ([]Message, error)
+	// GetMessageKey returns the list position (CreatedAt and ID) of a
+	// message of the user's conversation, without its content, or
+	// ErrNotFound (also for a message of another conversation or user).
+	GetMessageKey(userID, conversationID, id string) (PageKey, error)
 	// ListRecentMessages returns the last n (1..MaxRecentMessages, larger
 	// values are capped) messages of role user or assistant, oldest first,
 	// leaving out the messages that belong to excludeJobID (if not empty).

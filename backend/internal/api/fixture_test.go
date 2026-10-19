@@ -259,7 +259,8 @@ func newFixture(t *testing.T, mod ...func(*Deps)) *fixture {
 		t.Fatalf("NewServer: %v", err)
 	}
 	f.srv = srv
-	srv.actions.every = 0 // tests that need the cooldown turn it on
+	srv.actions.every = 0  // tests that need the cooldown turn it on
+	srv.messages.every = 0 // likewise
 	testRoutes(srv)
 	f.h = srv.Handler()
 	return f

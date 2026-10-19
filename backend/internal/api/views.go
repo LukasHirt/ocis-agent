@@ -282,3 +282,43 @@ type auditExportView struct {
 	PrevHash string `json:"prev_hash"`
 	Hash     string `json:"hash"`
 }
+
+// Chat views. A conversation's title is the user's own text or the start of
+// their first message: untrusted text. Message content is the user's text
+// (role user) or model output and fixed runner texts (assistant, system):
+// untrusted, capped at maxAnswerView per message.
+
+type conversationView struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"` // untrusted
+	CreatedAt *string `json:"created_at"`
+	UpdatedAt *string `json:"updated_at"`
+}
+
+type messageView struct {
+	ID        string  `json:"id"`
+	Role      string  `json:"role"`    // user, assistant or system
+	Content   string  `json:"content"` // untrusted, capped
+	JobID     string  `json:"job_id"`  // the job that answers (user) or wrote (assistant, system) it; may be empty
+	CreatedAt *string `json:"created_at"`
+}
+
+// sentView is the 202 of POST /conversations/{id}/messages. The message is
+// accepted even while the agent is paused or the kill switch is on (the job
+// waits): agent tells the UI.
+type sentView struct {
+	Message messageView `json:"message"`
+	Job     sentJobView `json:"job"`
+	Agent   agentView   `json:"agent"`
+}
+
+type sentJobView struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+type agentView struct {
+	Paused      bool   `json:"paused"`
+	PauseReason string `json:"pause_reason"` // "" or a store.Pause* reason
+	KillSwitch  bool   `json:"kill_switch"`  // the database flag or AGENT_KILL_SWITCH
+}
