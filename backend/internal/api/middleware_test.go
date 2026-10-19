@@ -1168,3 +1168,22 @@ func TestFlushErrorsAreReturned(t *testing.T) {
 	}
 	sw.Flush() // the http.Flusher form ignores the error
 }
+
+// A validation cut off by the route's own deadline (slow oCIS) is not the
+// client's fault: refunded. Only a client that hung up stays charged.
+func TestOurOwnDeadlineIsRefunded(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	f.srv.handle("GET /agent-api/v1/test/short", func(w http.ResponseWriter, r *http.Request) error {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return nil
+	}, withTimeout(30*time.Millisecond))
+	f.v.delay = 200 * time.Millisecond
+	for i := range 3 * ipBurstFactor {
+		r := f.req(http.MethodGet, "/agent-api/v1/test/short", "")
+		r.Header.Set("Authorization", "Bearer first-login-token")
+		r.RemoteAddr = "10.0.0.1:1"
+		if c := f.serve(r).Code; c != 503 {
+			t.Fatalf("request %d: %d, want 503 (never 429)", i, c)
+		}
+	}
+}

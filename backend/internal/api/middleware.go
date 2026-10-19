@@ -36,7 +36,8 @@ import (
 //     before auth, so a cross-site request never reaches token validation
 //  6. Authorization: Bearer <token>, validated by oCIS (TokenValidator); a
 //     missing, malformed or rejected token stays charged to the IP, as does a
-//     request whose own context ended; success and oCIS failures refund
+//     request whose client hung up; success, oCIS failures and the route's
+//     own deadline refund
 //  7. per-user rate limit
 //  8. Seen(userID), at most once a minute per user (seen.go), also for a
 //     user who has not enrolled; a failure is logged and ignored, and
@@ -259,7 +260,8 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		ri := infoFrom(r.Context())
 		ri.route, ri.maxBody = pattern, rc.maxBody
 
-		ctx, cancel := context.WithTimeout(r.Context(), rc.timeout)
+		parent := r.Context() // ends when the client goes away
+		ctx, cancel := context.WithTimeout(parent, rc.timeout)
 		defer cancel()
 		setDeadlines(w, rc.timeout)
 		r = r.WithContext(ctx)
@@ -317,12 +319,12 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 					if !reserved {
 						s.authFail.charge(ipKey) // a known token that oCIS now rejects
 					}
-				case ctx.Err() != nil:
-					// the request's own context ended (the client hung up or
-					// the deadline passed): the reservation stays charged, or
-					// hanging up would make validation free
+				case parent.Err() != nil:
+					// the client hung up: the reservation stays charged, or
+					// hanging up right away would make validation free (the
+					// route's own deadline, a slow oCIS, is refunded below)
 				default:
-					refund() // an oCIS outage or a 422 is not the client's failure
+					refund() // an oCIS outage, our deadline or a 422 is not the client's failure
 				}
 				writeCode(w, r, st, code)
 				return

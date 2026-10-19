@@ -21,8 +21,9 @@ const maxLimiterKeys = 10000
 // concurrency cannot multiply Graph calls. The reservation is refunded on
 // success and on failures that are not the client's (an oCIS outage, a 422,
 // a cross-site request refused before validation), and kept for a missing,
-// malformed or rejected bearer and for a request whose own context ended
-// (a client that hangs up right away pays like one that waits). Cached and
+// malformed or rejected bearer and for a request whose client hung up (one
+// that hangs up right away pays like one that waits); the route's own
+// deadline (a slow oCIS) is refunded. Cached and
 // known tokens reserve nothing; a known token that oCIS now rejects is
 // charged and forgotten. Successful requests never drain the bucket.
 //
