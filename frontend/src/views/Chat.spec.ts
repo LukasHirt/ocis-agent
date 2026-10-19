@@ -108,6 +108,31 @@ describe('Chat', () => {
     expect(document.activeElement).toBe(w.find('textarea').element)
   })
 
+  it('brings the sent message into view even when the reader had scrolled up', async () => {
+    const proto = HTMLElement.prototype
+    const saved = Object.getOwnPropertyDescriptor(proto, 'scrollHeight')
+    Object.defineProperty(proto, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.querySelectorAll('.agent-msg').length * 200
+      }
+    })
+    try {
+      const { w } = await setup(withThread(), { id: 'c1' })
+      const el = w.find('.agent-thread-scroll').element as HTMLElement
+      el.scrollTop = 0
+      el.dispatchEvent(new Event('scroll'))
+      await w.find('textarea').setValue('next question')
+      await w.find('button.agent-composer-send').trigger('click')
+      await flushPromises()
+      expect(w.findAll('.agent-msg')).toHaveLength(3)
+      expect(el.scrollTop).toBe(600)
+    } finally {
+      if (saved) Object.defineProperty(proto, 'scrollHeight', saved)
+      else delete (proto as unknown as Record<string, unknown>).scrollHeight
+    }
+  })
+
   it('keeps the draft per conversation in memory', async () => {
     const { w } = await setup(withThread(), { id: 'c1' })
     await w.find('textarea').setValue('draft one')

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { apiErr, approvalOf } from '../test/fixtures'
+import { apiErr, approvalOf, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import {
   answer,
@@ -12,7 +12,7 @@ import {
   userMessage,
   type ChatState
 } from '../test/chat'
-import { MESSAGE_PAGE, mergeHead, useChatStore } from './chat'
+import { LOCAL_BLOCK_MAX_MS, MESSAGE_PAGE, mergeHead, useChatStore } from './chat'
 import type { Message } from '../api/types'
 
 let detach: (() => void) | undefined
@@ -275,7 +275,164 @@ describe('useChatStore', () => {
     expect(chat.needsEnrol).toBe(code === 'not_enrolled')
     expect(chat.sending).toBe(false)
     // a refused send uses the cooldown too, as long as the server says
-    expect(chat.blockedUntil).toBe(clock + Math.max(1, retry ?? 1) * 1000)
+    // ...but never longer than LOCAL_BLOCK_MAX_MS: day-long refusals are left to the server
+    expect(chat.blockedUntil).toBe(clock + Math.min(Math.max(1, retry ?? 1) * 1000, LOCAL_BLOCK_MAX_MS))
+  })
+
+  it('finishes a send that outlives a switch to another conversation', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const st = chatState({ conversations: [conversationOf('c1'), conversationOf('c2')], messages: { c1: [], c2: [] } })
+    let gated = true
+    const { chat, platform } = await setup(st, (c) =>
+      gated && c.method === 'POST' ? gate.then(() => chatHandler(st)(c)!) : undefined
+    )
+    await chat.openConversation('c1')
+    chat.draftByConversation.c1 = 'sent text'
+    const p = chat.send('sent text')
+    expect(chat.sending).toBe(true)
+    await chat.openConversation('c2')
+    expect(chat.sending).toBe(false) // c2 is not sending
+    release()
+    await p
+    expect(chat.sending).toBe(false)
+    expect(chat.draftByConversation.c1).toBeUndefined() // it was sent
+    expect(chat.sendError).toBeNull()
+    expect(chat.current).toBe('c2')
+    expect(chat.thread).toEqual([]) // c2's thread, not c1's
+    gated = false
+    platform.now.mockReturnValue(Date.UTC(2026, 0, 1, 13)) // after the cooldown
+    expect(await chat.send('in c2')).toBe(true)
+  })
+
+  it('finishes a send that outlives the deletion of its conversation', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const st = chatState({ conversations: [conversationOf('c1')], messages: { c1: [] } })
+    const { chat } = await setup(st, (c) =>
+      c.method === 'POST' ? gate.then(() => chatHandler(st)(c)!) : undefined
+    )
+    await chat.loadConversations()
+    await chat.openConversation('c1')
+    const p = chat.send('x')
+    expect(await chat.remove('c1')).toBe(true)
+    release()
+    await p
+    expect(chat.sending).toBe(false)
+    expect(chat.current).toBeNull()
+  })
+
+  it('does not show a send refusal of another conversation', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const st = chatState({ conversations: [conversationOf('c1'), conversationOf('c2')], messages: { c1: [], c2: [] } })
+    const { chat } = await setup(st, (c) =>
+      c.method === 'POST' ? gate.then(() => apiErr(503, 'unavailable')) : undefined
+    )
+    await chat.openConversation('c1')
+    chat.draftByConversation.c1 = 'keep'
+    const p = chat.send('keep')
+    await chat.openConversation('c2')
+    release()
+    await p
+    expect(chat.sendError).toBeNull()
+    expect(chat.draftByConversation.c1).toBe('keep')
+  })
+
+  it('keeps a list load that is in flight when a conversation is opened', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const st = chatState({ conversations: [conversationOf('c1')], messages: { c1: [] } })
+    const { chat } = await setup(st, (c) =>
+      c.method === 'GET' && c.path === '/conversations' ? gate.then(() => chatHandler(st)(c)!) : undefined
+    )
+    const list = chat.loadConversations()
+    await chat.openConversation('c1')
+    release()
+    await list
+    expect(ids(chat.conversations)).toEqual(['c1'])
+    expect(chat.conversationsLoaded).toBe(true)
+    expect(chat.conversationsLoading).toBe(false)
+  })
+
+  it('keeps a "load more" that is in flight when a conversation is opened', async () => {
+    const convs = Array.from({ length: 60 }, (_, i) => conversationOf('c' + i))
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const st = chatState({ conversations: convs, messages: { c0: [] } })
+    const { chat } = await setup(st, (c) =>
+      c.method === 'GET' && c.path === '/conversations' && c.query.has('cursor')
+        ? gate.then(() => chatHandler(st)(c)!)
+        : undefined
+    )
+    await chat.loadConversations()
+    const more = chat.loadMoreConversations()
+    await chat.openConversation('c0')
+    release()
+    await more
+    expect(chat.conversations).toHaveLength(60)
+    expect(chat.conversationsLoading).toBe(false)
+  })
+
+  it('reads the list from the top again when the cursor became unknown', async () => {
+    const convs = Array.from({ length: 60 }, (_, i) => conversationOf('c' + i))
+    const st = chatState({ conversations: convs })
+    const { chat } = await setup(st)
+    await chat.loadConversations()
+    expect(chat.conversationsCursor).toBe('c49')
+    st.conversations = st.conversations.filter((c) => c.id !== 'c49') // deleted elsewhere: 400 for the cursor
+    await chat.loadMoreConversations()
+    expect(ids(chat.conversations)).toEqual(ids(st.conversations.slice(0, 50)))
+    expect(chat.conversationsCursor).toBe('c50')
+    expect(chat.conversationsError).toBeNull()
+    await chat.loadMoreConversations()
+    expect(ids(chat.conversations)).toEqual(ids(st.conversations))
+  })
+
+  it('drops a long local block when the settings or the budget change', async () => {
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: { c1: [] },
+      failSend: errWithRetry(429, 'budget_exhausted', 3600)
+    })
+    const { chat, events, store } = await setup(st)
+    await chat.openConversation('c1')
+    await chat.send('x')
+    expect(chat.blockedUntil).toBeGreaterThan(0)
+    await events().onChanged(['settings'])
+    expect(chat.blockedUntil).toBe(0)
+    await chat.send('x')
+    expect(chat.blockedUntil).toBeGreaterThan(0)
+    store.status = statusOf({ budget: { used_tokens: 0, daily_tokens: 500000, resets_at: null } })
+    await flushPromises()
+    expect(chat.blockedUntil).toBe(0)
+  })
+
+  it('refreshes the inline approvals on an activity change', async () => {
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: { c1: [userMessage('m1', { id: 'j1', state: 'waiting_approval', error: '' })] },
+      approvals: { j1: [approvalOf('a1', { job_id: 'j1' }), approvalOf('a2', { job_id: 'j1' })] }
+    })
+    const { chat, events } = await setup(st)
+    await chat.openConversation('c1')
+    await flushPromises()
+    expect(chat.jobApprovals.j1?.items).toHaveLength(2)
+    st.approvals.j1 = [approvalOf('a2', { job_id: 'j1' })] // a1 was decided
+    await events().onChanged(['activity'])
+    await flushPromises()
+    expect(chat.jobApprovals.j1?.items.map((a) => a.id)).toEqual(['a2'])
+  })
+
+  it('enrol clears the not_enrolled refusal', async () => {
+    const st = chatState({ conversations: [conversationOf('c1')], messages: { c1: [] }, failSend: apiErr(409, 'not_enrolled') })
+    const { chat } = await setup(st, (c) => (c.method === 'POST' && c.path === '/enroll' ? json(statusOf()) : undefined))
+    await chat.openConversation('c1')
+    await chat.send('x')
+    expect(chat.sendError?.code).toBe('not_enrolled')
+    expect(await chat.enrol()).toBe(true)
+    expect(chat.sendError).toBeNull()
+    expect(chat.needsEnrol).toBe(false)
   })
 
   it('remembers why nothing runs after a 202 for the sent message', async () => {

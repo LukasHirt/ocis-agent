@@ -108,6 +108,21 @@ describe('ConversationList', () => {
     expect(w.find('.agent-conv-title').text()).toBe('New name')
   })
 
+  it('does not save a rename on the Enter of an IME composition', async () => {
+    const st = chatState({ conversations: [conversationOf('c1', { title: 'Old' })] })
+    const { w, server } = await setup(st)
+    await w.find('button[aria-label="Rename Old"]').trigger('click')
+    const input = w.find('.agent-conv-rename input')
+    await input.setValue('漢字')
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    const commit = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
+    Object.defineProperty(commit, 'keyCode', { value: 229 })
+    input.element.dispatchEvent(commit)
+    await flushPromises()
+    expect(server.calls.filter((c) => c.method === 'PUT')).toHaveLength(0)
+    expect(w.find('.agent-conv-rename').exists()).toBe(true)
+  })
+
   it('cancels a rename with Escape or the button', async () => {
     const st = chatState({ conversations: [conversationOf('c1', { title: 'Old' })] })
     const { w, server } = await setup(st)

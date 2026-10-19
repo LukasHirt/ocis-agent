@@ -89,4 +89,24 @@ describe('Thread', () => {
     expect(el.scrollTop).toBe(50)
     w.unmount()
   })
+
+  it('shows the newest messages when mounted with a loaded page', async () => {
+    const proto = HTMLElement.prototype
+    const saved = Object.getOwnPropertyDescriptor(proto, 'scrollHeight')
+    Object.defineProperty(proto, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.querySelectorAll('.agent-msg').length * 200
+      }
+    })
+    try {
+      const w = mountThread([messageOf('m1'), messageOf('m2'), messageOf('m3')])
+      await nextTick()
+      expect((w.find('.agent-thread-scroll').element as HTMLElement).scrollTop).toBe(600)
+      w.unmount()
+    } finally {
+      if (saved) Object.defineProperty(proto, 'scrollHeight', saved)
+      else delete (proto as unknown as Record<string, unknown>).scrollHeight
+    }
+  })
 })

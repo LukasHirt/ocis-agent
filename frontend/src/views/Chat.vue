@@ -36,6 +36,8 @@
         />
         <Thread
           v-if="chat.messagesLoaded"
+          :key="chat.current ?? ''"
+          ref="threadView"
           :messages="chat.thread"
           :notices="chat.notices"
           :job-approvals="chat.jobApprovals"
@@ -123,10 +125,12 @@ const draft = computed({
 })
 
 const composer = ref<{ focus: () => void } | null>(null)
+const threadView = ref<{ toBottom: () => void } | null>(null)
 
 const send = async () => {
-  await chat.send(draft.value)
+  const sent = await chat.send(draft.value)
   await nextTick()
+  if (sent) threadView.value?.toBottom() // the new message, even when reading above
   composer.value?.focus() // the box was disabled while sending
 }
 

@@ -76,7 +76,10 @@ const trySend = () => {
 }
 
 const onKeydown = (e: KeyboardEvent) => {
-  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return
+  // an Enter that commits an IME composition is not a send (Safari sends
+  // it with isComposing false but keyCode 229)
+  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
+  if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()
   trySend()
 }

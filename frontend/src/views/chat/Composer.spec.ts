@@ -34,6 +34,12 @@ describe('Composer', () => {
     const ta = w.find('textarea')
     ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, cancelable: true }))
     expect(w.emitted('send')).toBeUndefined()
+    // Safari commits a composition with an Enter of keyCode 229 and isComposing false
+    const commit = new KeyboardEvent('keydown', { key: 'Enter', cancelable: true })
+    Object.defineProperty(commit, 'keyCode', { value: 229 })
+    ta.element.dispatchEvent(commit)
+    expect(w.emitted('send')).toBeUndefined()
+    expect(commit.defaultPrevented).toBe(false)
     await w.setProps({ sending: true })
     ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
     expect(w.emitted('send')).toBeUndefined()

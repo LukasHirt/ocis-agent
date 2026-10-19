@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, reactive, ref, shallowRef } from 'vue'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
 import { ApiError, describeError, isAbortError } from '../api/errors'
 import type { Approval, Conversation, JobState, Message, PauseReason, Sent } from '../api/types'
@@ -12,6 +12,9 @@ export const MESSAGE_PAGE = 50
 export const JOB_APPROVALS_LIMIT = 20
 // The server's per-user pause between two sends; a refused send uses it too.
 export const SEND_COOLDOWN_MS = 1_000
+// A Retry-After blocks sending locally for at most this long; after that
+// the server decides again (a budget raised in the settings counts at once).
+export const LOCAL_BLOCK_MAX_MS = 60_000
 
 // Why the agent will not answer a message right away, from the 202.
 export type AgentNotice = 'paused' | 'killed' | 'credentials'
@@ -119,7 +122,8 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
 
   const conversations = shallowRef<Conversation[]>([])
   const conversationsCursor = ref<string | null>(null)
-  const conversationsLoading = ref(false)
+  const listBusy = ref(0) // list reads in flight
+  const conversationsLoading = computed(() => listBusy.value > 0)
   const conversationsLoaded = ref(false)
   const conversationsError = ref<string | null>(null)
 
@@ -134,7 +138,10 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   const olderError = ref<string | null>(null)
   const missing = ref(false) // the open conversation does not exist (any more)
 
-  const sending = ref(false)
+  // the conversations with a send in flight: a send outlives switching
+  // to (or deleting) its conversation, and blocks only its own composer
+  const sendingIn = reactive(new Set<string>())
+  const sending = computed(() => current.value !== null && sendingIn.has(current.value))
   const sendError = shallowRef<SendError | null>(null)
   const blockedUntil = ref(0)
   const needsEnrol = ref(false)
@@ -150,7 +157,11 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   )
 
   let bound: SessionHandle | null = null // the session the data belongs to
-  let gen = 0 // grows on reset and on every open: older answers are dropped
+  // Answers are dropped when their generation moved on: sessionGen grows
+  // on reset only (the list and the sends), threadGen also on every open
+  // and close (the open conversation's messages and approvals).
+  let sessionGen = 0
+  let threadGen = 0
 
   // session returns the running session, resetting the data first if it
   // belongs to an earlier one.
@@ -174,22 +185,34 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     conversationsCursor.value = r.cursor
   }
 
+  // replaceNext makes the next first-page read replace the list instead of
+  // merging (after the cursor became unknown)
+  let replaceNext = false
+
   const conversationsRefresh = coalesce(async () => {
     const s = session()
     if (!s) return
-    const g = gen
-    conversationsLoading.value = true
+    const g = sessionGen
+    const replace = replaceNext
+    replaceNext = false
+    listBusy.value++
     try {
       const v = await s.client.listConversations({ limit: CONVERSATION_PAGE }, s.signal)
-      if (g !== gen) return
-      applyConversations(listOf<Conversation>(v, 'conversations'))
+      if (g !== sessionGen) return
+      const head = listOf<Conversation>(v, 'conversations')
+      if (replace) {
+        conversations.value = head.items
+        conversationsCursor.value = head.next
+      } else {
+        applyConversations(head)
+      }
       conversationsError.value = null
       conversationsLoaded.value = true
     } catch (e) {
-      if (g !== gen || isAbortError(e)) return
+      if (g !== sessionGen || isAbortError(e)) return
       conversationsError.value = describe(s, e)
     } finally {
-      if (g === gen) conversationsLoading.value = false
+      if (g === sessionGen) listBusy.value--
     }
   })
 
@@ -203,23 +226,30 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     const s = session()
     const cursor = conversationsCursor.value
     if (!s || cursor === null) return Promise.resolve()
-    const g = gen
-    conversationsLoading.value = true
+    const g = sessionGen
+    listBusy.value++
+    let stale = false
     const p = (async () => {
       try {
         const v = await s.client.listConversations({ limit: CONVERSATION_PAGE, cursor }, s.signal)
-        if (g !== gen) return
+        if (g !== sessionGen) return
         const page = listOf<Conversation>(v, 'conversations')
         const seen = byId(conversations.value)
         conversations.value = [...conversations.value, ...page.items.filter((c) => !seen.has(c.id))]
         conversationsCursor.value = page.next
         conversationsError.value = null
       } catch (e) {
-        if (g !== gen || isAbortError(e)) return
-        conversationsError.value = describe(s, e)
+        if (g !== sessionGen || isAbortError(e)) return
+        // the cursor's conversation is gone (or moved): read from the top
+        if (e instanceof ApiError && e.status === 400) stale = true
+        else conversationsError.value = describe(s, e)
       } finally {
-        if (g === gen) conversationsLoading.value = false
+        if (g === sessionGen) listBusy.value--
         moreInflight = null
+      }
+      if (stale && g === sessionGen) {
+        replaceNext = true
+        await conversationsRefresh()
       }
     })()
     moreInflight = p
@@ -272,12 +302,12 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
           .listApprovals({ jobId, limit: JOB_APPROVALS_LIMIT }, s.signal)
           .then(
             (v) => {
-              if (g !== gen) return
+              if (g !== threadGen) return
               const page = listOf<Approval>(v, 'approvals')
               jobApprovals[jobId] = { items: page.items, more: page.next !== null, error: null }
             },
             (e: unknown) => {
-              if (g !== gen || isAbortError(e)) return
+              if (g !== threadGen || isAbortError(e)) return
               const prev = jobApprovals[jobId]
               jobApprovals[jobId] = { items: prev?.items ?? [], more: prev?.more ?? false, error: describe(s, e) }
             }
@@ -293,11 +323,11 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     const s = session()
     const id = current.value
     if (!s || id === null) return
-    const g = gen
+    const g = threadGen
     messagesLoading.value = true
     try {
       const v = await s.client.listMessages(id, { limit: MESSAGE_PAGE }, s.signal)
-      if (g !== gen) return
+      if (g !== threadGen) return
       const r = mergeHead(messages.value, listOf<Message>(v, 'messages'), olderCursor.value)
       messages.value = r.items
       olderCursor.value = r.cursor
@@ -305,7 +335,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
       messagesLoaded.value = true
       missing.value = false
     } catch (e) {
-      if (g !== gen || isAbortError(e)) return
+      if (g !== threadGen || isAbortError(e)) return
       if (e instanceof ApiError && e.status === 404) {
         missing.value = true
         messages.value = []
@@ -317,7 +347,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
       }
       return
     } finally {
-      if (g === gen) messagesLoading.value = false
+      if (g === threadGen) messagesLoading.value = false
     }
     await loadJobApprovals(s, g)
   })
@@ -330,20 +360,20 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   // the one shown before are dropped.
   const openConversation = async (id: string): Promise<void> => {
     if (!session()) return
-    gen++
+    threadGen++
     threadRefresh.clear()
     approvalsInflight.clear()
     clearThread()
     current.value = id
     sendError.value = null
     actionError.value = null
-    const g = gen
+    const g = threadGen
     const s = session()!
     if (!conversations.value.some((c) => c.id === id)) {
       // opened by its address: read its title
       s.client.getConversation(id, s.signal).then(
         (c) => {
-          if (g === gen && c && typeof c.id === 'string') detail.value = c
+          if (g === threadGen && c && typeof c.id === 'string') detail.value = c
         },
         () => {} // the messages tell whether it exists
       )
@@ -352,7 +382,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   }
 
   const closeConversation = () => {
-    gen++
+    threadGen++
     threadRefresh.clear()
     approvalsInflight.clear()
     clearThread()
@@ -365,21 +395,21 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     const id = current.value
     const cursor = olderCursor.value
     if (!s || id === null || cursor === null || olderLoading.value) return
-    const g = gen
+    const g = threadGen
     olderLoading.value = true
     olderError.value = null
     try {
       const v = await s.client.listMessages(id, { limit: MESSAGE_PAGE, cursor }, s.signal)
-      if (g !== gen) return
+      if (g !== threadGen) return
       const page = listOf<Message>(v, 'messages')
       const seen = byId(messages.value)
       messages.value = [...messages.value, ...page.items.filter((m) => !seen.has(m.id))]
       olderCursor.value = page.next
     } catch (e) {
-      if (g !== gen || isAbortError(e)) return
+      if (g !== threadGen || isAbortError(e)) return
       olderError.value = describe(s, e)
     } finally {
-      if (g === gen) olderLoading.value = false
+      if (g === threadGen) olderLoading.value = false
     }
   }
 
@@ -438,14 +468,16 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     return { ...base, message: describe(s, e) }
   }
 
-  // send sends text to the open conversation. It refuses while a send is
-  // in flight or the cooldown runs, and text the server would refuse. After
-  // the 202 the draft is cleared and the thread read again; on a refusal
-  // the draft stays and sendError has the fixed text.
+  // send sends text to the open conversation. It refuses while a send to
+  // it is in flight or the cooldown runs, and text the server would refuse.
+  // After the 202 the draft is cleared and the thread read again; on a
+  // refusal the draft stays and sendError has the fixed text. A send
+  // outlives switching away: its draft is still cleared on the 202, but its
+  // refusal is not shown in another conversation.
   const send = async (text: string): Promise<boolean> => {
     const s = session()
     const id = current.value
-    if (!s || id === null || sending.value) return false
+    if (!s || id === null || sendingIn.has(id)) return false
     const problem = checkMessage(text)
     if (problem) {
       sendError.value = { code: problem, message: textProblem(s, problem) }
@@ -460,34 +492,37 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
       }
       return false
     }
-    const g = gen
-    sending.value = true
+    const g = sessionGen
+    sendingIn.add(id)
     sendError.value = null
     try {
       const res = await s.client.sendMessage(id, text, s.signal)
-      if (g !== gen) return false
+      if (g !== sessionGen) return false
       blockedUntil.value = s.platform.now() + SEND_COOLDOWN_MS
       delete draftByConversation[id]
       needsEnrol.value = false
       const notice = noticeOf(res?.agent)
       const mid = res?.message?.id
       if (notice && typeof mid === 'string') notices[mid] = notice
-      await Promise.all([threadRefresh(), conversationsRefresh()])
+      await Promise.all([current.value === id ? threadRefresh() : undefined, conversationsRefresh()])
       return true
     } catch (e) {
-      if (g !== gen || isAbortError(e)) return false
+      if (g !== sessionGen || isAbortError(e)) return false
       const err = sendErrorOf(s, e)
       const wait = e instanceof ApiError && e.status === 429 && e.retryAfter !== undefined ? e.retryAfter * 1000 : 0
-      blockedUntil.value = s.platform.now() + Math.max(SEND_COOLDOWN_MS, wait)
+      // the server's word on long refusals (the daily cap, the budget) can
+      // change sooner (settings): hold at most LOCAL_BLOCK_MAX_MS locally
+      blockedUntil.value = s.platform.now() + Math.min(Math.max(SEND_COOLDOWN_MS, wait), LOCAL_BLOCK_MAX_MS)
       if (err.code === 'not_enrolled') needsEnrol.value = true
+      const open = current.value === id
       if (e instanceof ApiError && e.status === 404) {
-        missing.value = true
+        if (open) missing.value = true
         dropConversation(id)
       }
-      sendError.value = err
+      if (open) sendError.value = err
       return false
     } finally {
-      if (g === gen) sending.value = false
+      if (g === sessionGen) sendingIn.delete(id)
     }
   }
 
@@ -601,6 +636,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
       await agent.enrol()
       needsEnrol.value = false
       actionError.value = null
+      sendError.value = null
       return true
     } catch (e) {
       if (bound === s && !isAbortError(e)) actionError.value = describe(s, e)
@@ -611,6 +647,20 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   // --- live updates
 
   const hasLiveJob = () => messages.value.some((m) => isLiveJob(m.job?.state))
+  const hasWaitingJob = () =>
+    messages.value.some((m) => m.job?.state === ('waiting_approval' satisfies JobState))
+
+  // unblock lets the next send ask the server again (the settings or the
+  // budget changed, so a budget refusal may no longer hold)
+  const unblock = () => {
+    blockedUntil.value = 0
+  }
+  watch(
+    () => agent.status?.budget?.daily_tokens,
+    (now, before) => {
+      if (before !== undefined && now !== before) unblock()
+    }
+  )
 
   const onEvent = async (e: StoreEvent) => {
     if (e.type === 'reset') {
@@ -624,9 +674,14 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
       if (current.value !== null) work.push(threadRefresh())
     } else {
       const msgs = e.kinds.includes('messages')
+      if (e.kinds.includes('settings')) unblock()
       if (msgs) work.push(conversationsRefresh())
       if (current.value !== null && (msgs || (e.kinds.includes('jobs') && hasLiveJob()))) {
         work.push(threadRefresh())
+      } else if (current.value !== null && e.kinds.includes('activity') && hasWaitingJob()) {
+        // a decided approval moves the activity mark, not always the job
+        const s = session()
+        if (s) work.push(loadJobApprovals(s, threadGen))
       }
     }
     await Promise.all(work)
@@ -642,19 +697,21 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   // reset forgets everything, drafts too: a later session may be another
   // user's.
   const reset = () => {
-    gen++
+    sessionGen++
+    threadGen++
     conversationsRefresh.clear()
     threadRefresh.clear()
     approvalsInflight.clear()
     moreInflight = null
     conversations.value = []
     conversationsCursor.value = null
-    conversationsLoading.value = false
+    listBusy.value = 0
+    replaceNext = false
     conversationsLoaded.value = false
     conversationsError.value = null
     clearThread()
     current.value = null
-    sending.value = false
+    sendingIn.clear()
     sendError.value = null
     blockedUntil.value = 0
     needsEnrol.value = false

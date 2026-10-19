@@ -39,6 +39,10 @@ const serve = (
     if (r) return r
     if (c.method === 'GET' && c.path === '/approvals' && !c.query.has('cursor')) {
       const state = c.query.get('state')
+      const job = c.query.get('job_id')
+      if (state === null && job !== null) {
+        return json({ approvals: (lists.pending ?? []).filter((a) => a.job_id === job), next_cursor: null })
+      }
       if (state === null) return json({ approvals: lists.pending ?? [], next_cursor: null })
       if (state === 'unknown') return json({ approvals: lists.unknown ?? [], next_cursor: null })
     }
@@ -77,15 +81,51 @@ describe('Approvals', () => {
   })
 
   it('shows only the approvals of one job when filtered, with a way back to all', async () => {
-    const { w } = await setup(
+    const { w, server } = await setup(
       serve({ pending: [approvalOf('a1', { job_id: 'j1' }), approvalOf('a2', { job_id: 'j2' })] }),
       { job: 'j2' }
     )
     expect(w.findAll('.agent-group')).toHaveLength(1)
+    expect(w.findAll('.agent-group .agent-card')).toHaveLength(1)
+    const q = server.calls.find((c) => c.path === '/approvals' && c.query.has('job_id'))!.query
+    expect(q.get('job_id')).toBe('j2')
     expect(w.find('.agent-approvals-filter').text()).toContain('Showing the approvals of one task.')
     const all = w.find('.agent-approvals-filter a')
     expect(all.text()).toBe('Show all approvals')
     expect(JSON.parse(all.attributes('data-to')!)).toEqual({ name: 'agent-approvals' })
+  })
+
+  it('reads a filtered job from the API, beyond the loaded pages', async () => {
+    // the inbox list (cut off) does not hold j9's approval; the job filter does
+    const { w } = await setup(
+      serve({ pending: [approvalOf('a1', { job_id: 'j1' }), approvalOf('a9', { job_id: 'j9' })] }, {}, (c) =>
+        c.path === '/approvals' && !c.query.has('job_id') && c.query.get('state') === null
+          ? json({ approvals: [approvalOf('a1', { job_id: 'j1' })], next_cursor: 'more' })
+          : undefined
+      ),
+      { job: 'j9' }
+    )
+    expect(w.findAll('.agent-group')).toHaveLength(1)
+    expect(w.findAll('.agent-group .agent-card')).toHaveLength(1)
+    expect(w.text()).not.toContain('Nothing of this task needs your approval')
+  })
+
+  it('shows a failed job filter read with a retry, not an empty claim', async () => {
+    let fail = true
+    const { w } = await setup(
+      serve({ pending: [] }, {}, (c) =>
+        fail && c.path === '/approvals' && c.query.has('job_id') ? apiErr(503, 'unavailable') : undefined
+      ),
+      { job: 'j1' }
+    )
+    expect(w.text()).not.toContain('Nothing of this task needs your approval')
+    expect(w.find('.agent-approvals-job-error [role=alert]').text()).toBe(
+      'The agent service is not reachable right now. Try again later.'
+    )
+    fail = false
+    await w.find('.agent-approvals-job-error button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('Nothing of this task needs your approval')
   })
 
   it('says so when the filtered job has nothing waiting', async () => {

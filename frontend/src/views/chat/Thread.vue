@@ -29,7 +29,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import MessageBubble from './MessageBubble.vue'
 import type { Message } from '../../api/types'
@@ -91,6 +91,12 @@ watch(
   },
   { flush: 'pre' }
 )
+
+// mounted with a loaded page (an open, a switch): show the newest
+onMounted(() => {
+  toBottom()
+  atBottom = true
+})
 
 defineExpose({ toBottom })
 </script>

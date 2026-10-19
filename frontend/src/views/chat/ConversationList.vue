@@ -31,8 +31,7 @@
             v-model="draft"
             :label="$gettext('Title')"
             :error-message="renameError"
-            @enter-key-down="save(c.id)"
-            @keydown="onRenameKey"
+            @keydown="(e: KeyboardEvent) => onRenameKey(e, c.id)"
           />
           <oc-button size="small" appearance="filled" :disabled="saving" @click="save(c.id)" v-text="$gettext('Save')" />
           <oc-button size="small" :disabled="saving" @click="cancel" v-text="$gettext('Cancel')" />
@@ -128,8 +127,15 @@ const cancel = () => {
   renameError.value = null
 }
 
-const onRenameKey = (e: KeyboardEvent) => {
+// The keydown listener lands on the field's root and its input, so one
+// key arrives twice: handle each event once. Enter saves, except the one
+// that commits an IME composition (keyCode 229 in Safari).
+let lastKey: KeyboardEvent | null = null
+const onRenameKey = (e: KeyboardEvent, id: string) => {
+  if (e === lastKey) return
+  lastKey = e
   if (e.key === 'Escape') cancel()
+  else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) void save(id)
 }
 
 const save = async (id: string) => {
