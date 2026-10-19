@@ -516,7 +516,7 @@ func TestAuditExportEqualsTheChain(t *testing.T) {
 		t.Errorf("from=1050: %d lines", len(part))
 	}
 	// an empty log is an empty 200
-	f.bearer = "" // alice again; carol has no events: use a user with none
+	f.bearer = "" // the default bearer (alice): from=5000 is past her last record
 	if rec := f.do(http.MethodGet, exportPath+"?from=5000", ""); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
 		t.Errorf("empty export = %d %q", rec.Code, rec.Body.String())
 	}
@@ -677,5 +677,171 @@ func TestAuditExportHasItsOwnDeadline(t *testing.T) {
 	f.do(http.MethodGet, auditPath, "")
 	if d := ts.lastDeadline(); d > time.Minute {
 		t.Errorf("list deadline in %v, want the default", d)
+	}
+}
+
+// Verify and export hold a database reader for long: one of each per user
+// and at most two in the whole process run at a time (the reader pool has
+// four connections); a refused request is 429 with Retry-After.
+func TestAuditVerifyAndExportAreCappedPerUserAndInTheProcess(t *testing.T) {
+	f, ts := newTamperFixture(t)
+	seedAudit(t, f.st, aliceID.UserID, 3, nil)
+	seedAudit(t, f.st, bobID.UserID, 3, nil)
+	started, release := make(chan string, 8), make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	defer free()
+	defer time.AfterFunc(10*time.Second, free).Stop()
+	blocking := atomic.Bool{}
+	blocking.Store(true)
+	ts.verifyHook = func(u string) error {
+		if blocking.Load() {
+			started <- "verify"
+			<-release
+		}
+		return nil
+	}
+	ts.readHook = func(int) error {
+		if blocking.Load() {
+			started <- "export"
+			<-release
+		}
+		return nil
+	}
+	as := func(tok, path string) *httptest.ResponseRecorder {
+		r := f.req(http.MethodGet, path, "")
+		r.Header.Set("Authorization", "Bearer "+tok)
+		return f.serve(r)
+	}
+	wait := func(what string) {
+		t.Helper()
+		select {
+		case got := <-started:
+			if got != what {
+				t.Fatalf("started %s, want %s", got, what)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not start", what)
+		}
+	}
+	busy := func(rec *httptest.ResponseRecorder) {
+		t.Helper()
+		wantError(t, rec, http.StatusTooManyRequests, "rate_limited")
+		if rec.Header().Get("Retry-After") == "" {
+			t.Error("no Retry-After")
+		}
+	}
+	done := make(chan *httptest.ResponseRecorder, 2)
+	go func() { done <- as(goodToken, exportPath) }()
+	wait("export")
+	busy(as(goodToken, exportPath)) // alice's second export (the process has room)
+	go func() { done <- as(goodToken, verifyPath) }()
+	wait("verify")
+	busy(as(goodToken, verifyPath))  // alice's second verification
+	busy(as(otherToken, verifyPath)) // the process cap: two are running
+	busy(as(otherToken, exportPath))
+	blocking.Store(false)
+	free()
+	for range 2 {
+		if rec := <-done; rec.Code != http.StatusOK {
+			t.Errorf("blocked request = %d", rec.Code)
+		}
+	}
+	if rec := as(otherToken, verifyPath); rec.Code != http.StatusOK {
+		t.Errorf("bob after the others finished = %d", rec.Code)
+	}
+	if rec := as(otherToken, exportPath); rec.Code != http.StatusOK {
+		t.Errorf("bob's export after the others finished = %d", rec.Code)
+	}
+}
+
+func TestHeavyLimiter(t *testing.T) {
+	var l heavyLimiter
+	l.max = 2
+	if !l.acquire("a", "verify") || l.acquire("a", "verify") {
+		t.Fatal("per user and kind")
+	}
+	if !l.acquire("a", "export") {
+		t.Fatal("other kind of the same user")
+	}
+	if l.acquire("b", "verify") {
+		t.Fatal("process cap")
+	}
+	l.release("a", "verify")
+	if !l.acquire("b", "verify") {
+		t.Fatal("slot not freed")
+	}
+	l.release("a", "export")
+	l.release("b", "verify")
+	if l.running() != 0 {
+		t.Errorf("running = %d", l.running())
+	}
+}
+
+// HEAD on verify and export does no work: 405.
+func TestAuditHeavyRoutesRefuseHEAD(t *testing.T) {
+	f, ts := newTamperFixture(t)
+	seedAudit(t, f.st, aliceID.UserID, 3, nil)
+	called := atomic.Int32{}
+	ts.verifyHook = func(string) error { called.Add(1); return nil }
+	ts.readHook = func(int) error { called.Add(1); return nil }
+	for _, path := range []string{verifyPath, exportPath} {
+		rec := f.do(http.MethodHead, path, "")
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET" {
+			t.Errorf("HEAD %s = %d, Allow %q", path, rec.Code, rec.Header().Get("Allow"))
+		}
+	}
+	if called.Load() != 0 {
+		t.Error("HEAD ran a verification or an export")
+	}
+}
+
+func TestAuditVerifyPastItsDeadlineIsUnavailable(t *testing.T) {
+	f, ts := newTamperFixture(t)
+	ts.verifyHook = func(string) error { return fmt.Errorf("sqlite: verify: %w", context.DeadlineExceeded) }
+	wantError(t, f.do(http.MethodGet, verifyPath, ""), http.StatusServiceUnavailable, "unavailable")
+}
+
+type flushFailWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (w flushFailWriter) FlushError() error { return errors.New("broken pipe") }
+
+func TestAuditExportAbortsOnAFlushError(t *testing.T) {
+	f := newFixture(t)
+	seedAudit(t, f.st, aliceID.UserID, 10, nil)
+	defer func() {
+		if v := recover(); v != http.ErrAbortHandler {
+			t.Errorf("recovered %v, want http.ErrAbortHandler", v)
+		}
+	}()
+	f.h.ServeHTTP(flushFailWriter{httptest.NewRecorder()}, f.req(http.MethodGet, exportPath, ""))
+	t.Error("the handler returned normally after a flush error")
+}
+
+func TestAuditExportIgnoresHeadersNamingAnotherUser(t *testing.T) {
+	f := newFixture(t)
+	seedAudit(t, f.st, aliceID.UserID, 3, nil)
+	seedAudit(t, f.st, bobID.UserID, 5, nil)
+	r := f.req(http.MethodGet, exportPath, "")
+	r.Header.Set("X-User-Id", bobID.UserID)
+	r.Header.Set("X-User", bobID.UserID)
+	if lines := parseExport(t, f.serve(r).Body.String()); len(lines) != 3 {
+		t.Errorf("export has %d lines, want alice's 3", len(lines))
+	}
+	wantError(t, f.do(http.MethodGet, exportPath+"?user_id="+bobID.UserID, ""), 400, "invalid_request")
+}
+
+func TestSeqCursorsAreCanonical(t *testing.T) {
+	for _, bad := range []string{"0", "01", "007", "-1", "+1", "1e3", " 1", "1 "} {
+		if _, ok := parseSeq(bad); ok {
+			t.Errorf("parseSeq(%q) accepted", bad)
+		}
+	}
+	for in, want := range map[string]int64{"1": 1, "10": 10, "999999999999999999": 999999999999999999} {
+		if n, ok := parseSeq(in); !ok || n != want {
+			t.Errorf("parseSeq(%q) = %d %v", in, n, ok)
+		}
 	}
 }

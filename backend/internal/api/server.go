@@ -99,13 +99,13 @@ const defaultTimeout = 30 * time.Second
 
 // Server is the sidecar's REST API.
 type Server struct {
-	d         Deps
-	mux       *http.ServeMux
-	authFail  *limiter // failed authentications per client IP (/64 for IPv6)
-	userLm    *limiter
-	seen      *seenThrottle
-	verifying verifyLimiter // one audit verification per user
-	actions   *cooldown     // enrol, renew, revoke, revoke-all per user
+	d        Deps
+	mux      *http.ServeMux
+	authFail *limiter // failed authentications per client IP (/64 for IPv6)
+	userLm   *limiter
+	seen     *seenThrottle
+	heavy    heavyLimiter // audit verify and export: one each per user, two in the process
+	actions  *cooldown    // enrol, renew, revoke, revoke-all per user
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration

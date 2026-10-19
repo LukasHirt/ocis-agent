@@ -43,9 +43,10 @@ func init() {
 // is what the chain hashes.
 func auditTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
-// parseSeq parses a positive decimal sequence number (at most 18 digits).
+// parseSeq parses a positive decimal sequence number in canonical form (at
+// most 18 digits, no leading zero), so one record has exactly one cursor.
 func parseSeq(s string) (int64, bool) {
-	if s == "" || len(s) > 18 {
+	if s == "" || len(s) > 18 || s[0] == '0' {
 		return 0, false
 	}
 	for i := range len(s) {
@@ -57,29 +58,62 @@ func parseSeq(s string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
-// verifyLimiter allows one running verification per user.
-type verifyLimiter struct {
-	mu      sync.Mutex
-	running map[string]struct{}
+// Verify and export can hold a database reader for long (a verification up
+// to its 30 s deadline, an export for minutes, one page at a time), and the
+// reader pool is small (four connections). heavyLimiter allows one of each
+// per user and maxHeavy of them in the whole process; a refused request is
+// 429 with Retry-After heavyRetryAfter.
+const (
+	maxHeavy        = 2
+	heavyRetryAfter = 5 * time.Second
+)
+
+type heavyLimiter struct {
+	max int // default maxHeavy
+
+	mu   sync.Mutex
+	busy map[string]struct{} // user + "\x00" + kind
 }
 
-func (l *verifyLimiter) acquire(user string) bool {
+func (l *heavyLimiter) acquire(user, kind string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, busy := l.running[user]; busy {
+	limit := l.max
+	if limit <= 0 {
+		limit = maxHeavy
+	}
+	k := user + "\x00" + kind
+	if _, dup := l.busy[k]; dup || len(l.busy) >= limit {
 		return false
 	}
-	if l.running == nil {
-		l.running = map[string]struct{}{}
+	if l.busy == nil {
+		l.busy = map[string]struct{}{}
 	}
-	l.running[user] = struct{}{}
+	l.busy[k] = struct{}{}
 	return true
 }
 
-func (l *verifyLimiter) release(user string) {
+func (l *heavyLimiter) release(user, kind string) {
 	l.mu.Lock()
-	delete(l.running, user)
+	delete(l.busy, user+"\x00"+kind)
 	l.mu.Unlock()
+}
+
+func (l *heavyLimiter) running() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.busy)
+}
+
+// refuseHEAD answers HEAD on a GET route that would do heavy work for a
+// body nobody reads: 405 with Allow: GET.
+func refuseHEAD(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodHead {
+		return false
+	}
+	w.Header().Set("Allow", http.MethodGet)
+	writeCode(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	return true
 }
 
 // listAudit is GET /agent-api/v1/audit?cursor=&limit=&job_id=&tool=&risk=
@@ -191,22 +225,25 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// verifyAudit is GET /agent-api/v1/audit/verify. One verification per user
-// runs at a time (429 rate_limited otherwise); it runs under the request
-// deadline.
+// verifyAudit is GET /agent-api/v1/audit/verify (heavyLimiter: one per user,
+// two in the process; 429 rate_limited with Retry-After otherwise); it runs
+// under the request deadline. HEAD is 405.
 func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
 	}
+	if refuseHEAD(w, r) {
+		return nil
+	}
 	if _, err := query(r); err != nil {
 		return err
 	}
-	if !s.verifying.acquire(p.UserID) {
-		writeCode(w, r, http.StatusTooManyRequests, "rate_limited")
+	if !s.heavy.acquire(p.UserID, "verify") {
+		rateLimited(w, r, heavyRetryAfter)
 		return nil
 	}
-	defer s.verifying.release(p.UserID)
+	defer s.heavy.release(p.UserID, "verify")
 	err := s.d.Store.View(r.Context(), func(tx store.Tx) error { return tx.VerifyAudit(p.UserID) })
 	switch {
 	case err == nil:
@@ -219,7 +256,8 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// exportAudit is GET /agent-api/v1/audit/export?from=<seq>: the user's whole
+// exportAudit is GET /agent-api/v1/audit/export?from=<seq> (heavyLimiter
+// like verify; HEAD is 405): the user's whole
 // chain as application/x-ndjson, one record per line with prev_hash and hash,
 // read in pages of 500 (one short read transaction each, so a slow client
 // never holds the database). from=<seq> starts at that seq (default 1).
@@ -233,6 +271,9 @@ func (s *Server) exportAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
+	}
+	if refuseHEAD(w, r) {
+		return nil
 	}
 	var after int64
 	q, err := query(r, "from")
@@ -250,6 +291,11 @@ func (s *Server) exportAudit(w http.ResponseWriter, r *http.Request) error {
 		}
 		after = from - 1
 	}
+	if !s.heavy.acquire(p.UserID, "export") {
+		rateLimited(w, r, heavyRetryAfter)
+		return nil
+	}
+	defer s.heavy.release(p.UserID, "export")
 	ctx := r.Context()
 	page := func() ([]audit.Record, error) {
 		var recs []audit.Record
