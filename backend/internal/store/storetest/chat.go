@@ -165,7 +165,7 @@ func runConversations(t *testing.T, f Factory) {
 		mustUser(t, st, "u1")
 		c := addConv(t, st, "u1", "ok")
 		ok := []string{"", "Grüße 日本語", strings.Repeat("ä", 100)}
-		bad := []string{strings.Repeat("ä", 101), "a\nb", "a\x00b", "a b", "a b", "a‮b", "a⁦b", "a‎b", "a\u0085b", "a\x7fb", "a\xffb"}
+		bad := []string{strings.Repeat("ä", 101), "a\nb", "a\x00b", "a b", "a b", "a‮b", "a⁦b", "a‎b", "a\u0085b", "a\x7fb", "a\xffb", "a\u061cb", "a\u200fb", "a\u200eb"}
 		for _, title := range ok {
 			if err := txErr(st, func(tx store.Tx) error {
 				if _, err := tx.InsertConversation(store.Conversation{UserID: "u1", Title: title}); err != nil {
@@ -286,6 +286,7 @@ func runConversations(t *testing.T, f Factory) {
 			addConv(t, st, "u1", fmt.Sprint(i))
 		}
 		want := convIDs(listConvs(t, st, "u1", store.ConversationFilter{}))
+		deleted := map[string]bool{}
 		var seen []string
 		var before *store.PageKey
 		for page := 0; ; page++ {
@@ -296,8 +297,14 @@ func runConversations(t *testing.T, f Factory) {
 			seen = append(seen, convIDs(list)...)
 			last := list[len(list)-1]
 			before = &store.PageKey{At: last.UpdatedAt, ID: last.ID}
-			// the cursor row is renamed and a not yet seen row is deleted
+			// a seen row is renamed (it moves to the top), a not yet seen row
+			// is deleted and a new row arrives (both above the cursor)
 			mustTx(t, st, func(tx store.Tx) error { return tx.RenameConversation("u1", list[0].ID, "r") })
+			if rest := listConvs(t, st, "u1", store.ConversationFilter{Limit: 200, Before: before}); len(rest) > 1 {
+				gone := rest[len(rest)-1].ID
+				mustTx(t, st, func(tx store.Tx) error { _, err := tx.DeleteConversation("u1", gone); return err })
+				deleted[gone] = true
+			}
 			clk.Advance(time.Second)
 			addConv(t, st, "u1", fmt.Sprintf("new-%d", page))
 			if page > 10 {
@@ -305,26 +312,31 @@ func runConversations(t *testing.T, f Factory) {
 			}
 		}
 		// renamed rows moved to the top (newer updated_at) and new ones arrived
-		// above the cursor: every original row is still seen exactly once
+		// above the cursor: every original row not deleted before it was
+		// reached is seen exactly once, a deleted one never
 		counts := map[string]int{}
 		for _, id := range seen {
 			counts[id]++
 		}
+		if len(deleted) == 0 {
+			t.Fatal("nothing was deleted during the walk")
+		}
 		for _, id := range want {
-			if counts[id] != 1 {
-				t.Errorf("%s seen %d times in %v", id, counts[id], seen)
+			if wantN := map[bool]int{false: 1, true: 0}[deleted[id]]; counts[id] != wantN {
+				t.Errorf("%s (deleted %v) seen %d times in %v", id, deleted[id], counts[id], seen)
 			}
 		}
 	})
 
 	t.Run("delete removes the messages and returns the live chat jobs of the conversation", func(t *testing.T) {
-		st, _ := open(t, f)
+		st, clk := open(t, f)
 		mustUser(t, st, "u1")
 		mustUser(t, st, "u2")
 		c := addConv(t, st, "u1", "doomed")
 		keep := addConv(t, st, "u1", "keep")
 		chatJob := func(user, ref, kind string) store.Job {
 			var j store.Job
+			clk.Advance(time.Millisecond)
 			mustTx(t, st, func(tx store.Tx) error {
 				var err error
 				j, err = tx.InsertJob(store.Job{UserID: user, TriggerKind: kind, TriggerRef: ref, Goal: "g"})
@@ -340,8 +352,15 @@ func runConversations(t *testing.T, f Factory) {
 		foreign := chatJob("u2", c.ID, "chat")
 		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", done.ID) })
 		_ = running
-		addMsg(t, st, "u1", c.ID, store.RoleUser, "q", queued.ID)
 		addMsg(t, st, "u1", keep.ID, store.RoleUser, "kept", otherConv.ID)
+		clk.Advance(time.Second)
+		addMsg(t, st, "u1", c.ID, store.RoleUser, "q", queued.ID) // the newest message
+		var keptAt int64
+		mustTx(t, st, func(tx store.Tx) error {
+			k, err := tx.GetConversation("u1", keep.ID)
+			keptAt = k.UpdatedAt.UnixMilli()
+			return err
+		})
 
 		if err := txErr(st, func(tx store.Tx) error { _, err := tx.DeleteConversation("u2", c.ID); return err }); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("foreign delete: %v", err)
@@ -355,8 +374,8 @@ func runConversations(t *testing.T, f Factory) {
 			ids, err = tx.DeleteConversation("u1", c.ID)
 			return err
 		})
-		want := []string{queued.ID, running.ID}
-		if len(ids) != 2 || !(ids[0] == want[0] && ids[1] == want[1] || ids[0] == want[1] && ids[1] == want[0]) {
+		want := []string{queued.ID, running.ID} // in creation order
+		if len(ids) != 2 || ids[0] != want[0] || ids[1] != want[1] {
 			t.Errorf("job ids = %v, want %v (not %s %s %s)", ids, want, done.ID, otherKind.ID, foreign.ID)
 		}
 		err := viewErr(st, func(tx store.Tx) error {
@@ -379,7 +398,14 @@ func runConversations(t *testing.T, f Factory) {
 		if err != nil {
 			t.Error(err)
 		}
-		// messages are gone from the table itself, not just hidden
+		// messages are gone from the table itself, not just hidden: the
+		// messages mark falls back to the remaining conversation
+		_ = viewErr(st, func(tx store.Tx) error {
+			if m, err := tx.ChangeMarks("u1"); err != nil || m.MessagesAt != keptAt {
+				t.Errorf("messages mark = %+v %v, want %d", m, err, keptAt)
+			}
+			return nil
+		})
 		if err := txErr(st, func(tx store.Tx) error {
 			_, err := tx.InsertMessage(store.Message{UserID: "u1", ConversationID: c.ID, Role: store.RoleUser, Content: "x"})
 			return err
@@ -864,9 +890,20 @@ func runChatCounts(t *testing.T, f Factory) {
 			t.Errorf("after a state change = %+v", m2)
 		}
 
-		// messages
+		// conversations alone
 		clk.Advance(time.Second)
 		c := addConv(t, st, "u1", "c")
+		if m := marks("u1"); m.MessagesAt != clk.Now().UnixMilli() || m.JobsAt != m2.JobsAt {
+			t.Errorf("after a conversation create = %+v", m)
+		}
+		clk.Advance(time.Second)
+		mustTx(t, st, func(tx store.Tx) error { return tx.RenameConversation("u1", c.ID, "renamed") })
+		if m := marks("u1"); m.MessagesAt != clk.Now().UnixMilli() {
+			t.Errorf("after a rename = %+v", m)
+		}
+
+		// messages
+		clk.Advance(time.Second)
 		addMsg(t, st, "u1", c.ID, store.RoleUser, "x", "")
 		m3 := marks("u1")
 		if m3.MessagesAt != clk.Now().UnixMilli() || m3.JobsAt != m2.JobsAt {

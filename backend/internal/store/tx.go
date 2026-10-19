@@ -261,7 +261,10 @@ type Tx interface {
 	// GetConversation returns the user's conversation, or ErrNotFound.
 	GetConversation(userID, id string) (Conversation, error)
 	// ListConversations returns the user's conversations, most recently
-	// updated first (updated_at DESC, id DESC).
+	// updated first (updated_at DESC, id DESC). The keyset is updated_at, so
+	// a conversation that gets a message or a rename during a walk moves
+	// above the cursor: a walk sees it at most once, maybe not at all (a
+	// client reloads from the top to see it).
 	ListConversations(userID string, f ConversationFilter) ([]Conversation, error)
 	// RenameConversation sets the title and moves updated_at. ErrNotFound,
 	// ErrInvalid for a bad title.

@@ -158,9 +158,7 @@ func (t *tx) DeleteConversation(userID, id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := t.q.ExecContext(t.ctx, `DELETE FROM messages WHERE conversation_id = ? AND user_id = ?`, id, userID); err != nil {
-		return nil, fmt.Errorf("sqlite: delete messages: %w", err)
-	}
+	// the conversation's messages go with it (ON DELETE CASCADE)
 	if _, err := t.q.ExecContext(t.ctx, `DELETE FROM conversations WHERE id = ? AND user_id = ?`, id, userID); err != nil {
 		return nil, fmt.Errorf("sqlite: delete conversation: %w", err)
 	}
