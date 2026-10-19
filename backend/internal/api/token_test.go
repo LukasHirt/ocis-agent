@@ -81,7 +81,7 @@ func TestEnrollCreatesUserPolicyAndToken(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("policy: %v", err)
 	}
-	if pol.Paused || pol.DailyTokens != 200000 {
+	if pol.Paused || pol.DailyTokens != 0 { // 0: the operator's cap
 		t.Fatalf("policy = %+v", pol)
 	}
 	if tok := s.appToken(t, einsteinID); tok.Status != store.TokenValid || len(tok.Sealed.Ciphertext) == 0 {

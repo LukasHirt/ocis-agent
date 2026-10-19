@@ -50,7 +50,7 @@ func runCore(t *testing.T, f Factory) {
 		p := getPolicy(t, st, "u1")
 		want := store.DefaultPolicy("u1", clk.Now())
 		if p.Paused || p.PauseReason != "" || p.AutoApproveWrite || p.ProactiveEnabled ||
-			p.SweepInterval != 6*time.Hour || p.DailyTokens != 200000 || p.DormancyDays != 30 ||
+			p.SweepInterval != 6*time.Hour || p.DailyTokens != 0 || p.DormancyDays != 30 ||
 			p.Watch == nil || len(p.Watch) != 0 || !p.UpdatedAt.Equal(want.UpdatedAt) {
 			t.Errorf("default policy = %+v", p)
 		}

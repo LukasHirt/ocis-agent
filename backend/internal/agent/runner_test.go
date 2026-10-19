@@ -621,6 +621,25 @@ func TestTheDailyTokenBudgetFailsTheJobBeforeTheModelCall(t *testing.T) {
 			t.Fatalf("job = %+v", f.job())
 		}
 	})
+	t.Run("a new user's policy follows the operator's cap", func(t *testing.T) {
+		f := newFixture(t) // the policy CreateUser made, untouched
+		f.provider = llmtest.New(llmtest.Say("x", 1, 1))
+		f.cfg.UserDailyTokens = 1000000
+		f.enqueue("g")
+		c := f.claim()
+		if err := f.st.InTx(bg, func(tx store.Tx) error {
+			_, err := tx.AppendStep(store.JobStep{JobID: c.Job.ID, Kind: "llm", Status: "ok", TokensIn: 250000, TokensOut: 50000}, c.Fence)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.runner().Run(bg, c); err != nil {
+			t.Fatal(err)
+		}
+		if f.job().State != store.JobSucceeded {
+			t.Fatalf("300k of a 1M cap used: job = %+v", f.job())
+		}
+	})
 	t.Run("yesterday does not count", func(t *testing.T) {
 		f := newFixture(t)
 		f.provider = llmtest.New(llmtest.Say("x", 1, 1))

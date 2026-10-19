@@ -331,3 +331,45 @@ func TestStatusReadsInOneView(t *testing.T) {
 		t.Fatalf("status used %d views and %d transactions, want 1 and 0", cs.views, cs.txs)
 	}
 }
+
+// A new user starts at the operator's cap (AGENT_USER_DAILY_TOKENS is the
+// cap AND the default): the stored value is 0, which every reader resolves
+// to the cap, so raising the cap raises it for users who never changed it.
+func TestANewUserStartsAtTheOperatorsCap(t *testing.T) {
+	s := newStack(t, func(d *Deps) { d.Cfg.UserDailyTokens = 1000000 })
+	s.enroll(t, "einstein")
+	if v := statusDoc(t, s.as("einstein", http.MethodGet, "/agent-api/v1/status", "")); v.Budget.DailyTokens != 1000000 {
+		t.Errorf("status daily_tokens = %d", v.Budget.DailyTokens)
+	}
+	settings := decode(t, s.as("einstein", http.MethodGet, "/agent-api/v1/settings", ""))
+	if settings["daily_tokens"] != float64(1000000) || settings["daily_tokens_max"] != float64(1000000) {
+		t.Errorf("settings = %v", settings)
+	}
+	stored := func() int64 {
+		var pol store.Policy
+		s.mustTx(t, func(tx store.Tx) error {
+			var err error
+			pol, err = tx.GetPolicy(einsteinID)
+			return err
+		})
+		return pol.DailyTokens
+	}
+	if n := stored(); n != 0 {
+		t.Errorf("stored daily tokens = %d, want 0 (the operator's value)", n)
+	}
+	// changing another setting keeps it untouched
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"proactive_enabled":true}`); rec.Code != 200 {
+		t.Fatalf("put = %d", rec.Code)
+	}
+	if n := stored(); n != 0 {
+		t.Errorf("stored daily tokens after a PUT of another field = %d", n)
+	}
+	// the user can still lower it, but never store 0 explicitly
+	wantError(t, s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":0}`), 400, "invalid_request")
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":5000}`); rec.Code != 200 {
+		t.Fatalf("put = %d", rec.Code)
+	}
+	if n := stored(); n != 5000 {
+		t.Errorf("stored daily tokens = %d", n)
+	}
+}
