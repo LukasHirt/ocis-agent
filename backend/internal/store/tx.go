@@ -141,6 +141,13 @@ type Tx interface {
 	InsertApproval(a Approval, fence int64) (Approval, error)
 	// GetApproval returns the user's approval, or ErrNotFound.
 	GetApproval(userID, id string) (Approval, error)
+	// GetApprovalKey returns the user's approval's list position
+	// (RequestedAt and ID) without loading its args, or ErrNotFound.
+	GetApprovalKey(userID, id string) (PageKey, error)
+	// CountPendingOfLiveJobs counts the user's pending approvals whose job
+	// has not ended (queued, running or waiting_approval): the ones the
+	// user can still decide. It loads no approval.
+	CountPendingOfLiveJobs(userID string) (int, error)
 	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
 	// means 50; the maximum is 500.
 	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)

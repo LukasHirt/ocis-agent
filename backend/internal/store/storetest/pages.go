@@ -14,6 +14,7 @@ import (
 func init() {
 	register("Pages", runPages)
 	register("PageLimits", runPages2)
+	register("ApprovalLookups", runApprovalLookups)
 }
 
 // runPages covers keyset pagination (Before) of ListJobs, ListJobSummaries
@@ -358,6 +359,79 @@ func runPages2(t *testing.T, f Factory) {
 		}
 		if !equal(seenA, wantA) {
 			t.Errorf("approval walk = %v, want %v", seenA, wantA)
+		}
+	})
+}
+
+func runApprovalLookups(t *testing.T, f Factory) {
+	t.Run("pending approvals of live jobs are counted without loading them", func(t *testing.T) {
+		st, clk := open(t, f)
+		c1 := runningFor(t, st, "u1")
+		putApproval(t, st, c1, approvalFor(c1, clk, "ended"))
+		mustTx(t, st, func(tx store.Tx) error {
+			if _, err := tx.ReleaseJob(c1, store.JobWaitingApproval, nil, ""); err != nil {
+				return err
+			}
+			return tx.CancelJob("u1", c1.Job.ID) // its approval stays pending
+		})
+		addJob(t, st, "u1", "live")
+		c2 := mustClaim(t, st, "w2")
+		putApproval(t, st, c2, approvalFor(c2, clk, "a"))
+		putApproval(t, st, c2, approvalFor(c2, clk, "b"))
+		rej := putApproval(t, st, c2, approvalFor(c2, clk, "c"))
+		if _, err := decideApproval(st, "u1", rej.ID, store.ApprovalRejected, rej.ArgsHash); err != nil {
+			t.Fatal(err)
+		}
+		c3 := runningFor(t, st, "u2")
+		putApproval(t, st, c3, approvalFor(c3, clk, "other"))
+		err := st.View(bg(), func(tx store.Tx) error {
+			for user, want := range map[string]int{"u1": 2, "u2": 1, "nobody": 0} {
+				n, err := tx.CountPendingOfLiveJobs(user)
+				if err != nil {
+					return err
+				}
+				if n != want {
+					return fmt.Errorf("%s: %d, want %d", user, n, want)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		// once the live job ends too, nothing is decidable
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", c2.Job.ID) })
+		_ = st.View(bg(), func(tx store.Tx) error {
+			if n, err := tx.CountPendingOfLiveJobs("u1"); err != nil || n != 0 {
+				t.Errorf("after the job ended: %d %v", n, err)
+			}
+			return nil
+		})
+	})
+
+	t.Run("an approval's page key is a light lookup", func(t *testing.T) {
+		st, clk := open(t, f)
+		c := runningFor(t, st, "u1")
+		a := putApproval(t, st, c, approvalFor(c, clk, "k"))
+		runningFor(t, st, "u2")
+		err := st.View(bg(), func(tx store.Tx) error {
+			k, err := tx.GetApprovalKey("u1", a.ID)
+			if err != nil {
+				return err
+			}
+			if k.ID != a.ID || !k.At.Equal(a.RequestedAt) {
+				return fmt.Errorf("key = %+v, approval at %v", k, a.RequestedAt)
+			}
+			if _, err := tx.GetApprovalKey("u2", a.ID); !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("another user's approval: %v", err)
+			}
+			if _, err := tx.GetApprovalKey("u1", "nope"); !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("unknown approval: %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
 		}
 	})
 }

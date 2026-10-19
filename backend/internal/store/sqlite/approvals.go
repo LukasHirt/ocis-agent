@@ -101,6 +101,29 @@ func (t *tx) GetApproval(userID, id string) (store.Approval, error) {
 	return a, err
 }
 
+// GetApprovalKey implements store.Tx.
+func (t *tx) GetApprovalKey(userID, id string) (store.PageKey, error) {
+	var at int64
+	err := t.q.QueryRowContext(t.ctx, `SELECT requested_at FROM approvals WHERE id = ? AND user_id = ?`, id, userID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.PageKey{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.PageKey{}, err
+	}
+	return store.PageKey{At: fromMS(at), ID: id}, nil
+}
+
+// CountPendingOfLiveJobs implements store.Tx.
+func (t *tx) CountPendingOfLiveJobs(userID string) (int, error) {
+	var n int
+	err := t.q.QueryRowContext(t.ctx,
+		`SELECT COUNT(*) FROM approvals a JOIN jobs j ON j.id = a.job_id AND j.user_id = a.user_id
+		 WHERE a.user_id = ? AND a.state = 'pending' AND j.state NOT IN ('succeeded', 'failed', 'cancelled')`,
+		userID).Scan(&n)
+	return n, err
+}
+
 // ListApprovals implements store.Tx.
 func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Approval, error) {
 	limit := f.Limit
