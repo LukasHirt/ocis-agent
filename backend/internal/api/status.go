@@ -129,7 +129,7 @@ func pendingOfLiveJobs(tx store.Tx, userID string) (int, error) {
 	for _, a := range list {
 		ok, seen := live[a.JobID]
 		if !seen {
-			j, err := tx.GetJob(userID, a.JobID)
+			j, err := tx.GetJobStatus(userID, a.JobID)
 			switch {
 			case errors.Is(err, store.ErrNotFound):
 			case err != nil:

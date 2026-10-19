@@ -45,22 +45,22 @@ type storedOutcome struct {
 }
 
 // approvalViewer builds views inside one read transaction, looking up each
-// approval's job once.
+// approval's job once, with the light GetJobStatus (never the checkpoint).
 type approvalViewer struct {
 	tx   store.Tx
 	user string
-	jobs map[string]*store.Job // nil: the job does not exist
+	jobs map[string]*store.JobStatus // nil: the job does not exist
 }
 
 func newApprovalViewer(tx store.Tx, user string) *approvalViewer {
-	return &approvalViewer{tx: tx, user: user, jobs: map[string]*store.Job{}}
+	return &approvalViewer{tx: tx, user: user, jobs: map[string]*store.JobStatus{}}
 }
 
-func (v *approvalViewer) job(id string) (*store.Job, error) {
+func (v *approvalViewer) job(id string) (*store.JobStatus, error) {
 	if j, ok := v.jobs[id]; ok {
 		return j, nil
 	}
-	j, err := v.tx.GetJob(v.user, id)
+	j, err := v.tx.GetJobStatus(v.user, id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		v.jobs[id] = nil
@@ -99,7 +99,7 @@ func (v *approvalViewer) view(a store.Approval) (approvalView, error) {
 // outcomeOf derives the outcome: from the executor's record when there is
 // one, else a fixed reason for the settled states; nil while the approval
 // is pending, approved or executing.
-func outcomeOf(a store.Approval, j *store.Job) *outcomeView {
+func outcomeOf(a store.Approval, j *store.JobStatus) *outcomeView {
 	if len(a.Result) > 0 {
 		var so storedOutcome
 		if err := json.Unmarshal(a.Result, &so); err != nil {
@@ -163,7 +163,10 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	f := store.ApprovalFilter{Limit: limit + 1}
+	// approvals carry args and preview (up to 2 MiB each): the store loads
+	// only the rows within the response's byte budget (plus the one that
+	// reaches it)
+	f := store.ApprovalFilter{Limit: limit + 1, MaxBytes: maxListBytes}
 	switch {
 	case state == "":
 		f.States = []store.ApprovalState{store.ApprovalPending}
@@ -198,13 +201,28 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 		vw := newApprovalViewer(tx, p.UserID)
 		out.Approvals, out.NextCursor, err = encodePage(list, limit, func(a store.Approval) string { return a.ID },
 			func(a store.Approval) (any, error) { return vw.view(a) })
+		if err == nil && out.NextCursor == nil && len(list) > 0 && len(list) <= limit && approvalBytes(list) >= maxListBytes {
+			// the store's byte budget may have ended the fetch early: more
+			// can follow (the next page may then be empty, with a null cursor)
+			last := list[len(list)-1].ID
+			out.NextCursor = &last
+		}
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, out)
+	writePage(w, "approvals", out.Approvals, out.NextCursor)
 	return nil
+}
+
+// approvalBytes is what ApprovalFilter.MaxBytes counts of the rows.
+func approvalBytes(list []store.Approval) int64 {
+	var n int64
+	for _, a := range list {
+		n += int64(len(a.Args) + len(a.Preview))
+	}
+	return n
 }
 
 // getApproval is GET /agent-api/v1/approvals/{id}.

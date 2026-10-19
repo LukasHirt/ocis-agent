@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -537,6 +538,7 @@ type spyStore struct {
 	mu        sync.Mutex
 	jobLimits []int
 	apLimits  []int
+	apBudgets []int64
 }
 
 func (s *spyStore) View(ctx context.Context, fn func(store.Tx) error) error {
@@ -546,7 +548,7 @@ func (s *spyStore) View(ctx context.Context, fn func(store.Tx) error) error {
 func (s *spyStore) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.jobLimits, s.apLimits = nil, nil
+	s.jobLimits, s.apLimits, s.apBudgets = nil, nil, nil
 }
 
 type spyTx struct {
@@ -556,6 +558,10 @@ type spyTx struct {
 
 func (spyTx) ListJobs(string, store.JobFilter) ([]store.Job, error) {
 	return nil, errors.New("spy: ListJobs loads every checkpoint")
+}
+
+func (spyTx) GetJob(string, string) (store.Job, error) {
+	return store.Job{}, errors.New("spy: GetJob reads the checkpoint")
 }
 
 func (spyTx) ListSteps(string, string) ([]store.JobStep, error) {
@@ -572,6 +578,7 @@ func (t spyTx) ListJobSummaries(user string, f store.JobFilter) ([]store.JobSumm
 func (t spyTx) ListApprovals(user string, f store.ApprovalFilter) ([]store.Approval, error) {
 	t.s.mu.Lock()
 	t.s.apLimits = append(t.s.apLimits, f.Limit)
+	t.s.apBudgets = append(t.s.apBudgets, f.MaxBytes)
 	t.s.mu.Unlock()
 	return t.Tx.ListApprovals(user, f)
 }
@@ -594,9 +601,50 @@ func TestListsLoadNoCheckpointsAndFetchBounded(t *testing.T) {
 	s.listJobs(t, "einstein", "")
 	s.listApprovals(t, "einstein", "?limit=100&state=all")
 	s.listApprovals(t, "einstein", "")
+	// the status counts pending approvals of live jobs without GetJob too
+	if rec := s.as("einstein", http.MethodGet, "/agent-api/v1/status", ""); rec.Code != 200 {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+	}
 	spy.mu.Lock()
 	defer spy.mu.Unlock()
-	if fmt.Sprint(spy.jobLimits) != "[3 201 51]" || fmt.Sprint(spy.apLimits) != "[101 51]" {
+	if fmt.Sprint(spy.jobLimits) != "[3 201 51]" || fmt.Sprint(spy.apLimits) != "[101 51 500]" {
 		t.Errorf("fetch limits: jobs %v approvals %v", spy.jobLimits, spy.apLimits)
 	}
+	// approval pages fetch within the response's byte budget
+	if fmt.Sprint(spy.apBudgets[:2]) != fmt.Sprint([]int64{maxListBytes, maxListBytes}) {
+		t.Errorf("approval byte budgets = %v", spy.apBudgets)
+	}
 }
+
+// writePage writes what writeJSON would, without encoding the page again.
+func TestWritePageMatchesWriteJSON(t *testing.T) {
+	next := "01JABCDEFGHJKMNPQRSTVWXYZ0"
+	for _, c := range []struct {
+		entries []json.RawMessage
+		next    *string
+	}{{nil, nil}, {[]json.RawMessage{json.RawMessage(`{"a":1}`)}, &next}, {[]json.RawMessage{json.RawMessage(`{"a":1}`), json.RawMessage(`{"b":"x"}`)}, nil}} {
+		got, want := httptest.NewRecorder(), httptest.NewRecorder()
+		writePage(got, "jobs", c.entries, c.next)
+		v := jobPageView{Jobs: c.entries, NextCursor: c.next}
+		if v.Jobs == nil {
+			v.Jobs = []json.RawMessage{}
+		}
+		writeJSON(want, http.StatusOK, v)
+		if got.Body.String() != want.Body.String() || got.Header().Get("Content-Type") != "application/json" || got.Code != 200 {
+			t.Errorf("writePage = %q, writeJSON = %q", got.Body.String(), want.Body.String())
+		}
+	}
+	// a large page is copied once, not encoded again
+	big := json.RawMessage(`{"args":"` + strings.Repeat("x", 4<<20) + `"}`)
+	d := heapDelta(func() { writePage(discardWriter{http.Header{}}, "approvals", []json.RawMessage{big}, nil) })
+	if d > 2*uint64(len(big)) {
+		t.Errorf("%d bytes allocated for a %d byte page", d, len(big))
+	}
+}
+
+// discardWriter is a ResponseWriter that keeps nothing.
+type discardWriter struct{ h http.Header }
+
+func (w discardWriter) Header() http.Header         { return w.h }
+func (w discardWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w discardWriter) WriteHeader(int)             {}

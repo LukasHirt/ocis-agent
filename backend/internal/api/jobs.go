@@ -233,14 +233,14 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) error {
 	out := jobPageView{}
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
 		if cursor != "" {
-			j, err := tx.GetJob(p.UserID, cursor)
+			j, err := tx.GetJobStatus(p.UserID, cursor) // not GetJob: no checkpoint
 			if errors.Is(err, store.ErrNotFound) {
 				return errBadQuery
 			}
 			if err != nil {
 				return err
 			}
-			f.Before = &store.PageKey{At: j.CreatedAt, ID: j.ID}
+			f.Before = &store.PageKey{At: j.CreatedAt, ID: cursor}
 		}
 		list, err := tx.ListJobSummaries(p.UserID, f)
 		if err != nil {
@@ -253,8 +253,41 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, out)
+	writePage(w, "jobs", out.Jobs, out.NextCursor)
 	return nil
+}
+
+// writePage writes {"<field>":[entries...],"next_cursor":...} from the
+// already encoded entries, without encoding the (up to 8 MiB) page again
+// as writeJSON would. field is a fixed name; next is an id (no escaping
+// needed, see validID).
+func writePage(w http.ResponseWriter, field string, entries []json.RawMessage, next *string) {
+	size := len(field) + 32
+	for _, e := range entries {
+		size += len(e) + 1
+	}
+	buf := make([]byte, 0, size+40)
+	buf = append(buf, `{"`...)
+	buf = append(buf, field...)
+	buf = append(buf, `":[`...)
+	for i, e := range entries {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, e...)
+	}
+	buf = append(buf, `],"next_cursor":`...)
+	if next == nil {
+		buf = append(buf, "null"...)
+	} else {
+		buf = append(buf, '"')
+		buf = append(buf, *next...)
+		buf = append(buf, '"')
+	}
+	buf = append(buf, "}\n"...)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf)
 }
 
 // getJob is GET /agent-api/v1/jobs/{id}.
