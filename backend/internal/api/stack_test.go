@@ -111,7 +111,7 @@ func newStackStore(t *testing.T, wrap func(store.Store) store.Store, mod ...func
 	val := auth.NewValidator(client)
 	s := &stack{fake: fake, client: client, svc: svc, val: val}
 	all := append([]func(*Deps){func(d *Deps) {
-		d.Store, d.Validator, d.Auth, d.Now, d.Catalog = used, val, svc, fake.Now, testCatalog
+		d.Store, d.Validator, d.Auth, d.Now, d.Catalog, d.Memory = used, val, svc, fake.Now, testCatalog, mem
 	}}, mod...)
 	s.fixture = newFixture(t, all...)
 	s.st = st

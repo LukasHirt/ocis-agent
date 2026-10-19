@@ -67,6 +67,7 @@ type Options struct {
 // tuning shortens fixed delays in tests.
 type tuning struct {
 	queuePoll            time.Duration // queue poll interval
+	eventsPoll           time.Duration // api.Deps.EventsPollForTest
 	shutdownRequeueDelay time.Duration // agent.Config.ShutdownRequeueDelay
 	// wrapWaker wraps the queue the API wakes (to observe the wakes)
 	wrapWaker func(api.Waker) api.Waker
@@ -95,6 +96,9 @@ type App struct {
 	workerIDs []string             // ids of workers, in order
 	scheduler *scheduler.Scheduler // nil without the worker role
 	api       *api.Server          // nil without the api role
+	// apiStop is the API's Deps.Stop: Run closes it at the start of the
+	// shutdown, so the event streams end before the listener's graceful stop
+	apiStop chan struct{}
 
 	// the context the workers' jobs run under; Run cancels it in the last
 	// shutdown phase
@@ -202,13 +206,16 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 		}
 		// without a model endpoint the catalog is empty: no model can be
 		// chosen and models.available is empty
+		a.apiStop = make(chan struct{})
 		if a.api, err = api.NewServer(api.Deps{
-			Store: st, Validator: a.validator, Auth: a.auth, Gate: a.gate, Queue: waker, Catalog: cfg.LLM.Catalog,
+			Store: st, Validator: a.validator, Auth: a.auth, Gate: a.gate, Queue: waker, Memory: a.memory,
+			Catalog: cfg.LLM.Catalog,
 			Cfg: api.Settings{
 				AllowedOrigin: cfg.AllowedOrigin, KillSwitchEnv: cfg.Agent.KillSwitch,
 				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
+				StreamsPerUser: cfg.API.StreamsPerUser, StreamsTotal: cfg.API.StreamsTotal,
 			},
-			Log: a.log, Now: a.now,
+			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPollForTest: opts.tune.eventsPoll,
 		}); err != nil {
 			return nil, fmt.Errorf("app: api: %w", err)
 		}

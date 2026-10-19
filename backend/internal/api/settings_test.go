@@ -600,8 +600,10 @@ func TestSettingsAuditListsNamesOnly(t *testing.T) {
 		t.Fatalf("detail = %q cred = %q", ev[0].Detail, ev[0].Cred)
 	}
 	for _, bad := range []string{"SECRET", "4321", "model-b", "11:11"} {
-		if strings.Contains(fmt.Sprintf("%+v", ev[0]), bad) {
-			t.Errorf("audit leaks %q: %+v", bad, ev[0])
+		// the event's fields only: the record's PrevHash and Hash are random
+		// hex and contain "4321" by chance in ~1 of 250 runs
+		if strings.Contains(fmt.Sprintf("%+v", ev[0].Event), bad) {
+			t.Errorf("audit leaks %q: %+v", bad, ev[0].Event)
 		}
 	}
 	// only fields that really change are listed; no change, no write, no event

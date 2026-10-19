@@ -85,6 +85,9 @@ func New(files *ocisclient.Client, st store.Store, lim Limits) *Service {
 	return &Service{files: files, st: st, lim: lim.withDefaults()}
 }
 
+// Limits returns the limits in effect (defaults filled in).
+func (s *Service) Limits() Limits { return s.lim }
+
 func validText(b []byte) bool { return utf8.Valid(b) && !bytes.ContainsRune(b, 0) }
 
 // Ensure creates /.ocis-agent/, memory/ and memory/notes/ and a README.md if

@@ -92,9 +92,13 @@ type JobSummary struct {
 // checkpoint.
 type JobStatus struct {
 	State     JobState
+	Error     string // the runner's fixed reason text, or the reaper's
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// MaxJobStatusIDs caps the ids of one JobStatuses call.
+const MaxJobStatusIDs = 100
 
 // JobStep is one entry of a job's timeline.
 type JobStep struct {

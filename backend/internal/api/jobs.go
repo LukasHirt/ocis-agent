@@ -7,11 +7,11 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/agent"
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/textcap"
 )
 
 // Jobs: list, detail and cancel. Every lookup is scoped by the principal's
@@ -29,19 +29,11 @@ const (
 	maxRationaleView = 4 << 10
 )
 
-const truncMarker = "…[truncated]"
+const truncMarker = textcap.Marker
 
-// capText caps s at limit bytes including the marker.
-func capText(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
-	cut := limit - len(truncMarker)
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + truncMarker
-}
+// capText caps s at limit bytes including the marker (textcap.Cap: invalid
+// UTF-8 is repaired first).
+func capText(s string, limit int) string { return textcap.Cap(s, limit) }
 
 // Pagination is keyset pagination in the store's newest-first order: the
 // cursor is the id of the last item of the previous page, resolved with the

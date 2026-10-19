@@ -34,7 +34,8 @@ var errWorkersStuck = errors.New("app: the workers did not stop in time")
 // Run starts the selected roles and serves until ctx ends or a listener
 // fails, then shuts down in three phases:
 //
-//  1. stop claiming jobs and the scheduler, mark the process not ready and
+//  1. stop claiming jobs and the scheduler, mark the process not ready, end
+//     the API's event streams (api.Deps.Stop) and
 //     start the graceful stop of the API listener (up to 10s, alongside the
 //     drain);
 //  2. wait up to Process.ShutdownDrain, counted from the signal, for the
@@ -119,6 +120,9 @@ func (a *App) Run(ctx context.Context) error {
 	stopScheduler()
 	apiDone := make(chan struct{})
 	if apiSrv != nil {
+		// end the event streams first: Shutdown waits for every running
+		// request and would otherwise force-close them after 10s
+		close(a.apiStop)
 		go func() {
 			defer close(apiDone)
 			sctx, cancel := context.WithTimeout(base, apiShutdownTimeout)

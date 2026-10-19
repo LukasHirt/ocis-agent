@@ -81,6 +81,11 @@ type Tx interface {
 	// GetJobStatus returns the user's job's state and creation and update
 	// times without reading the checkpoint (up to 1 MiB), or ErrNotFound.
 	GetJobStatus(userID, jobID string) (JobStatus, error)
+	// JobStatuses returns GetJobStatus for each of ids that is a job of the
+	// user, keyed by id, in one query (no checkpoint is read). Ids of other
+	// users or unknown ids are left out; repeats are fine. ErrInvalid for
+	// more than MaxJobStatusIDs ids.
+	JobStatuses(userID string, ids []string) (map[string]JobStatus, error)
 	// ListJobs returns the user's jobs, newest first. f.Limit <= 0 means 50;
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)
@@ -246,4 +251,54 @@ type Tx interface {
 	// PutCursor inserts or replaces the user's cursor. ErrInvalid without a
 	// user id, ErrNotFound for an unknown user.
 	PutCursor(c Cursor) error
+
+	// InsertConversation adds a conversation (ID generated if empty; the
+	// title may be empty). ErrInvalid for a bad title or no user id,
+	// ErrNotFound for an unknown user, ErrConflict for a duplicate id and
+	// ErrLimit when the user already holds MaxConversationsPerUser (counted
+	// in this transaction).
+	InsertConversation(c Conversation) (Conversation, error)
+	// GetConversation returns the user's conversation, or ErrNotFound.
+	GetConversation(userID, id string) (Conversation, error)
+	// ListConversations returns the user's conversations, most recently
+	// updated first (updated_at DESC, id DESC). The keyset is updated_at, so
+	// a conversation that gets a message or a rename during a walk moves
+	// above the cursor: a walk sees it at most once, maybe not at all (a
+	// client reloads from the top to see it).
+	ListConversations(userID string, f ConversationFilter) ([]Conversation, error)
+	// RenameConversation sets the title and moves updated_at. ErrNotFound,
+	// ErrInvalid for a bad title.
+	RenameConversation(userID, id, title string) error
+	// DeleteConversation deletes the conversation and its messages (not its
+	// jobs) and returns the ids of the user's non-terminal chat jobs whose
+	// trigger_ref is the conversation, so the caller can cancel them in the
+	// same transaction. ErrNotFound.
+	DeleteConversation(userID, id string) ([]string, error)
+	// InsertMessage adds a message (ID generated) and moves the
+	// conversation's updated_at. ErrInvalid for a bad role or content,
+	// ErrNotFound if the conversation is not the user's or a given JobID is
+	// not a job of the user, ErrConflict for a duplicate id.
+	InsertMessage(m Message) (Message, error)
+	// ListMessages returns the conversation's messages, newest first.
+	// ErrNotFound if the conversation is not the user's.
+	ListMessages(userID, conversationID string, f MessageFilter) ([]Message, error)
+	// GetMessageKey returns the list position (CreatedAt and ID) of a
+	// message of the user's conversation, without its content, or
+	// ErrNotFound (also for a message of another conversation or user).
+	GetMessageKey(userID, conversationID, id string) (PageKey, error)
+	// ListRecentMessages returns the last n (1..MaxRecentMessages, larger
+	// values are capped) messages of role user or assistant, oldest first,
+	// leaving out the messages that belong to excludeJobID (if not empty).
+	// ErrNotFound if the conversation is not the user's.
+	ListRecentMessages(userID, conversationID string, n int, excludeJobID string) ([]Message, error)
+	// CountJobsInStates counts the user's jobs in any of states (all states
+	// if empty) with the given trigger kind (any kind if empty).
+	CountJobsInStates(userID string, states []JobState, triggerKind string) (int, error)
+	// CountJobsSince counts the user's jobs in any state created at or after
+	// since with the given trigger kind (any kind if empty).
+	CountJobsSince(userID, triggerKind string, since time.Time) (int, error)
+	// CountConversations counts the user's conversations.
+	CountConversations(userID string) (int, error)
+	// ChangeMarks returns the user's change marks (see ChangeMarks).
+	ChangeMarks(userID string) (ChangeMarks, error)
 }

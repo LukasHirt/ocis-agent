@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -139,5 +140,49 @@ func TestTheLargestLegitimateBodiesFit(t *testing.T) {
 	var b bulkDecisionBody
 	if err := decodeBody(nil, r, &b); err != nil || len(b.Items) != maxBulkItems {
 		t.Errorf("bulk of %d bytes: %v (%d items)", len(bulk), err, len(b.Items))
+	}
+}
+
+func TestBodiesWithInvalidTextAreRefused(t *testing.T) {
+	f := newFixture(t)
+	post := func(body string) *httptest.ResponseRecorder {
+		return f.do(http.MethodPost, "/agent-api/v1/test/echo", body)
+	}
+	bad := map[string]string{
+		"raw 0xff":             "{\"value\":\"a\xffb\"}",
+		"truncated sequence":   "{\"value\":\"a\xe2\x82\"}",
+		"lone high":            `{"value":"a\ud800b"}`,
+		"lone high upper":      `{"value":"a\uDBFFb"}`,
+		"lone low":             `{"value":"a\udc00b"}`,
+		"high then text":       `{"value":"\ud83dx"}`,
+		"high then other esc":  `{"value":"\ud83dA"}`,
+		"high at end":          `{"value":"x\ud83d"}`,
+		"low then high":        `{"value":"\ude00\ud83d"}`,
+		"escaped then lone":    `{"value":"\\\ud800"}`,
+		"raw 0xff in key":      "{\"va\xfflue\":\"a\"}",
+		"lone high in a key":   `{"va\ud800":"a"}`,
+		"high then escaped bs": `{"value":"\ud83d\\u0041"}`,
+	}
+	for name, body := range bad {
+		wantError(t, post(body), http.StatusBadRequest, "invalid_request")
+		_ = name
+	}
+	good := map[string]string{
+		"valid pair":        `{"value":"\ud83d\ude00"}`,
+		"valid pair upper":  `{"value":"\uD83D\uDE00!"}`,
+		"raw emoji":         `{"value":"😀"}`,
+		"escaped backslash": `{"value":"\\ud800"}`,
+		"escaped bs twice":  `{"value":"\\\\ud800 \\ud800"}`,
+		"bmp escape":        `{"value":"\u00e9\uffff"}`,
+	}
+	for name, body := range good {
+		if rec := post(body); rec.Code != http.StatusOK {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// the decoded value of the escaped-backslash case is the literal text
+	rec := post(`{"value":"\\ud800"}`)
+	if !strings.Contains(rec.Body.String(), `\\ud800`) {
+		t.Errorf("body = %s", rec.Body.String())
 	}
 }

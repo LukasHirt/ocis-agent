@@ -12,6 +12,9 @@ var (
 	ErrInvalid = errors.New("store: invalid input")
 	// ErrExpired is returned when an approval is decided after it expired.
 	ErrExpired = errors.New("store: expired")
+	// ErrLimit is returned when a per-user cap is reached (for example 200
+	// conversations). An API layer maps it to limit_reached.
+	ErrLimit = errors.New("store: limit reached")
 )
 
 type invalidError struct{ msg string }

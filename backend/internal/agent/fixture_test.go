@@ -117,6 +117,7 @@ type faultStore struct {
 	mu    sync.Mutex
 	calls map[string]int
 	fails map[string]int
+	errs  map[string]error // the error of a failing method (errInjected if unset)
 	after map[string]func()
 }
 
@@ -140,9 +141,27 @@ func (s *faultStore) hit(method string) error {
 	defer s.mu.Unlock()
 	s.calls[method]++
 	if n := s.fails[method]; n > 0 && s.calls[method] == n {
+		if err := s.errs[method]; err != nil {
+			return err
+		}
 		return errInjected
 	}
 	return nil
+}
+
+// failWith makes the nth call of method fail with err.
+func (s *faultStore) failWith(method string, n int, err error) {
+	s.failAt(method, n)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errs[method] = err
+}
+
+// View wraps the read-only transaction like InTx (no commit hooks).
+func (s *faultStore) View(ctx context.Context, fn func(store.Tx) error) error {
+	return s.Store.View(ctx, func(tx store.Tx) error {
+		return fn(faultTx{Tx: tx, s: s, called: map[string]bool{}})
+	})
 }
 
 func (s *faultStore) InTx(ctx context.Context, fn func(store.Tx) error) error {
@@ -191,6 +210,27 @@ func (t faultTx) InsertApproval(a store.Approval, fence int64) (store.Approval, 
 	return t.Tx.InsertApproval(a, fence)
 }
 
+func (t faultTx) InsertMessage(m store.Message) (store.Message, error) {
+	if err := t.s.hit("InsertMessage"); err != nil {
+		return store.Message{}, err
+	}
+	return t.Tx.InsertMessage(m)
+}
+
+func (t faultTx) ListRecentMessages(userID, conv string, n int, excludeJobID string) ([]store.Message, error) {
+	if err := t.s.hit("ListRecentMessages"); err != nil {
+		return nil, err
+	}
+	return t.Tx.ListRecentMessages(userID, conv, n, excludeJobID)
+}
+
+func (t faultTx) JobStatuses(userID string, ids []string) (map[string]store.JobStatus, error) {
+	if err := t.s.hit("JobStatuses"); err != nil {
+		return nil, err
+	}
+	return t.Tx.JobStatuses(userID, ids)
+}
+
 func (t faultTx) FinishIdempotent(userID, key string, state store.IdemState, result json.RawMessage) error {
 	t.called["FinishIdempotent"] = true
 	if err := t.s.hit("FinishIdempotent"); err != nil {
@@ -218,6 +258,7 @@ type fixture struct {
 	lastJob  string
 	dbPath   string
 	calls    *toolCounter
+	pastJob  string // the job of the last user message added by addMessage
 }
 
 // newFixture builds a runner's world: a SQLite store and the gate on the
@@ -239,7 +280,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}, after: map[string]func(){}}
+	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}, errs: map[string]error{}, after: map[string]func(){}}
 	var st store.Store = faults
 	if err := st.InTx(bg, func(tx store.Tx) error {
 		return tx.PutUser(store.User{ID: userID, Name: login, PersonalDriveID: drive})
