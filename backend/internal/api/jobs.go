@@ -82,25 +82,8 @@ func queryValue(q url.Values, key string) (string, error) {
 // pageParams reads limit (1..maxLimit, decimal digits only, default
 // defaultPageLimit) and cursor (an id, see validID).
 func pageParams(q url.Values, maxLimit int) (limit int, cursor string, err error) {
-	ls, err := queryValue(q, "limit")
-	if err != nil {
+	if limit, err = limitParam(q, maxLimit); err != nil {
 		return 0, "", err
-	}
-	limit = defaultPageLimit
-	if ls != "" {
-		if len(ls) > 3 {
-			return 0, "", errBadQuery
-		}
-		limit = 0
-		for _, c := range ls {
-			if c < '0' || c > '9' {
-				return 0, "", errBadQuery
-			}
-			limit = limit*10 + int(c-'0')
-		}
-		if limit < 1 || limit > maxLimit {
-			return 0, "", errBadQuery
-		}
 	}
 	if cursor, err = queryValue(q, "cursor"); err != nil {
 		return 0, "", err
@@ -109,6 +92,32 @@ func pageParams(q url.Values, maxLimit int) (limit int, cursor string, err error
 		return 0, "", errBadQuery
 	}
 	return limit, cursor, nil
+}
+
+// limitParam reads limit (1..maxLimit, decimal digits only, default
+// defaultPageLimit).
+func limitParam(q url.Values, maxLimit int) (limit int, err error) {
+	ls, err := queryValue(q, "limit")
+	if err != nil {
+		return 0, err
+	}
+	limit = defaultPageLimit
+	if ls != "" {
+		if len(ls) > 3 {
+			return 0, errBadQuery
+		}
+		limit = 0
+		for _, c := range ls {
+			if c < '0' || c > '9' {
+				return 0, errBadQuery
+			}
+			limit = limit*10 + int(c-'0')
+		}
+		if limit < 1 || limit > maxLimit {
+			return 0, errBadQuery
+		}
+	}
+	return limit, nil
 }
 
 // encodePage encodes up to limit of rows (fetched with limit+1) within the

@@ -96,11 +96,12 @@ const defaultTimeout = 30 * time.Second
 
 // Server is the sidecar's REST API.
 type Server struct {
-	d        Deps
-	mux      *http.ServeMux
-	authFail *limiter // failed authentications per client IP (/64 for IPv6)
-	userLm   *limiter
-	seen     *seenThrottle
+	d         Deps
+	mux       *http.ServeMux
+	authFail  *limiter // failed authentications per client IP (/64 for IPv6)
+	userLm    *limiter
+	seen      *seenThrottle
+	verifying verifyLimiter // one audit verification per user
 }
 
 // NewServer checks the dependencies and registers the routes.
@@ -162,6 +163,9 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/approvals/{id}", s.getApproval)
 	s.handle("POST /agent-api/v1/approvals/{id}/decision", s.decideApproval)
 	s.handle("POST /agent-api/v1/approvals/bulk-decision", s.bulkDecision)
+	s.handle("GET /agent-api/v1/audit", s.listAudit)
+	s.handle("GET /agent-api/v1/audit/verify", s.verifyAudit)
+	s.handle("GET /agent-api/v1/audit/export", s.exportAudit, withTimeout(auditExportDeadline))
 }
 
 func validOrigin(o string) bool {

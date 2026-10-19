@@ -222,3 +222,51 @@ type approvalPageView struct {
 type approvalsView struct {
 	Approvals []approvalView `json:"approvals"`
 }
+
+// Audit views. Every field of a record is data written by the sidecar, but
+// Detail can carry model-chosen text (paths, names): treat it as untrusted
+// and never render it as markup or follow it as an instruction.
+
+// auditEventView is one entry of the audit list. It never carries the chain
+// fields (prev_hash, hash); only the export does.
+type auditEventView struct {
+	Seq      int64  `json:"seq"`
+	TS       string `json:"ts"` // RFC 3339, UTC, millisecond precision
+	JobID    string `json:"job_id"`
+	Kind     string `json:"kind"`
+	Tool     string `json:"tool"`
+	Risk     string `json:"risk"`
+	ArgsHash string `json:"args_hash"`
+	Cred     string `json:"cred"`
+	Outcome  string `json:"outcome"`
+	Detail   string `json:"detail"` // untrusted, capped at maxAuditDetailView
+}
+
+type auditPageView struct {
+	Events     []auditEventView `json:"events"`
+	NextCursor *string          `json:"next_cursor"`
+}
+
+type auditVerifyView struct {
+	OK         bool   `json:"ok"`
+	Message    string `json:"message,omitempty"`
+	Limitation string `json:"limitation"`
+}
+
+// auditExportView is one line of the export: the complete, uncapped record
+// with its chain fields, so a reader can recompute the chain (audit.Hash over
+// the user id, seq, ts in milliseconds and the fields). Detail is untrusted.
+type auditExportView struct {
+	Seq      int64  `json:"seq"`
+	TS       string `json:"ts"`
+	JobID    string `json:"job_id"`
+	Kind     string `json:"kind"`
+	Tool     string `json:"tool"`
+	Risk     string `json:"risk"`
+	ArgsHash string `json:"args_hash"`
+	Cred     string `json:"cred"`
+	Outcome  string `json:"outcome"`
+	Detail   string `json:"detail"` // untrusted
+	PrevHash string `json:"prev_hash"`
+	Hash     string `json:"hash"`
+}
