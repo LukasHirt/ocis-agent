@@ -42,6 +42,9 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 		}
 		v.KillSwitch.Environment = s.d.Cfg.KillSwitchEnv
 		v.Models = s.modelsView(store.Policy{})
+		// the budget a new enrolment starts with (never 0, which a client
+		// could read as unlimited)
+		v.Budget = budgetView{DailyTokens: s.dailyBudget(0), ResetsAt: timeView(dayStart.AddDate(0, 0, 1))}
 
 		u, err := tx.GetUser(p.UserID)
 		if errors.Is(err, store.ErrNotFound) {

@@ -17,7 +17,8 @@ import (
 
 // statusView is the body of GET /status (and of enrol). A caller who is not
 // enrolled gets enrolled=false, token.status "none", the global kill_switch
-// flags and the operator's models, and zero values for everything else.
+// flags, the operator's models, the budget an enrolment would start with
+// (the operator's cap) and zero values for everything else.
 // pending_approvals counts the pending approvals of LIVE jobs only (they can
 // be decided; an exact count), while GET /approvals?state=pending
 // also lists those of ended jobs, marked job_ended=true, until the

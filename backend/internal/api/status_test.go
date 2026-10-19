@@ -22,8 +22,10 @@ func TestStatusOfAnUnknownUserIsNotEnrolled(t *testing.T) {
 		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
 	}
 	got := statusDoc(t, rec)
+	resets := "2026-10-15T00:00:00Z" // the fake's clock starts 2026-10-14 12:00 UTC
 	want := statusView{
 		Token:      tokenView{Status: "none"},
+		Budget:     budgetView{DailyTokens: 200000, ResetsAt: &resets}, // what enrolment would give, never 0
 		KillSwitch: killSwitchView{Database: true, Environment: true},
 		Models: modelsView{
 			Default:   "model-a",
