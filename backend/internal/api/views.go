@@ -92,3 +92,23 @@ func timeView(t time.Time) *string {
 	s := t.UTC().Format(time.RFC3339)
 	return &s
 }
+
+// settingsView is the body of GET and PUT /settings: the user's editable
+// policy fields plus the read-only operator cap and dormancy window.
+type settingsView struct {
+	ProactiveEnabled bool           `json:"proactive_enabled"`
+	Watch            []string       `json:"watch"` // the user's own paths: untrusted text
+	SweepInterval    string         `json:"sweep_interval"`
+	QuietHours       string         `json:"quiet_hours"`
+	DailyTokens      int64          `json:"daily_tokens"`     // never above the operator cap
+	DailyTokensMax   int64          `json:"daily_tokens_max"` // the operator cap
+	DormancyDays     int            `json:"dormancy_days"`    // read-only
+	Models           settingsModels `json:"models"`
+}
+
+// settingsModels are the stored model preferences that are still in the
+// catalog (null otherwise).
+type settingsModels struct {
+	Chat      *string `json:"chat"`
+	Proactive *string `json:"proactive"`
+}

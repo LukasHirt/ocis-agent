@@ -151,6 +151,10 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/token/revoke-all/preview", s.previewRevokeAll)
 	s.handle("POST /agent-api/v1/token/revoke-all", s.revokeAll)
 	s.handle("POST /agent-api/v1/token/renew", s.renew)
+	s.handle("POST /agent-api/v1/pause", s.pause)
+	s.handle("POST /agent-api/v1/resume", s.resume)
+	s.handle("GET /agent-api/v1/settings", s.getSettings)
+	s.handle("PUT /agent-api/v1/settings", s.putSettings)
 }
 
 func validOrigin(o string) bool {
