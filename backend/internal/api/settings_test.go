@@ -504,7 +504,6 @@ func TestSettingsRejectsInvalidInput(t *testing.T) {
 		{"tokens exponent", `{"daily_tokens":5e3}`},
 		{"tokens string", `{"daily_tokens":"5000"}`},
 		{"tokens huge", `{"daily_tokens":99999999999999999999}`},
-		{"tokens null", `{"daily_tokens":null}`},
 		{"proactive string", `{"proactive_enabled":"true"}`},
 		{"proactive null", `{"proactive_enabled":null}`},
 		{"models not in catalog", `{"models":{"chat":"gpt-unknown"}}`},
@@ -699,4 +698,59 @@ func TestParseSettingsValidatesWithoutTheStore(t *testing.T) {
 			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)
 		}
 	}
+}
+
+// {"daily_tokens": null} goes back to following the operator's cap: the
+// store keeps 0 and the settings show the cap.
+func TestDailyTokensNullFollowsTheOperatorCap(t *testing.T) {
+	s := newStack(t, func(d *Deps) { d.Cfg.UserDailyTokens = 300000 })
+	s.enroll(t, "einstein")
+	stored := func() int64 {
+		var pol store.Policy
+		s.mustTx(t, func(tx store.Tx) error {
+			var err error
+			pol, err = tx.GetPolicy(einsteinID)
+			return err
+		})
+		return pol.DailyTokens
+	}
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":5000}`); rec.Code != 200 || stored() != 5000 {
+		t.Fatalf("lower: %d, stored %d", rec.Code, stored())
+	}
+	rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":null}`)
+	if rec.Code != 200 {
+		t.Fatalf("null: %d %s", rec.Code, rec.Body.String())
+	}
+	if m := decode(t, rec); m["daily_tokens"] != float64(300000) || stored() != 0 {
+		t.Errorf("after null: %v, stored %d", m["daily_tokens"], stored())
+	}
+	evs := s.auditOf(t, einsteinID)
+	if last := evs[len(evs)-1]; last.Kind != "policy_changed" || last.Detail != "daily_tokens" {
+		t.Errorf("audit = %+v", last)
+	}
+	// null again changes nothing (no new audit row)
+	n := len(s.auditOf(t, einsteinID))
+	s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":null}`)
+	if len(s.auditOf(t, einsteinID)) != n {
+		t.Error("a no-op null was audited")
+	}
+}
+
+// PUT /settings has its own 128 KiB body limit: a client that escapes
+// every non-ASCII character reaches ~62 KiB with valid settings.
+func TestSettingsBodiesUpTo128KiB(t *testing.T) {
+	s := newStack(t)
+	s.enroll(t, "einstein")
+	var watch []string
+	for i := range maxWatchEntries {
+		// 1 + 2 + 510 two-byte characters = 1023 bytes, each escaped as \u00e9
+		watch = append(watch, fmt.Sprintf(`"/%02d%s"`, i, strings.Repeat(`\u00e9`, 510)))
+	}
+	body := `{"watch":[` + strings.Join(watch, ",") + `]}`
+	pad := strings.Repeat(" ", 120<<10-len(body)) // whitespace is legal JSON
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", body+pad); rec.Code != 200 {
+		t.Fatalf("an escaped body of %d bytes: %d %s", len(body+pad), rec.Code, rec.Body.String())
+	}
+	big := body + strings.Repeat(" ", 129<<10-len(body))
+	wantError(t, s.as("einstein", http.MethodPut, "/agent-api/v1/settings", big), 413, "too_large")
 }

@@ -165,7 +165,9 @@ func (s *Server) routes() {
 	s.handle("POST /agent-api/v1/pause", s.pause)
 	s.handle("POST /agent-api/v1/resume", s.resume)
 	s.handle("GET /agent-api/v1/settings", s.getSettings)
-	s.handle("PUT /agent-api/v1/settings", s.putSettings)
+	// a settings document with every non-ASCII character escaped reaches
+	// ~62 KiB (20 watch paths of 1 KiB)
+	s.handle("PUT /agent-api/v1/settings", s.putSettings, withMaxBody(settingsMaxBody))
 	s.handle("GET /agent-api/v1/jobs", s.listJobs)
 	s.handle("GET /agent-api/v1/jobs/{id}", s.getJob)
 	s.handle("POST /agent-api/v1/jobs/{id}/cancel", s.cancelJob)

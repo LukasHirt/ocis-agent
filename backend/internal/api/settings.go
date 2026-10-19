@@ -31,6 +31,7 @@ const (
 	minSweep        = 5 * time.Minute
 	maxSweep        = 7 * 24 * time.Hour
 	minDailyTokens  = 1000
+	settingsMaxBody = 128 << 10 // PUT /settings' body limit
 )
 
 // decodeOptionalBody is decodeBody for action endpoints whose body may be
@@ -337,7 +338,13 @@ func (s *Server) parseSettings(b settingsBody) (settingsPatch, error) {
 		}
 		sp.quiet = &str
 	}
-	if len(b.DailyTokens) > 0 {
+	if string(b.DailyTokens) == "null" {
+		// back to following the operator's cap (stored as 0, see
+		// store.DailyBudget); never a way to store 0 as a number
+		n++
+		zero := int64(0)
+		sp.tokens = &zero
+	} else if len(b.DailyTokens) > 0 {
 		n++
 		v, ok := parseInteger(b.DailyTokens)
 		if !ok || v < minDailyTokens || v > s.d.Cfg.UserDailyTokens {
