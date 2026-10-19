@@ -104,8 +104,11 @@ type Server struct {
 	authFail *limiter // failed authentications per client IP (/64 for IPv6)
 	userLm   *limiter
 	seen     *seenThrottle
-	heavy    heavyLimiter // audit verify and export: one each per user, two in the process
-	actions  *cooldown    // enrol, renew, revoke, revoke-all per user
+	heavy    heavyLimiter // audit verify and export: one each per user, capped per kind in the process
+	// exportPageDeadline is the write deadline of each audit export page; a
+	// field for tests
+	exportPageDeadline time.Duration
+	actions            *cooldown // enrol, renew, revoke, revoke-all per user
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
@@ -145,7 +148,8 @@ func NewServer(d Deps) (*Server, error) {
 		seen:     newSeenThrottle(seenEvery, maxLimiterKeys, d.Now),
 		actions:  newCooldown(actionCooldown, maxLimiterKeys, d.Now),
 
-		baseTimeout: defaultTimeout,
+		baseTimeout:        defaultTimeout,
+		exportPageDeadline: exportPageDeadline,
 	}
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)

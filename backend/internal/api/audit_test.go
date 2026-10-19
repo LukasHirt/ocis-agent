@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
+	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient/fakeocis"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -680,13 +681,17 @@ func TestAuditExportHasItsOwnDeadline(t *testing.T) {
 	}
 }
 
-// Verify and export hold a database reader for long: one of each per user
-// and at most two in the whole process run at a time (the reader pool has
-// four connections); a refused request is 429 with Retry-After.
+// Verify holds a database reader for long: one per user and at most two in
+// the process (the reader pool has four connections). Exports read one short
+// page at a time: one per user and up to eight in the process, so an export
+// never blocks a verification. A refused request is 429 with Retry-After.
 func TestAuditVerifyAndExportAreCappedPerUserAndInTheProcess(t *testing.T) {
 	f, ts := newTamperFixture(t)
-	seedAudit(t, f.st, aliceID.UserID, 3, nil)
-	seedAudit(t, f.st, bobID.UserID, 3, nil)
+	carol := auth.Identity{UserID: "u-carol", Username: "carol", DisplayName: "Carol", DriveID: "d-carol"}
+	f.v.tokens["carol-token"] = carol
+	for _, u := range []string{aliceID.UserID, bobID.UserID, carol.UserID} {
+		seedAudit(t, f.st, u, 3, nil)
+	}
 	started, release := make(chan string, 8), make(chan struct{})
 	var once sync.Once
 	free := func() { once.Do(func() { close(release) }) }
@@ -731,50 +736,100 @@ func TestAuditVerifyAndExportAreCappedPerUserAndInTheProcess(t *testing.T) {
 			t.Error("no Retry-After")
 		}
 	}
-	done := make(chan *httptest.ResponseRecorder, 2)
+	done := make(chan *httptest.ResponseRecorder, 3)
 	go func() { done <- as(goodToken, exportPath) }()
 	wait("export")
-	busy(as(goodToken, exportPath)) // alice's second export (the process has room)
+	busy(as(goodToken, exportPath)) // alice's second export
 	go func() { done <- as(goodToken, verifyPath) }()
+	wait("verify")                  // an export does not take a verification slot
+	busy(as(goodToken, verifyPath)) // alice's second verification
+	go func() { done <- as(otherToken, verifyPath) }()
 	wait("verify")
-	busy(as(goodToken, verifyPath))  // alice's second verification
-	busy(as(otherToken, verifyPath)) // the process cap: two are running
-	busy(as(otherToken, exportPath))
+	busy(as("carol-token", verifyPath)) // the process cap of verifications: two are running
 	blocking.Store(false)
 	free()
-	for range 2 {
+	for range 3 {
 		if rec := <-done; rec.Code != http.StatusOK {
 			t.Errorf("blocked request = %d", rec.Code)
 		}
 	}
-	if rec := as(otherToken, verifyPath); rec.Code != http.StatusOK {
-		t.Errorf("bob after the others finished = %d", rec.Code)
-	}
-	if rec := as(otherToken, exportPath); rec.Code != http.StatusOK {
-		t.Errorf("bob's export after the others finished = %d", rec.Code)
+	if rec := as("carol-token", verifyPath); rec.Code != http.StatusOK {
+		t.Errorf("carol after the others finished = %d", rec.Code)
 	}
 }
 
 func TestHeavyLimiter(t *testing.T) {
 	var l heavyLimiter
-	l.max = 2
-	if !l.acquire("a", "verify") || l.acquire("a", "verify") {
+	if !l.acquire("a", heavyVerify) || l.acquire("a", heavyVerify) {
 		t.Fatal("per user and kind")
 	}
-	if !l.acquire("a", "export") {
+	if !l.acquire("a", heavyExport) {
 		t.Fatal("other kind of the same user")
 	}
-	if l.acquire("b", "verify") {
-		t.Fatal("process cap")
+	if !l.acquire("b", heavyVerify) || l.acquire("c", heavyVerify) {
+		t.Fatal("verify cap 2")
 	}
-	l.release("a", "verify")
-	if !l.acquire("b", "verify") {
+	for i := range maxExports - 1 {
+		if !l.acquire(fmt.Sprint("e", i), heavyExport) {
+			t.Fatalf("export %d refused below the cap", i)
+		}
+	}
+	if l.acquire("x", heavyExport) {
+		t.Fatal("export cap")
+	}
+	l.release("a", heavyVerify)
+	if !l.acquire("c", heavyVerify) {
 		t.Fatal("slot not freed")
 	}
-	l.release("a", "export")
-	l.release("b", "verify")
-	if l.running() != 0 {
-		t.Errorf("running = %d", l.running())
+}
+
+// A client that stops reading an export is cut off at the per-page write
+// deadline (not after the route's five minutes), and its slot is freed.
+func TestAStalledExportClientIsCutOff(t *testing.T) {
+	f := newFixture(t)
+	f.srv.exportPageDeadline = 200 * time.Millisecond
+	seedAudit(t, f.st, aliceID.UserID, 12000, func(i int, e *audit.Event) { e.Detail = strings.Repeat("d", 500) })
+	ts := httptest.NewServer(f.h)
+	defer ts.Close()
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(4 << 10)
+	}
+	_, _ = io.WriteString(conn, "GET "+exportPath+" HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+goodToken+"\r\n\r\n")
+	// read nothing: the server's writes block once the buffers are full
+	waitFor := func(cond func() bool) bool {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return true
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return false
+	}
+	if !waitFor(func() bool { return f.srv.heavy.running() == 1 }) {
+		t.Fatal("the export did not start")
+	}
+	// meanwhile another user's verification runs
+	r := f.req(http.MethodGet, verifyPath, "")
+	r.Header.Set("Authorization", "Bearer "+otherToken)
+	if rec := f.serve(r); rec.Code != http.StatusOK {
+		t.Errorf("bob's verification during a stalled export = %d", rec.Code)
+	}
+	began := time.Now()
+	if !waitFor(func() bool { return f.srv.heavy.running() == 0 }) {
+		t.Fatal("the stalled export still holds its slot")
+	}
+	if d := time.Since(began); d > 5*time.Second {
+		t.Errorf("cut off after %v", d)
+	}
+	r = f.req(http.MethodGet, exportPath+"?from=11990", "")
+	if rec := f.serve(r); rec.Code != http.StatusOK {
+		t.Errorf("a new export after the cut = %d", rec.Code)
 	}
 }
 

@@ -58,45 +58,56 @@ func parseSeq(s string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
-// Verify and export can hold a database reader for long (a verification up
-// to its 30 s deadline, an export for minutes, one page at a time), and the
-// reader pool is small (four connections). heavyLimiter allows one of each
-// per user and maxHeavy of them in the whole process; a refused request is
-// 429 with Retry-After heavyRetryAfter.
+// A verification holds a database reader for up to its 30 s deadline and the
+// reader pool is small (four connections), so at most maxVerifies run in the
+// process. An export reads one short page per transaction but streams for
+// minutes, so it has its own, larger process cap (maxExports) and never takes
+// a verification's slot. Each user runs at most one of each. A refused
+// request is 429 with Retry-After heavyRetryAfter.
 const (
-	maxHeavy        = 2
+	heavyVerify     = "verify"
+	heavyExport     = "export"
+	maxVerifies     = 2
+	maxExports      = 8
 	heavyRetryAfter = 5 * time.Second
+	// exportPageDeadline is the write deadline of each export page,
+	// renewed per page: a client that stops reading is cut off after it
+	exportPageDeadline = 30 * time.Second
 )
 
 type heavyLimiter struct {
-	max int // default maxHeavy
-
-	mu   sync.Mutex
-	busy map[string]struct{} // user + "\x00" + kind
+	mu    sync.Mutex
+	busy  map[string]struct{} // user + "\x00" + kind
+	kinds map[string]int      // running per kind
 }
 
 func (l *heavyLimiter) acquire(user, kind string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	limit := l.max
-	if limit <= 0 {
-		limit = maxHeavy
+	limit := maxExports
+	if kind == heavyVerify {
+		limit = maxVerifies
 	}
 	k := user + "\x00" + kind
-	if _, dup := l.busy[k]; dup || len(l.busy) >= limit {
+	if _, dup := l.busy[k]; dup || l.kinds[kind] >= limit {
 		return false
 	}
 	if l.busy == nil {
-		l.busy = map[string]struct{}{}
+		l.busy, l.kinds = map[string]struct{}{}, map[string]int{}
 	}
 	l.busy[k] = struct{}{}
+	l.kinds[kind]++
 	return true
 }
 
 func (l *heavyLimiter) release(user, kind string) {
 	l.mu.Lock()
-	delete(l.busy, user+"\x00"+kind)
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	k := user + "\x00" + kind
+	if _, ok := l.busy[k]; ok {
+		delete(l.busy, k)
+		l.kinds[kind]--
+	}
 }
 
 func (l *heavyLimiter) running() int {
@@ -226,7 +237,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 }
 
 // verifyAudit is GET /agent-api/v1/audit/verify (heavyLimiter: one per user,
-// two in the process; 429 rate_limited with Retry-After otherwise); it runs
+// maxVerifies in the process; 429 rate_limited with Retry-After otherwise); it runs
 // under the request deadline. HEAD is 405.
 func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
@@ -239,11 +250,11 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	if _, err := query(r); err != nil {
 		return err
 	}
-	if !s.heavy.acquire(p.UserID, "verify") {
+	if !s.heavy.acquire(p.UserID, heavyVerify) {
 		rateLimited(w, r, heavyRetryAfter)
 		return nil
 	}
-	defer s.heavy.release(p.UserID, "verify")
+	defer s.heavy.release(p.UserID, heavyVerify)
 	err := s.d.Store.View(r.Context(), func(tx store.Tx) error { return tx.VerifyAudit(p.UserID) })
 	switch {
 	case err == nil:
@@ -256,8 +267,9 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// exportAudit is GET /agent-api/v1/audit/export?from=<seq> (heavyLimiter
-// like verify; HEAD is 405): the user's whole
+// exportAudit is GET /agent-api/v1/audit/export?from=<seq> (heavyLimiter:
+// one per user, maxExports in the process; every page must be written
+// within exportPageDeadline; HEAD is 405): the user's whole
 // chain as application/x-ndjson, one record per line with prev_hash and hash,
 // read in pages of 500 (one short read transaction each, so a slow client
 // never holds the database). from=<seq> starts at that seq (default 1).
@@ -291,11 +303,11 @@ func (s *Server) exportAudit(w http.ResponseWriter, r *http.Request) error {
 		}
 		after = from - 1
 	}
-	if !s.heavy.acquire(p.UserID, "export") {
+	if !s.heavy.acquire(p.UserID, heavyExport) {
 		rateLimited(w, r, heavyRetryAfter)
 		return nil
 	}
-	defer s.heavy.release(p.UserID, "export")
+	defer s.heavy.release(p.UserID, heavyExport)
 	ctx := r.Context()
 	page := func() ([]audit.Record, error) {
 		var recs []audit.Record
@@ -329,6 +341,9 @@ func (s *Server) exportAudit(w http.ResponseWriter, r *http.Request) error {
 			}
 			buf = append(append(buf, line...), '\n')
 		}
+		// per-page write deadline, renewed for every page (ErrNotSupported
+		// without a connection): a client that stops reading is cut off
+		_ = rc.SetWriteDeadline(time.Now().Add(s.exportPageDeadline))
 		if len(buf) > 0 {
 			if _, err := w.Write(buf); err != nil {
 				panic(http.ErrAbortHandler)
