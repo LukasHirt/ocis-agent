@@ -49,7 +49,8 @@ import (
 // GET /agent-api/healthz, which skips 4-9; they get the default read and
 // write deadlines (30s, set before dispatch). The route deadline (default 30s)
 // starts at step 4: a context deadline plus read and write deadlines on the
-// connection through http.ResponseController.
+// connection through http.ResponseController. A stream route (withStream)
+// clears the read deadline instead and renews the write deadline per frame.
 
 // writeGrace is how much longer the connection's write deadline is than the
 // route's context deadline, so a handler that stops at its deadline can
@@ -243,6 +244,15 @@ func setDeadlines(w http.ResponseWriter, d time.Duration) {
 	_ = ctl.SetWriteDeadline(time.Now().Add(d + writeGrace))
 }
 
+// streamDeadlines clears the connection's read deadline (a stream route has
+// no body; the request headers are already read) and sets the write deadline
+// of a default route, which the stream handler renews for every frame.
+func streamDeadlines(w http.ResponseWriter) {
+	ctl := http.NewResponseController(w)
+	_ = ctl.SetReadDeadline(time.Time{})
+	_ = ctl.SetWriteDeadline(time.Now().Add(defaultTimeout + writeGrace))
+}
+
 // captureWriter takes the mux's own 404/405 response, so it can be replaced
 // by the JSON one.
 type captureWriter struct {
@@ -263,7 +273,11 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		parent := r.Context() // ends when the client goes away
 		ctx, cancel := context.WithTimeout(parent, rc.timeout)
 		defer cancel()
-		setDeadlines(w, rc.timeout)
+		if rc.stream {
+			streamDeadlines(w)
+		} else {
+			setDeadlines(w, rc.timeout)
+		}
 		r = r.WithContext(ctx)
 
 		// 4: parsing and the Cached/Known lookups make no network call. A

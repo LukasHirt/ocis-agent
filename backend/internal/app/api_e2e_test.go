@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -409,5 +411,104 @@ func TestTheAPIRoleAloneServesTheRESTAPI(t *testing.T) {
 	}
 	if r := c.do(login, http.MethodPut, "/agent-api/v1/settings", `{"models":{"chat":"`+model+`"}}`); r.code != http.StatusBadRequest {
 		t.Errorf("choosing a model without a catalog = %d %s, want 400", r.code, r.body)
+	}
+}
+
+// readFrames reads the event stream frame by frame (a frame ends with an
+// empty line) until the body ends.
+func readFrames(body io.Reader) <-chan string {
+	out := make(chan string, 64)
+	go func() {
+		defer close(out)
+		br := bufio.NewReader(body)
+		var frame strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			frame.WriteString(line)
+			if line == "\n" {
+				out <- frame.String()
+				frame.Reset()
+			}
+		}
+	}()
+	return out
+}
+
+func openEvents(t *testing.T, a *App, who string) (*http.Response, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(bg)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+a.APIAddr()+"/agent-api/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+fakeocis.OIDCToken(who))
+	hc := &http.Client{} // no client timeout: the body is a stream
+	t.Cleanup(hc.CloseIdleConnections)
+	res, err := hc.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = res.Body.Close() })
+	return res, cancel
+}
+
+func wantFrame(t *testing.T, frames <-chan string, match func(string) bool, what string, within time.Duration) {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case fr, ok := <-frames:
+			if !ok {
+				t.Fatalf("the stream ended, want %s", what)
+			}
+			if match(fr) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no %s within %v", what, within)
+		}
+	}
+}
+
+// An api-only process streams change notifications from the database with
+// the operator's caps, and an open stream ends with bye/shutdown at the
+// start of the shutdown, so the API's graceful stop does not wait for its
+// 10 s forced close.
+func TestEventStreamsInAnAPIOnlyProcessEndAtShutdown(t *testing.T) {
+	f := newFixture(t, map[string]string{"AGENT_ROLES": "api", "AGENT_LLM_BASE_URL": "-", "AGENT_LLM_MODEL": "-",
+		"AGENT_API_STREAMS_PER_USER": "1"})
+	a, err := Build(bg, f.cfg, f.st, Options{Log: quietLog()})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	r := start(t, a)
+	c := newClient(t, a, f.cfg.AllowedOrigin)
+	c.must(http.StatusCreated, login, http.MethodPost, "/agent-api/v1/enroll", "")
+	res, _ := openEvents(t, a, login)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("events = %d", res.StatusCode)
+	}
+	frames := readFrames(res.Body)
+	wantFrame(t, frames, func(s string) bool { return s == "event: ready\ndata: {\"v\":1}\n\n" }, "ready", 5*time.Second)
+	if second, _ := openEvents(t, a, login); second.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("a second stream = %d, want 429 (AGENT_API_STREAMS_PER_USER=1)", second.StatusCode)
+	}
+	c.must(http.StatusOK, login, http.MethodPut, "/agent-api/v1/settings", `{"daily_tokens":2000}`)
+	wantFrame(t, frames, func(s string) bool {
+		return s == "event: changed\ndata: {\"kinds\":[\"activity\",\"settings\"]}\n\n"
+	}, "the settings change", 10*time.Second)
+
+	began := time.Now()
+	r.cancel()
+	wantFrame(t, frames, func(s string) bool { return s == "event: bye\ndata: {\"reason\":\"shutdown\"}\n\n" }, "bye", 5*time.Second)
+	if err := r.stop(t, 15*time.Second); err != nil {
+		t.Errorf("Run = %v", err)
+	}
+	if d := time.Since(began); d > 5*time.Second {
+		t.Errorf("shutdown with an open stream took %v, want well under the 10s forced close", d)
 	}
 }

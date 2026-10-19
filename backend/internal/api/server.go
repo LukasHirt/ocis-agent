@@ -76,6 +76,8 @@ type Settings struct {
 	UserDailyTokens int64   // operator cap and default of a user's daily token budget
 	RatePerSecond   float64 // per-user request rate
 	Burst           int     // per-user burst
+	StreamsPerUser  int     // open event streams per user (0: 3)
+	StreamsTotal    int     // open event streams in the process (0: 200)
 }
 
 // Deps are the server's collaborators.
@@ -90,6 +92,11 @@ type Deps struct {
 	Cfg       Settings
 	Log       *slog.Logger     // default: discard
 	Now       func() time.Time // default: time.Now; the rate limiter's clock
+	// Stop, once closed, ends every event stream (bye with reason shutdown)
+	// and refuses new ones (503). The process closes it at the start of its
+	// shutdown, before the listener's graceful stop, which would otherwise
+	// wait for the streams. nil: never.
+	Stop <-chan struct{}
 }
 
 // Principal is the authenticated caller, taken only from the identity the
@@ -121,8 +128,13 @@ type Server struct {
 	// exportPageDeadline is the write deadline of each audit export page; a
 	// field for tests
 	exportPageDeadline time.Duration
-	actions            *cooldown // enrol, renew, revoke, revoke-all per user
-	messages           *cooldown // sent chat messages per user
+	actions            *cooldown    // enrol, renew, revoke, revoke-all per user
+	messages           *cooldown    // sent chat messages per user
+	streams            *streamSlots // open event streams
+	// eventTimers makes the timers of a stream and eventWriteDeadline is the
+	// write deadline of each frame; fields for tests
+	eventTimers        func(userID string) eventTimers
+	eventWriteDeadline time.Duration
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
@@ -147,6 +159,14 @@ func NewServer(d Deps) (*Server, error) {
 		return nil, errors.New("api: the rate limit must be positive")
 	case d.Cfg.UserDailyTokens < 1:
 		return nil, errors.New("api: the daily token cap must be positive")
+	case d.Cfg.StreamsPerUser < 0, d.Cfg.StreamsTotal < 0:
+		return nil, errors.New("api: the stream caps must not be negative")
+	}
+	if d.Cfg.StreamsPerUser == 0 {
+		d.Cfg.StreamsPerUser = defaultStreamsPerUser
+	}
+	if d.Cfg.StreamsTotal == 0 {
+		d.Cfg.StreamsTotal = defaultStreamsTotal
 	}
 	if d.Log == nil {
 		d.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -163,6 +183,9 @@ func NewServer(d Deps) (*Server, error) {
 		actions:  newCooldown(actionCooldown, maxLimiterKeys, d.Now),
 		messages: newCooldown(messageCooldown, maxLimiterKeys, d.Now),
 
+		streams:            newStreamSlots(d.Cfg.StreamsPerUser, d.Cfg.StreamsTotal),
+		eventTimers:        realEventTimers,
+		eventWriteDeadline: eventsWriteDeadline,
 		baseTimeout:        defaultTimeout,
 		exportPageDeadline: exportPageDeadline,
 	}
@@ -212,6 +235,7 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/audit", s.listAudit)
 	s.handle("GET /agent-api/v1/audit/verify", s.verifyAudit)
 	s.handle("GET /agent-api/v1/audit/export", s.exportAudit, withTimeout(auditExportDeadline))
+	s.handle("GET /agent-api/v1/events", s.streamEvents, withStream(eventsRouteTimeout))
 }
 
 func validOrigin(o string) bool {
@@ -237,12 +261,21 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request) error
 type routeConfig struct {
 	timeout time.Duration
 	maxBody int64
+	stream  bool
 }
 
 type routeOption func(*routeConfig)
 
 // withTimeout replaces the route's default 30s deadline.
 func withTimeout(d time.Duration) routeOption { return func(c *routeConfig) { c.timeout = d } }
+
+// withStream makes the route a long-lived stream: its context deadline is d,
+// the connection keeps NO read deadline once the handler runs (the server's
+// background read would end the request context at it) and the write
+// deadline is the default route's until the handler sets its own per frame.
+func withStream(d time.Duration) routeOption {
+	return func(c *routeConfig) { c.timeout, c.stream = d, true }
+}
 
 // withMaxBody replaces the route's default body limit (defaultMaxBody).
 func withMaxBody(n int64) routeOption { return func(c *routeConfig) { c.maxBody = n } }
