@@ -17,6 +17,9 @@ import type {
   Approvals,
   Decision,
   DecisionItem,
+  Renewed,
+  Revoked,
+  RevokeAllPreview,
   Settings,
   SettingsUpdate,
   Status
@@ -412,6 +415,47 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     return v
   }
 
+  // unenrol disables the agent (and with deleteMemory deletes its memory
+  // folder); everything is read again, so the enrolment shows.
+  const unenrol = async (deleteMemory: boolean): Promise<void> => {
+    const s = active()
+    await s.client.unenrol(deleteMemory)
+    await Promise.all(RESOURCES.map((k) => refresh(k, true)))
+  }
+
+  // withStatus runs a token action and refreshes the status afterwards,
+  // also after a failure (the token may have changed anyway).
+  const withStatus = async <T>(call: () => Promise<T>): Promise<T> => {
+    try {
+      return await call()
+    } finally {
+      await refresh('status', true)
+    }
+  }
+
+  const renewToken = (): Promise<Renewed> => {
+    const s = active()
+    return withStatus(() => s.client.renewToken())
+  }
+
+  const revokeToken = (): Promise<Revoked> => {
+    const s = active()
+    return withStatus(() => s.client.revokeToken())
+  }
+
+  // previewRevokeAll lists all of the user's app tokens for the incident
+  // revoke's confirmation.
+  const previewRevokeAll = (): Promise<RevokeAllPreview> => {
+    const s = active()
+    return s.client.previewRevokeAll(s.abort.signal)
+  }
+
+  // revokeAll is the incident revoke: ALL of the user's app tokens.
+  const revokeAll = (): Promise<Revoked> => {
+    const s = active()
+    return withStatus(() => s.client.revokeAll())
+  }
+
   return {
     status,
     approvals,
@@ -431,6 +475,11 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     enrol,
     pause,
     resume,
+    unenrol,
+    renewToken,
+    revokeToken,
+    previewRevokeAll,
+    revokeAll,
     start,
     stop
   }

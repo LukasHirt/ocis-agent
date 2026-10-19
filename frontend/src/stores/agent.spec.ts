@@ -409,6 +409,62 @@ describe('useAgentStore', () => {
     expect(s.store.status?.user.name).toBe('New')
   })
 
+  it('unenrol sends delete_memory and refreshes everything', async () => {
+    let enrolled = true
+    const s = (current = setup(
+      defaultHandlers({
+        'GET /status': () => json(statusOf({ enrolled })),
+        'POST /unenroll': () => {
+          enrolled = false
+          return new Response(null, { status: 204 })
+        }
+      })
+    ))
+    s.start()
+    await flush()
+    const counts = ['GET /status', 'GET /settings', 'GET /approvals'].map((k) => s.server.count(k))
+    await s.store.unenrol(true)
+    expect(s.server.calls.find((c) => c.key === 'POST /unenroll')?.body).toEqual({ delete_memory: true })
+    expect(s.store.status?.enrolled).toBe(false)
+    const after = ['GET /status', 'GET /settings', 'GET /approvals'].map((k) => s.server.count(k))
+    after.forEach((n, i) => expect(n).toBeGreaterThan(counts[i]))
+    await s.store.unenrol(false)
+    expect(s.server.calls.filter((c) => c.key === 'POST /unenroll')[1]?.body).toEqual({ delete_memory: false })
+  })
+
+  it('the token actions call their endpoints and refresh the status', async () => {
+    const s = (current = setup(
+      defaultHandlers({
+        'POST /token/renew': () => json({ renewed: true, old_cleaned: true }),
+        'DELETE /token': () => json({ revoked: 2 }),
+        'GET /token/revoke-all/preview': () =>
+          json({ tokens: [{ label: 'x', created_at: null, expires_at: null, ours: false }] }),
+        'POST /token/revoke-all': () => json({ revoked: 3 })
+      })
+    ))
+    s.start()
+    await flush()
+    let st = s.server.count('GET /status')
+    expect(await s.store.renewToken()).toEqual({ renewed: true, old_cleaned: true })
+    expect(s.server.count('GET /status')).toBe(++st)
+    expect(await s.store.revokeToken()).toEqual({ revoked: 2 })
+    expect(s.server.count('GET /status')).toBe(++st)
+    expect((await s.store.previewRevokeAll()).tokens).toHaveLength(1)
+    expect(s.server.count('GET /status')).toBe(st)
+    expect(await s.store.revokeAll()).toEqual({ revoked: 3 })
+    expect(s.server.calls.find((c) => c.key === 'POST /token/revoke-all')?.body).toEqual({ confirm: true })
+    expect(s.server.count('GET /status')).toBe(++st)
+  })
+
+  it('a failed token action rethrows and still refreshes the status', async () => {
+    const s = (current = setup(defaultHandlers({ 'DELETE /token': () => apiErr(502, 'upstream_unavailable') })))
+    s.start()
+    await flush()
+    const st = s.server.count('GET /status')
+    await expect(s.store.revokeToken()).rejects.toMatchObject({ code: 'upstream_unavailable' })
+    expect(s.server.count('GET /status')).toBe(st + 1)
+  })
+
   it('an older status refresh does not overwrite the status an action returned', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
