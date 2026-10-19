@@ -291,6 +291,9 @@ type Tx interface {
 	// CountJobsInStates counts the user's jobs in any of states (all states
 	// if empty) with the given trigger kind (any kind if empty).
 	CountJobsInStates(userID string, states []JobState, triggerKind string) (int, error)
+	// CountJobsSince counts the user's jobs in any state created at or after
+	// since with the given trigger kind (any kind if empty).
+	CountJobsSince(userID, triggerKind string, since time.Time) (int, error)
 	// CountConversations counts the user's conversations.
 	CountConversations(userID string) (int, error)
 	// ChangeMarks returns the user's change marks (see ChangeMarks).

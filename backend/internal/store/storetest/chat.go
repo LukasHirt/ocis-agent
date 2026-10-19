@@ -760,6 +760,53 @@ func runChatCounts(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("jobs created since an instant are counted per user and kind", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		mustUser(t, st, "u2")
+		mk := func(user, kind string) {
+			mustTx(t, st, func(tx store.Tx) error {
+				_, err := tx.InsertJob(store.Job{UserID: user, TriggerKind: kind, Goal: "g"})
+				return err
+			})
+		}
+		mk("u1", "chat") // before the instant
+		clk.Advance(time.Second)
+		since := clk.Now()
+		mk("u1", "chat") // exactly at the instant: counted
+		clk.Advance(time.Second)
+		mk("u1", "chat")
+		mk("u1", "sweep")
+		mk("u2", "chat")
+		var cancelID string
+		mustTx(t, st, func(tx store.Tx) error {
+			j, err := tx.InsertJob(store.Job{UserID: "u1", TriggerKind: "chat", Goal: "g"})
+			cancelID = j.ID
+			return err
+		})
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", cancelID) }) // any state counts
+		for name, tc := range map[string]struct {
+			user, kind string
+			since      time.Time
+			want       int
+		}{
+			"u1 chat since":   {"u1", "chat", since, 3},
+			"u1 any since":    {"u1", "", since, 4},
+			"u1 chat all":     {"u1", "chat", since.Add(-time.Hour), 4},
+			"u1 chat later":   {"u1", "chat", clk.Now().Add(time.Millisecond), 0},
+			"u2 chat":         {"u2", "chat", since, 1},
+			"unknown user":    {"ghost", "", since, 0},
+			"u1 unknown kind": {"u1", "nope", since, 0},
+		} {
+			_ = viewErr(st, func(tx store.Tx) error {
+				if n, err := tx.CountJobsSince(tc.user, tc.kind, tc.since); err != nil || n != tc.want {
+					t.Errorf("%s = %d %v, want %d", name, n, err, tc.want)
+				}
+				return nil
+			})
+		}
+	})
+
 	t.Run("conversations are counted per user", func(t *testing.T) {
 		st, _ := open(t, f)
 		mustUser(t, st, "u1")

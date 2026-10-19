@@ -44,6 +44,7 @@ func TestKeysetPagesUseAnIndexRange(t *testing.T) {
 		"approvals":             {`SELECT id FROM approvals WHERE user_id = ?` + cond + ` ORDER BY requested_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, cargs...), "approvals_user (user_id=? AND requested_at<?)"},
 		"conversations":         {`SELECT id FROM conversations WHERE user_id = ?` + ccond + ` ORDER BY updated_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, ccargs...), "conversations_user (user_id=? AND updated_at<?)"},
 		"messages":              {`SELECT id FROM messages WHERE conversation_id = ? AND user_id = ?` + mcond + ` ORDER BY created_at DESC, id DESC LIMIT 10`, append([]any{"c1", "u1"}, mcargs...), "messages_conversation (conversation_id=? AND created_at<?)"},
+		"jobs since":            {`SELECT COUNT(*) FROM jobs WHERE user_id = ? AND created_at >= ? AND trigger_kind = ?`, []any{"u1", int64(1), "chat"}, "jobs_user (user_id=? AND created_at>?)"},
 		"change marks jobs":     {`SELECT COALESCE(MAX(updated_at), 0) FROM jobs WHERE user_id = ?`, []any{"u1"}, "jobs_user_updated (user_id=?)"},
 		"change marks messages": {`SELECT COALESCE(MAX(created_at), 0) FROM messages WHERE user_id = ?`, []any{"u1"}, "messages_user (user_id=?)"},
 	} {

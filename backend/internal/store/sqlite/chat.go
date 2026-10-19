@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -282,6 +283,20 @@ func (t *tx) CountJobsInStates(userID string, states []store.JobState, triggerKi
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
+	if triggerKind != "" {
+		query += ` AND trigger_kind = ?`
+		args = append(args, triggerKind)
+	}
+	var n int
+	err := t.q.QueryRowContext(t.ctx, query, args...).Scan(&n)
+	return n, err
+}
+
+// CountJobsSince implements store.Tx. It is a range on jobs_user
+// (user_id, created_at).
+func (t *tx) CountJobsSince(userID, triggerKind string, since time.Time) (int, error) {
+	query := `SELECT COUNT(*) FROM jobs WHERE user_id = ? AND created_at >= ?`
+	args := []any{userID, ms(since)}
 	if triggerKind != "" {
 		query += ` AND trigger_kind = ?`
 		args = append(args, triggerKind)
