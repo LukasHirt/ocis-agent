@@ -24,6 +24,7 @@ type Config struct {
 	LLM           LLMConfig
 	Agent         AgentConfig
 	Process       ProcessConfig
+	API           APIConfig
 }
 
 // Load reads and validates the configuration. getenv is os.Getenv in
@@ -85,6 +86,10 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	if cfg.Process, err = loadProcess(getenv); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.API, err = loadAPI(getenv); err != nil {
 		return Config{}, err
 	}
 
