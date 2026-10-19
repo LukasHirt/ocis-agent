@@ -105,6 +105,7 @@ type Server struct {
 	userLm    *limiter
 	seen      *seenThrottle
 	verifying verifyLimiter // one audit verification per user
+	actions   *cooldown     // enrol, renew, revoke, revoke-all per user
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
@@ -142,6 +143,7 @@ func NewServer(d Deps) (*Server, error) {
 		authFail: newLimiter(d.Cfg.RatePerSecond*ipRateFactor, d.Cfg.Burst*ipBurstFactor, maxLimiterKeys, d.Now),
 		userLm:   newLimiter(d.Cfg.RatePerSecond, d.Cfg.Burst, maxLimiterKeys, d.Now),
 		seen:     newSeenThrottle(seenEvery, maxLimiterKeys, d.Now),
+		actions:  newCooldown(actionCooldown, maxLimiterKeys, d.Now),
 
 		baseTimeout: defaultTimeout,
 	}

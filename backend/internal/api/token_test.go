@@ -1,11 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient/fakeocis"
@@ -457,5 +459,61 @@ func TestRevokeByAUserWhoNeverEnrolledLeavesNoAuditRow(t *testing.T) {
 	}
 	if evs := s.auditOf(t, einsteinID); len(evs) != 0 {
 		t.Errorf("audit = %+v", evs)
+	}
+}
+
+// The actions that call oCIS (enrol, renew, revoke, revoke-all) share a
+// per-user cooldown; a request refused before the action does not use it.
+func TestOCISBoundActionsHaveAPerUserCooldown(t *testing.T) {
+	s := newStack(t)
+	s.srv.actions.every = actionCooldown
+	s.enroll(t, "einstein")
+	rec := s.as("einstein", http.MethodPost, "/agent-api/v1/token/renew", "")
+	wantError(t, rec, 429, "rate_limited")
+	if ra := rec.Header().Get("Retry-After"); ra != "5" {
+		t.Errorf("Retry-After = %q", ra)
+	}
+	wantError(t, s.as("einstein", http.MethodDelete, "/agent-api/v1/token", ""), 429, "rate_limited")
+	wantError(t, s.as("einstein", http.MethodPost, "/agent-api/v1/token/revoke-all", `{"confirm":true}`), 429, "rate_limited")
+	wantError(t, s.as("einstein", http.MethodPost, "/agent-api/v1/enroll", ""), 429, "rate_limited")
+	s.enroll(t, "marie") // her own cooldown
+
+	s.fake.Advance(actionCooldown)
+	if rec := s.as("einstein", http.MethodPost, "/agent-api/v1/token/renew", ""); rec.Code != 200 {
+		t.Fatalf("renew after the cooldown: %d %s", rec.Code, rec.Body.String())
+	}
+	s.fake.Advance(actionCooldown)
+	// a refused body does not start the cooldown
+	wantError(t, s.as("einstein", http.MethodPost, "/agent-api/v1/token/revoke-all", `{"confirm":false}`), 400, "invalid_request")
+	if rec := s.as("einstein", http.MethodPost, "/agent-api/v1/token/revoke-all", `{"confirm":true}`); rec.Code != 200 {
+		t.Errorf("revoke-all: %d %s", rec.Code, rec.Body.String())
+	}
+	wantError(t, s.as("einstein", http.MethodDelete, "/agent-api/v1/token", ""), 429, "rate_limited")
+}
+
+func TestCooldownIsBounded(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	cd := newCooldown(5*time.Second, 3, c.Now)
+	for i := range 10 {
+		cd.take(fmt.Sprintf("u%d", i))
+		if n := cd.size(); n > 3 {
+			t.Fatalf("size = %d", n)
+		}
+	}
+	if ok, wait := cd.take("u0"); !ok && wait <= 0 {
+		t.Errorf("take = %v %v", ok, wait)
+	}
+	c.Advance(6 * time.Second)
+	if ok, _ := cd.take("u1"); !ok {
+		t.Error("cooldown did not end")
+	}
+	if ok, wait := cd.take("u1"); ok || wait != 5*time.Second {
+		t.Errorf("second take = %v %v", ok, wait)
+	}
+	off := newCooldown(0, 3, c.Now)
+	for range 3 {
+		if ok, _ := off.take("u"); !ok {
+			t.Error("a zero cooldown refused")
+		}
 	}
 }

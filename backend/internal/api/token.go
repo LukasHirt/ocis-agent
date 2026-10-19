@@ -15,6 +15,17 @@ import (
 // revoke, revoke-all and its preview); it is never stored, logged or
 // echoed. Renewal uses the agent's own app token inside auth.
 
+// actionAllowed starts the user's cooldown of the oCIS-bound actions, or
+// answers 429 with Retry-After and reports false. Call it after the body was
+// validated, right before the action.
+func (s *Server) actionAllowed(w http.ResponseWriter, r *http.Request, userID string) bool {
+	ok, wait := s.actions.take(userID)
+	if !ok {
+		rateLimited(w, r, wait)
+	}
+	return ok
+}
+
 // caller returns the principal and the validated bearer of the request.
 func caller(r *http.Request) (Principal, ocisclient.Secret, error) {
 	p, ok := principal(r.Context())
@@ -54,6 +65,9 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) error {
 	p, bearer, err := caller(r)
 	if err != nil {
 		return err
+	}
+	if !s.actionAllowed(w, r, p.UserID) {
+		return nil
 	}
 	existed := false
 	if err := s.d.Store.View(r.Context(), func(tx store.Tx) error {
@@ -117,6 +131,9 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if !s.actionAllowed(w, r, p.UserID) {
+		return nil
+	}
 	n, err := s.d.Auth.Revoke(r.Context(), p.UserID, bearer)
 	if err != nil {
 		return err
@@ -165,6 +182,9 @@ func (s *Server) revokeAll(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if !s.actionAllowed(w, r, p.UserID) {
+		return nil
+	}
 	n, err := s.d.Auth.RevokeAll(r.Context(), p.UserID, bearer, true)
 	if err != nil {
 		return err
@@ -184,6 +204,9 @@ func (s *Server) renew(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
+	}
+	if !s.actionAllowed(w, r, p.UserID) {
+		return nil
 	}
 	res, err := s.d.Auth.Renew(r.Context(), p.UserID)
 	if err != nil {

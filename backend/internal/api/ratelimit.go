@@ -212,3 +212,63 @@ func clientKey(r *http.Request) string {
 	p, _ := a.Prefix(64)
 	return p.String()
 }
+
+// actionCooldown is the per-user pause between the actions that call oCIS
+// with the user's or the agent's credentials (enrol, renew, revoke,
+// revoke-all): each creates or deletes app tokens, so a client looping on
+// them must not hammer oCIS.
+const actionCooldown = 5 * time.Second
+
+// cooldown allows one action per key per period, in memory and bounded. A
+// key it cannot record (the map is full of running cooldowns) is allowed:
+// the per-user rate limit still bounds it.
+type cooldown struct {
+	every time.Duration // 0 disables it
+	max   int
+	now   func() time.Time
+
+	mu        sync.Mutex
+	until     map[string]time.Time
+	lastSweep time.Time
+}
+
+func newCooldown(every time.Duration, max int, now func() time.Time) *cooldown {
+	return &cooldown{every: every, max: max, now: now, until: map[string]time.Time{}}
+}
+
+// take starts the key's cooldown, or reports how long the running one
+// lasts.
+func (c *cooldown) take(key string) (bool, time.Duration) {
+	if c.every <= 0 {
+		return true, 0
+	}
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.until[key]
+	if ok && now.Before(u) {
+		return false, u.Sub(now)
+	}
+	if !ok && len(c.until) >= c.max {
+		if !c.lastSweep.IsZero() && now.Sub(c.lastSweep) < sweepEvery {
+			return true, 0
+		}
+		c.lastSweep = now
+		for k, t := range c.until {
+			if !now.Before(t) {
+				delete(c.until, k)
+			}
+		}
+		if len(c.until) >= c.max {
+			return true, 0
+		}
+	}
+	c.until[key] = now.Add(c.every)
+	return true, 0
+}
+
+func (c *cooldown) size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.until)
+}
