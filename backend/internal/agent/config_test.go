@@ -27,7 +27,7 @@ func TestValidateRejectsNegative(t *testing.T) {
 	}
 	for _, c := range []Config{
 		{MaxSteps: -1}, {MaxRuns: -1}, {MaxTokens: -1}, {RequeueDelay: -1}, {PausedDelay: -1},
-		{ShutdownRequeueDelay: -1},
+		{ShutdownRequeueDelay: -1}, {UserDailyTokens: -1},
 	} {
 		if err := c.validate(); err == nil {
 			t.Errorf("%+v: want error", c)

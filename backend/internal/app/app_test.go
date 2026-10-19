@@ -510,11 +510,46 @@ func TestTheShutdownDelayCoversTheRetrySettle(t *testing.T) {
 	}
 }
 
+// The API server bounds the headers and idle connections but has no write
+// timeout: long responses (the audit export) use per-request deadlines.
+func TestTheAPIServerHasTimeouts(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.build(llmtest.New())
+	srv := a.newServer(http.NotFoundHandler(), false)
+	if srv.ReadHeaderTimeout != 10*time.Second || srv.IdleTimeout != 120*time.Second ||
+		srv.MaxHeaderBytes != 64<<10 || srv.WriteTimeout != 0 || srv.ReadTimeout != 0 {
+		t.Errorf("api server: header %v idle %v max header %d write %v read %v",
+			srv.ReadHeaderTimeout, srv.IdleTimeout, srv.MaxHeaderBytes, srv.WriteTimeout, srv.ReadTimeout)
+	}
+}
+
 func TestTheDebugServerHasTimeouts(t *testing.T) {
 	f := newFixture(t, nil)
 	a := f.build(llmtest.New())
 	srv := a.newServer(a.debugHandler(), true)
 	if srv.ReadHeaderTimeout != 10*time.Second || srv.WriteTimeout != 10*time.Second || srv.IdleTimeout != 60*time.Second {
 		t.Errorf("timeouts: header %v write %v idle %v", srv.ReadHeaderTimeout, srv.WriteTimeout, srv.IdleTimeout)
+	}
+}
+
+// The runner enforces the operator's cap (AGENT_USER_DAILY_TOKENS) although
+// the user's stored budget (the default 200000) is higher.
+func TestTheRunnerEnforcesTheOperatorsDailyTokenCap(t *testing.T) {
+	f := newFixture(t, map[string]string{"AGENT_USER_DAILY_TOKENS": "1000"})
+	p := llmtest.New(llmtest.Say("first", 600, 500), llmtest.Say("second", 1, 1))
+	a := f.build(p)
+	f.enroll(a)
+	j1 := f.enqueue(a, "one")
+	r := start(t, a)
+	f.waitState(j1, store.JobSucceeded, 10*time.Second)
+	j2 := f.enqueue(a, "two")
+	if got := f.waitState(j2, store.JobFailed, 10*time.Second); got.Error != agent.ReasonBudget {
+		t.Errorf("second job error = %q, want the budget reason", got.Error)
+	}
+	if n := len(p.Requests()); n != 1 {
+		t.Errorf("%d model calls, want 1 (the budget is used up)", n)
+	}
+	if err := r.stop(t, 15*time.Second); err != nil {
+		t.Errorf("Run = %v", err)
 	}
 }

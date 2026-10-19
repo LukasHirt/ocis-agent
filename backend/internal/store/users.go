@@ -64,8 +64,8 @@ type Policy struct {
 	Watch            []string
 	SweepInterval    time.Duration
 	QuietHours       string
-	DailyTokens      int64
-	DormancyDays     int // 0 disables the dormancy pause
+	DailyTokens      int64 // 0: the operator's cap (DailyBudget); a new user starts there
+	DormancyDays     int   // 0 disables the dormancy pause
 	// Models maps a task kind (ModelTaskChat, ModelTaskProactive) to the model
 	// id the user prefers. The store does not know the operator's catalog:
 	// check llm.Catalog.Has before setting one and use llm.Catalog.Resolve
@@ -74,13 +74,28 @@ type Policy struct {
 	UpdatedAt time.Time
 }
 
-// DefaultPolicy returns the policy a newly enrolled user starts with.
+// DailyBudget is a user's daily token budget under the operator's cap
+// (AGENT_USER_DAILY_TOKENS): a stored value of 0 (or below) or above the cap
+// is the cap. Without a cap (limit 0, which the configuration never allows)
+// the stored value applies and 0 means unlimited. The status endpoint and
+// the runner's budget check both use it, so the limit shown is the one
+// enforced.
+func DailyBudget(stored, limit int64) int64 {
+	if limit > 0 && (stored <= 0 || stored > limit) {
+		return limit
+	}
+	return stored
+}
+
+// DefaultPolicy returns the policy a newly enrolled user starts with. Its
+// DailyTokens is 0, the operator's cap, so a user who never changed it
+// follows the cap when the operator changes it.
 func DefaultPolicy(userID string, now time.Time) Policy {
 	return Policy{
 		UserID:        userID,
 		Watch:         []string{},
 		SweepInterval: 6 * time.Hour,
-		DailyTokens:   200000,
+		DailyTokens:   0,
 		DormancyDays:  30,
 		Models:        map[string]string{},
 		UpdatedAt:     now,

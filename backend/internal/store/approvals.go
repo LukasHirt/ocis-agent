@@ -90,6 +90,16 @@ type ApprovalFilter struct {
 	States []ApprovalState
 	JobID  string
 	Limit  int
+	// Before, if set, keeps only the approvals strictly after this key in
+	// the list order (requested_at DESC, id DESC): keyset pagination with
+	// the RequestedAt and ID of the previous page's last approval.
+	Before *PageKey
+	// MaxBytes, if > 0, ends the list once the rows' Args and Preview
+	// together reach this many bytes (the row that reaches it is included,
+	// so at least one row is returned): a list of approvals, whose arguments
+	// can be up to 2 MiB each, stays within the budget plus one row. The
+	// rows past the budget are never loaded. < 0 is ErrInvalid.
+	MaxBytes int64
 }
 
 // ApprovalPatch carries what a worker transition may record.

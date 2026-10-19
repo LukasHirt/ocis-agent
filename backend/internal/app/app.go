@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/agent"
+	"github.com/owncloud/ocis-agent/backend/internal/api"
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/config"
@@ -67,6 +68,8 @@ type Options struct {
 type tuning struct {
 	queuePoll            time.Duration // queue poll interval
 	shutdownRequeueDelay time.Duration // agent.Config.ShutdownRequeueDelay
+	// wrapWaker wraps the queue the API wakes (to observe the wakes)
+	wrapWaker func(api.Waker) api.Waker
 }
 
 // App holds the built services of one process.
@@ -91,6 +94,7 @@ type App struct {
 	workers   []*agent.Worker      // empty without the worker role
 	workerIDs []string             // ids of workers, in order
 	scheduler *scheduler.Scheduler // nil without the worker role
+	api       *api.Server          // nil without the api role
 
 	// the context the workers' jobs run under; Run cancels it in the last
 	// shutdown phase
@@ -111,7 +115,7 @@ type App struct {
 	// beforeWorkers, if set, runs in Run after the listeners are up and
 	// before the workers start (tests only).
 	beforeWorkers func()
-	// apiHandler, if set, replaces the API router (tests only).
+	// apiHandler, if set, replaces the API server's handler (tests only).
 	apiHandler http.Handler
 
 	retrySettle          time.Duration
@@ -191,6 +195,24 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 	}
 	a.queue = queue.New(st, qopts...)
 	a.env = agent.EnvBuilder{Creds: a.auth, Store: st, Files: a.client, Memory: a.memory}
+	if cfg.Process.Has(RoleAPI) {
+		var waker api.Waker = a.queue
+		if opts.tune.wrapWaker != nil {
+			waker = opts.tune.wrapWaker(waker)
+		}
+		// without a model endpoint the catalog is empty: no model can be
+		// chosen and models.available is empty
+		if a.api, err = api.NewServer(api.Deps{
+			Store: st, Validator: a.validator, Auth: a.auth, Gate: a.gate, Queue: waker, Catalog: cfg.LLM.Catalog,
+			Cfg: api.Settings{
+				AllowedOrigin: cfg.AllowedOrigin, KillSwitchEnv: cfg.Agent.KillSwitch,
+				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
+			},
+			Log: a.log, Now: a.now,
+		}); err != nil {
+			return nil, fmt.Errorf("app: api: %w", err)
+		}
+	}
 
 	a.jobCtx, a.stopJobs = context.WithCancel(context.Background())
 	if !worker {
@@ -220,7 +242,8 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	rcfg := agent.Config{
 		MaxSteps: cfg.Agent.MaxSteps, MaxRuns: cfg.Agent.MaxRuns, MaxTokens: cfg.Agent.MaxTokens,
-		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay, Now: a.now,
+		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
+		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
 	var err error
 	if a.runner, err = agent.NewRunner(agent.Deps{

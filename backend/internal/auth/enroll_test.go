@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
+	"github.com/owncloud/ocis-agent/backend/internal/ocisclient/fakeocis"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
@@ -269,7 +270,7 @@ func TestDormancyDaysApplyToNewUsersOnly(t *testing.T) {
 
 func TestEnrolmentRejectsABearerOCISRefuses(t *testing.T) {
 	e := newEnv(t)
-	err := e.svc.Enroll(bg, e.ident, ocisclient.Secret("oidc:nobody"))
+	err := e.svc.Enroll(bg, e.ident, ocisclient.Secret(fakeocis.OIDCToken("nobody")))
 	if !errors.Is(err, ocisclient.ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized in the chain", err)
 	}

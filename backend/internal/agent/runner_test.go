@@ -74,6 +74,8 @@ func TestNewRunnerNeedsEveryDependency(t *testing.T) {
 		"creds":    func(d *Deps) { d.Creds = nil },
 		"env":      func(d *Deps) { d.Env.Memory = nil },
 		"cfg":      func(d *Deps) { d.Cfg.MaxSteps = -1 },
+		"no cap":   func(d *Deps) { d.Cfg.UserDailyTokens = 0 },
+		"cap < 0":  func(d *Deps) { d.Cfg.UserDailyTokens = -1 },
 	} {
 		d := f.deps()
 		mut(&d)
@@ -575,18 +577,67 @@ func TestTheDailyTokenBudgetFailsTheJobBeforeTheModelCall(t *testing.T) {
 			t.Error("the model must not be called")
 		}
 	})
-	t.Run("zero is unlimited", func(t *testing.T) {
+	// the operator's cap (AGENT_USER_DAILY_TOKENS) bounds the stored value:
+	// the budget is store.DailyBudget, the same function the status shows
+	capped := func(t *testing.T, stored, limit int64) (*fixture, *llmtest.Provider) {
+		t.Helper()
 		f := newFixture(t)
-		f.provider = llmtest.New(llmtest.Say("x", 1, 1))
-		f.setPolicy(func(p *store.Policy) { p.DailyTokens = 0 })
+		p := llmtest.New(llmtest.Say("x", 1, 1))
+		f.provider = p
+		f.cfg.UserDailyTokens = limit
+		f.setPolicy(func(p *store.Policy) { p.DailyTokens = stored })
 		f.enqueue("g")
 		c := f.claim()
 		seed(f, c)
 		if err := f.runner().Run(bg, c); err != nil {
 			t.Fatal(err)
 		}
+		return f, p
+	}
+	t.Run("stored zero is the operator's cap", func(t *testing.T) {
+		f, p := capped(t, 0, 100)
+		assertFailed(t, f, ReasonBudget)
+		if len(p.Requests()) != 0 {
+			t.Error("the model must not be called")
+		}
+	})
+	t.Run("stored above the cap is the cap", func(t *testing.T) {
+		f, p := capped(t, 200000, 100)
+		assertFailed(t, f, ReasonBudget)
+		if len(p.Requests()) != 0 {
+			t.Error("the model must not be called")
+		}
+	})
+	t.Run("stored below the cap is the stored value", func(t *testing.T) {
+		f, p := capped(t, 100, 200000)
+		assertFailed(t, f, ReasonBudget)
+		if len(p.Requests()) != 0 {
+			t.Error("the model must not be called")
+		}
+	})
+	t.Run("under both the stored value and the cap runs", func(t *testing.T) {
+		f, _ := capped(t, 0, 101)
 		if f.job().State != store.JobSucceeded {
 			t.Fatalf("job = %+v", f.job())
+		}
+	})
+	t.Run("a new user's policy follows the operator's cap", func(t *testing.T) {
+		f := newFixture(t) // the policy CreateUser made, untouched
+		f.provider = llmtest.New(llmtest.Say("x", 1, 1))
+		f.cfg.UserDailyTokens = 1000000
+		f.enqueue("g")
+		c := f.claim()
+		if err := f.st.InTx(bg, func(tx store.Tx) error {
+			_, err := tx.AppendStep(store.JobStep{JobID: c.Job.ID, Kind: "llm", Status: "ok", TokensIn: 250000, TokensOut: 50000}, c.Fence)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.runner().Run(bg, c); err != nil {
+			t.Fatal(err)
+		}
+		if f.job().State != store.JobSucceeded {
+			t.Fatalf("300k of a 1M cap used: job = %+v", f.job())
 		}
 	})
 	t.Run("yesterday does not count", func(t *testing.T) {

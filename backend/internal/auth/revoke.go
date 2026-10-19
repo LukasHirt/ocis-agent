@@ -112,8 +112,11 @@ func (s *Service) revokeLocked(ctx context.Context, userID string, bearer ociscl
 	detail := fmt.Sprintf("tokens=%d", deleted)
 	err = s.d.Store.InTx(cctx, func(tx store.Tx) error {
 		if _, err := tx.GetUser(userID); errors.Is(err, store.ErrNotFound) {
-			// never enrolled here: no local state to change, but the action is
-			// still audited
+			// never enrolled here: no local state to change; an action that
+			// deleted tokens is still audited, an empty one leaves no trace
+			if deleted == 0 {
+				return nil
+			}
 			return s.audit(tx, userID, kind, "oidc", "ok", detail)
 		} else if err != nil {
 			return err

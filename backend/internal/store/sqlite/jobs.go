@@ -87,8 +87,41 @@ func (t *tx) GetJob(userID, jobID string) (store.Job, error) {
 	return j, err
 }
 
-// ListJobs implements store.Tx.
-func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
+// GetJobStatus implements store.Tx.
+func (t *tx) GetJobStatus(userID, jobID string) (store.JobStatus, error) {
+	var state string
+	var created, updated int64
+	err := t.q.QueryRowContext(t.ctx, `SELECT state, created_at, updated_at FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
+		Scan(&state, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.JobStatus{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.JobStatus{}, err
+	}
+	return store.JobStatus{State: store.JobState(state), CreatedAt: fromMS(created), UpdatedAt: fromMS(updated)}, nil
+}
+
+// keysetBefore returns the condition and arguments of a PageKey over the
+// given time column (rows strictly after the key in "col DESC, id DESC").
+// It is written as "col <= ? AND (col < ? OR id < ?)" so that SQLite uses a
+// range on the (user_id, col) index; the equivalent "col < ? OR (col = ? AND
+// id < ?)" makes it scan the user's whole index from the start, which turns
+// walking all pages quadratic.
+func keysetBefore(col string, k *store.PageKey) (string, []any, error) {
+	if k == nil {
+		return "", nil, nil
+	}
+	if k.ID == "" || k.At.IsZero() {
+		return "", nil, store.Invalid("a page key needs a time and an id")
+	}
+	at := ms(k.At)
+	return ` AND ` + col + ` <= ? AND (` + col + ` < ? OR id < ?)`, []any{at, at, k.ID}, nil
+}
+
+// jobListQuery builds the WHERE ... ORDER BY ... LIMIT tail shared by
+// ListJobs and ListJobSummaries.
+func jobListQuery(userID string, f store.JobFilter) (string, []any, error) {
 	limit := f.Limit
 	if limit <= 0 {
 		limit = defaultJobLimit
@@ -96,7 +129,7 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 	if limit > maxJobLimit {
 		limit = maxJobLimit
 	}
-	query := `SELECT ` + jobColumns + ` FROM jobs WHERE user_id = ?`
+	query := ` FROM jobs WHERE user_id = ?`
 	args := []any{userID}
 	if len(f.States) > 0 {
 		marks := make([]string, len(f.States))
@@ -106,10 +139,22 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
-	args = append(args, limit)
+	cond, cargs, err := keysetBefore("created_at", f.Before)
+	if err != nil {
+		return "", nil, err
+	}
+	query += cond + ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(append(args, cargs...), limit)
+	return query, args, nil
+}
 
-	rows, err := t.q.QueryContext(t.ctx, query, args...)
+// ListJobs implements store.Tx.
+func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
+	tail, args, err := jobListQuery(userID, f)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := t.q.QueryContext(t.ctx, `SELECT `+jobColumns+tail, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +165,40 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 		if err != nil {
 			return nil, err
 		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// jobSummaryColumns are jobColumns without the checkpoint, plus the step
+// count (a correlated count over the job_steps primary key). Not selecting
+// the checkpoint keeps it out of Go memory, but SQLite still reads its
+// overflow pages from disk for the columns stored after it in the row.
+const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at,
+	(SELECT COUNT(*) FROM job_steps s WHERE s.job_id = jobs.id)`
+
+// ListJobSummaries implements store.Tx.
+func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSummary, error) {
+	tail, args, err := jobListQuery(userID, f)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := t.q.QueryContext(t.ctx, `SELECT `+jobSummaryColumns+tail, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.JobSummary
+	for rows.Next() {
+		var j store.JobSummary
+		var state string
+		var notBefore, created, updated int64
+		if err := rows.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
+			&notBefore, &j.Error, &created, &updated, &j.StepCount); err != nil {
+			return nil, err
+		}
+		j.State = store.JobState(state)
+		j.NotBefore, j.CreatedAt, j.UpdatedAt = fromMS(notBefore), fromMS(created), fromMS(updated)
 		out = append(out, j)
 	}
 	return out, rows.Err()

@@ -19,7 +19,11 @@ type Config struct {
 	// off by the shutdown is reconciled and retried, not reported unknown.
 	ShutdownRequeueDelay time.Duration
 	KillSwitch           bool
-	Now                  func() time.Time
+	// UserDailyTokens is the operator's cap of a user's daily token budget
+	// (AGENT_USER_DAILY_TOKENS, required): the budget is
+	// store.DailyBudget(Policy.DailyTokens, UserDailyTokens).
+	UserDailyTokens int64
+	Now             func() time.Time
 }
 
 // DefaultConfig returns the default limits.
@@ -66,7 +70,7 @@ func (c Config) withDefaults() Config {
 // validate rejects negative limits.
 func (c Config) validate() error {
 	if c.MaxSteps < 0 || c.MaxRuns < 0 || c.MaxTokens < 0 || c.RequeueDelay < 0 || c.PausedDelay < 0 ||
-		c.ShutdownRequeueDelay < 0 {
+		c.ShutdownRequeueDelay < 0 || c.UserDailyTokens < 0 {
 		return errors.New("agent: config values must not be negative")
 	}
 	return nil

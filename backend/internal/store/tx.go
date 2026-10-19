@@ -78,9 +78,15 @@ type Tx interface {
 	InsertJob(j Job) (Job, error)
 	// GetJob returns the user's job, or ErrNotFound.
 	GetJob(userID, jobID string) (Job, error)
+	// GetJobStatus returns the user's job's state and creation and update
+	// times without reading the checkpoint (up to 1 MiB), or ErrNotFound.
+	GetJobStatus(userID, jobID string) (JobStatus, error)
 	// ListJobs returns the user's jobs, newest first. f.Limit <= 0 means 50;
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)
+	// ListJobSummaries is ListJobs without the checkpoints and with each
+	// job's step count, in one query (same order, filter and limits).
+	ListJobSummaries(userID string, f JobFilter) ([]JobSummary, error)
 	// CancelJob cancels a job that is not terminal yet. ErrNotFound, or
 	// ErrConflict if the job is already terminal.
 	CancelJob(userID, jobID string) error
@@ -135,6 +141,13 @@ type Tx interface {
 	InsertApproval(a Approval, fence int64) (Approval, error)
 	// GetApproval returns the user's approval, or ErrNotFound.
 	GetApproval(userID, id string) (Approval, error)
+	// GetApprovalKey returns the user's approval's list position
+	// (RequestedAt and ID) without loading its args, or ErrNotFound.
+	GetApprovalKey(userID, id string) (PageKey, error)
+	// CountPendingOfLiveJobs counts the user's pending approvals whose job
+	// has not ended (queued, running or waiting_approval): the ones the
+	// user can still decide. It loads no approval.
+	CountPendingOfLiveJobs(userID string) (int, error)
 	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
 	// means 50; the maximum is 500.
 	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)

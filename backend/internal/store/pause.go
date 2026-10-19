@@ -33,8 +33,10 @@ func pauseRank(reason string) int {
 // The user's own pause is sticky: automatic reasons never replace it. A user
 // pause does replace an automatic one. Among automatic reasons the higher
 // rank wins (token_anomaly, credential_revoked, credential_invalid,
-// credential_expired, dormant). Automatic reasons are level-triggered: their
-// checks run again, so replacing or clearing one is safe.
+// credential_expired, dormant). Only dormant and token_anomaly are
+// re-raised by periodic checks. The credential_* pauses are re-raised only
+// when oCIS answers 401 for the stored credentials, so a caller (the API) must
+// not replace one with a user pause: clearing it would lose the reason.
 func PauseSupersedes(current, next string) bool {
 	switch {
 	case next == "":

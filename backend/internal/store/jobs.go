@@ -49,10 +49,51 @@ type Job struct {
 	UpdatedAt   time.Time
 }
 
-// JobFilter narrows ListJobs.
+// JobFilter narrows ListJobs and ListJobSummaries.
 type JobFilter struct {
 	States []JobState
 	Limit  int
+	// Before, if set, keeps only the jobs strictly after this key in the
+	// list order (created_at DESC, id DESC), i.e. older ones: keyset
+	// pagination. Use the CreatedAt and ID of the last job of the previous
+	// page; the key never changes, so a row that changed state since does
+	// not shift the page.
+	Before *PageKey
+}
+
+// PageKey is a position in a newest-first list: the row's sort time
+// (jobs: CreatedAt, approvals: RequestedAt) and its id. Both are required
+// (ErrInvalid otherwise).
+type PageKey struct {
+	At time.Time
+	ID string
+}
+
+// JobSummary is a job without its checkpoint (which can be up to 1 MiB)
+// plus the number of its steps: the projection for job lists.
+type JobSummary struct {
+	ID          string
+	UserID      string
+	TriggerKind string
+	TriggerRef  string
+	Goal        string
+	State       JobState
+	Attempt     int
+	Runs        int
+	NotBefore   time.Time
+	Error       string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StepCount   int
+}
+
+// JobStatus is the light lookup of a job (GetJobStatus): its state, its
+// creation (the list's page key) and its last change, without the
+// checkpoint.
+type JobStatus struct {
+	State     JobState
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // JobStep is one entry of a job's timeline.
