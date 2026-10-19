@@ -328,6 +328,23 @@ func TestRevokeOfAnUnenrolledUserStillWritesTheAudit(t *testing.T) {
 	}
 }
 
+// A revoke that deleted nothing for a user who never enrolled leaves no
+// trace: there is no state and no action to record.
+func TestAnEmptyRevokeOfAnUnenrolledUserWritesNoAudit(t *testing.T) {
+	e := newEnv(t)
+	for _, revoke := range []func() (int, error){
+		func() (int, error) { return e.svc.Revoke(bg, userID, e.bearer) },
+		func() (int, error) { return e.svc.RevokeAll(bg, userID, e.bearer, true) },
+	} {
+		if n, err := revoke(); err != nil || n != 0 {
+			t.Fatalf("n = %d, err = %v", n, err)
+		}
+	}
+	if evs := e.events(t, userID); len(evs) != 0 {
+		t.Fatalf("audit = %+v", evs)
+	}
+}
+
 // cancelStore cancels the caller's context just before every transaction, as
 // a request cancelled right after the remote deletes would.
 type cancelStore struct {

@@ -448,3 +448,14 @@ func TestTheBearerNeverLeaks(t *testing.T) {
 		}
 	}
 }
+
+func TestRevokeByAUserWhoNeverEnrolledLeavesNoAuditRow(t *testing.T) {
+	s := newStack(t)
+	rec := s.as("einstein", http.MethodDelete, "/agent-api/v1/token", "")
+	if rec.Code != 200 || rec.Body.String() != `{"revoked":0}`+"\n" {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if evs := s.auditOf(t, einsteinID); len(evs) != 0 {
+		t.Errorf("audit = %+v", evs)
+	}
+}
