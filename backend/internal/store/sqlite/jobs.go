@@ -87,8 +87,27 @@ func (t *tx) GetJob(userID, jobID string) (store.Job, error) {
 	return j, err
 }
 
+// GetJobStatus implements store.Tx.
+func (t *tx) GetJobStatus(userID, jobID string) (store.JobStatus, error) {
+	var state string
+	var updated int64
+	err := t.q.QueryRowContext(t.ctx, `SELECT state, updated_at FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
+		Scan(&state, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.JobStatus{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.JobStatus{}, err
+	}
+	return store.JobStatus{State: store.JobState(state), UpdatedAt: fromMS(updated)}, nil
+}
+
 // keysetBefore returns the condition and arguments of a PageKey over the
 // given time column (rows strictly after the key in "col DESC, id DESC").
+// It is written as "col <= ? AND (col < ? OR id < ?)" so that SQLite uses a
+// range on the (user_id, col) index; the equivalent "col < ? OR (col = ? AND
+// id < ?)" makes it scan the user's whole index from the start, which turns
+// walking all pages quadratic.
 func keysetBefore(col string, k *store.PageKey) (string, []any, error) {
 	if k == nil {
 		return "", nil, nil
@@ -97,7 +116,7 @@ func keysetBefore(col string, k *store.PageKey) (string, []any, error) {
 		return "", nil, store.Invalid("a page key needs a time and an id")
 	}
 	at := ms(k.At)
-	return ` AND (` + col + ` < ? OR (` + col + ` = ? AND id < ?))`, []any{at, at, k.ID}, nil
+	return ` AND ` + col + ` <= ? AND (` + col + ` < ? OR id < ?)`, []any{at, at, k.ID}, nil
 }
 
 // jobListQuery builds the WHERE ... ORDER BY ... LIMIT tail shared by
@@ -152,7 +171,9 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 }
 
 // jobSummaryColumns are jobColumns without the checkpoint, plus the step
-// count (a correlated count over the job_steps primary key).
+// count (a correlated count over the job_steps primary key). Not selecting
+// the checkpoint keeps it out of Go memory, but SQLite still reads its
+// overflow pages from disk for the columns stored after it in the row.
 const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at,
 	(SELECT COUNT(*) FROM job_steps s WHERE s.job_id = jobs.id)`
 

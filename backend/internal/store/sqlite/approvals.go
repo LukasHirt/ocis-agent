@@ -110,7 +110,10 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 	if limit > maxApprovalLimit {
 		limit = maxApprovalLimit
 	}
-	query := `SELECT ` + approvalColumns + ` FROM approvals WHERE user_id = ?`
+	if f.MaxBytes < 0 {
+		return nil, store.Invalid("the byte budget must not be negative")
+	}
+	query := ` FROM approvals WHERE user_id = ?`
 	args := []any{userID}
 	if f.JobID != "" {
 		query += ` AND job_id = ?`
@@ -132,7 +135,17 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 	args = append(args, cargs...)
 	args = append(args, limit)
 
-	rows, err := t.q.QueryContext(t.ctx, query, args...)
+	if f.MaxBytes > 0 {
+		// first the sizes, then only the rows within the budget
+		ids, err := t.approvalsWithin(query, args, f.MaxBytes)
+		if err != nil || len(ids) == 0 {
+			return nil, err
+		}
+		marks := strings.Repeat(",?", len(ids))[1:]
+		query = ` FROM approvals WHERE user_id = ? AND id IN (` + marks + `) ORDER BY requested_at DESC, id DESC`
+		args = append([]any{userID}, ids...)
+	}
+	rows, err := t.q.QueryContext(t.ctx, `SELECT `+approvalColumns+query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +159,31 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// approvalsWithin returns the ids of the rows of the list query (FROM ...
+// LIMIT tail) until their args and preview reach budget bytes.
+func (t *tx) approvalsWithin(tail string, args []any, budget int64) ([]any, error) {
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT id, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0)`+tail, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []any
+	var total int64
+	for rows.Next() {
+		var id string
+		var n int64
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+		if total += n; total >= budget {
+			break
+		}
+	}
+	return ids, rows.Err()
 }
 
 // DecideApproval implements store.Tx.

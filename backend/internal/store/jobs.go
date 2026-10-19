@@ -87,6 +87,13 @@ type JobSummary struct {
 	StepCount   int
 }
 
+// JobStatus is the light lookup of a job (GetJobStatus): its state and last
+// change, without the checkpoint.
+type JobStatus struct {
+	State     JobState
+	UpdatedAt time.Time
+}
+
 // JobStep is one entry of a job's timeline.
 type JobStep struct {
 	JobID      string

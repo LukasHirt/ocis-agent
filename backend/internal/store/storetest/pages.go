@@ -1,15 +1,20 @@
 package storetest
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
-func init() { register("Pages", runPages) }
+func init() {
+	register("Pages", runPages)
+	register("PageLimits", runPages2)
+}
 
 // runPages covers keyset pagination (Before) of ListJobs, ListJobSummaries
 // and ListApprovals, and the job summaries' projection.
@@ -167,6 +172,162 @@ func runPages(t *testing.T, f Factory) {
 		})
 		if err != nil {
 			t.Error(err)
+		}
+	})
+}
+
+func runPages2(t *testing.T, f Factory) {
+	t.Run("job status is a light lookup of state and update time", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		mustUser(t, st, "u2")
+		j := addJob(t, st, "u1", "a")
+		clk.Advance(time.Second)
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", j.ID) })
+		full := getJob(t, st, "u1", j.ID)
+		err := st.View(bg(), func(tx store.Tx) error {
+			js, err := tx.GetJobStatus("u1", j.ID)
+			if err != nil {
+				return err
+			}
+			if js.State != store.JobCancelled || !js.UpdatedAt.Equal(full.UpdatedAt) {
+				return fmt.Errorf("status = %+v, job = %+v", js, full)
+			}
+			if _, err := tx.GetJobStatus("u2", j.ID); !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("another user's job: %v", err)
+			}
+			if _, err := tx.GetJobStatus("u1", "nope"); !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("unknown job: %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("approval lists stop at a byte budget of args and preview", func(t *testing.T) {
+		st, clk := open(t, f)
+		c := runningFor(t, st, "u1")
+		var ids []string // newest first after the loop
+		for i := range 5 {
+			a := approvalFor(c, clk, fmt.Sprint(i))
+			a.Args = json.RawMessage(`{"path":"/` + strings.Repeat("x", 1000) + `"}`) // ~1 KiB
+			a.Preview = json.RawMessage(`{}`)
+			ids = append([]string{putApproval(t, st, c, a).ID}, ids...)
+			clk.Advance(time.Second)
+		}
+		size := len(`{"path":"/`+strings.Repeat("x", 1000)+`"}`) + len(`{}`)
+		for _, tc := range []struct {
+			budget int64
+			want   int
+		}{{0, 5}, {1, 1}, {int64(size), 1}, {int64(size) + 1, 2}, {int64(3 * size), 3}, {1 << 30, 5}} {
+			got := approvalIDs(listApprovalsF(t, st, "u1", store.ApprovalFilter{MaxBytes: tc.budget}))
+			if !equal(got, ids[:tc.want]) {
+				t.Errorf("budget %d = %d rows, want %d", tc.budget, len(got), tc.want)
+			}
+		}
+		// the budget combines with the limit and the cursor
+		got := approvalIDs(listApprovalsF(t, st, "u1", store.ApprovalFilter{MaxBytes: int64(3 * size), Limit: 2}))
+		if !equal(got, ids[:2]) {
+			t.Errorf("limit 2 = %v", got)
+		}
+		first := getApproval(t, st, "u1", ids[0])
+		got = approvalIDs(listApprovalsF(t, st, "u1", store.ApprovalFilter{MaxBytes: int64(2 * size),
+			Before: &store.PageKey{At: first.RequestedAt, ID: first.ID}}))
+		if !equal(got, ids[1:3]) {
+			t.Errorf("after the cursor = %v, want %v", got, ids[1:3])
+		}
+		err := st.View(bg(), func(tx store.Tx) error {
+			_, err := tx.ListApprovals("u1", store.ApprovalFilter{MaxBytes: -1})
+			if !errors.Is(err, store.ErrInvalid) {
+				return fmt.Errorf("negative budget: %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("a multi-page walk sees every row once while rows change", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		var want []string // newest first
+		for i := range 10 {
+			want = append([]string{addJob(t, st, "u1", fmt.Sprint(i)).ID}, want...)
+			if i%3 == 0 {
+				clk.Advance(time.Second) // some share a created_at
+			}
+		}
+		var seen []string
+		var before *store.PageKey
+		for page := 0; ; page++ {
+			list := listSummaries(t, st, "u1", store.JobFilter{Limit: 3, Before: before})
+			if len(list) == 0 {
+				break
+			}
+			for _, j := range list {
+				seen = append(seen, j.ID)
+			}
+			last := list[len(list)-1]
+			before = &store.PageKey{At: last.CreatedAt, ID: last.ID}
+			// between pages: a row already seen and a row not yet seen change
+			// state, and a new (newer) job arrives
+			cancel := func(id string) {
+				mustTx(t, st, func(tx store.Tx) error {
+					if err := tx.CancelJob("u1", id); !errors.Is(err, store.ErrConflict) {
+						return err // nil, or a real failure; already cancelled is fine
+					}
+					return nil
+				})
+			}
+			cancel(list[0].ID)
+			if idx := indexOf(want, last.ID); idx+1 < len(want) {
+				cancel(want[idx+1])
+			}
+			clk.Advance(time.Second)
+			addJob(t, st, "u1", fmt.Sprintf("new-%d", page))
+			if page > 10 {
+				t.Fatal("the walk does not end")
+			}
+		}
+		if !equal(seen, want) {
+			t.Errorf("walk = %v, want %v", seen, want)
+		}
+
+		st, clk = open(t, f) // a fresh store: claiming must find u2's job
+		c := runningFor(t, st, "u2")
+		var wantA []string
+		for i := range 7 {
+			wantA = append([]string{putApproval(t, st, c, approvalFor(c, clk, fmt.Sprint(i))).ID}, wantA...)
+			if i%2 == 0 {
+				clk.Advance(time.Second)
+			}
+		}
+		var seenA []string
+		var beforeA *store.PageKey
+		for page := 0; ; page++ {
+			list := listApprovalsF(t, st, "u2", store.ApprovalFilter{Limit: 2, Before: beforeA})
+			if len(list) == 0 {
+				break
+			}
+			for _, a := range list {
+				seenA = append(seenA, a.ID)
+			}
+			last := list[len(list)-1]
+			beforeA = &store.PageKey{At: last.RequestedAt, ID: last.ID}
+			if _, err := decideApproval(st, "u2", last.ID, store.ApprovalRejected, last.ArgsHash); err != nil {
+				t.Fatal(err)
+			}
+			clk.Advance(time.Second)
+			putApproval(t, st, c, approvalFor(c, clk, fmt.Sprintf("new-%d", page)))
+			if page > 10 {
+				t.Fatal("the walk does not end")
+			}
+		}
+		if !equal(seenA, wantA) {
+			t.Errorf("approval walk = %v, want %v", seenA, wantA)
 		}
 	})
 }
