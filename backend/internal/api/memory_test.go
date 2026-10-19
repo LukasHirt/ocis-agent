@@ -249,8 +249,8 @@ func TestMemoryContentLimits(t *testing.T) {
 	}
 	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"a\u0000b"}`), 400, "invalid_request")
 	wantError(t, s.do(http.MethodPost, memBase, `{"name":"notes/n.md","content":"`+big+`"}`), 413, "too_large")
-	// a body over the route limit (400 KiB)
-	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 401<<10)+`"}`), 413, "too_large")
+	// a body over the route limit (200 KiB)
+	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 201<<10)+`"}`), 413, "too_large")
 	// content over the limit but a body within it: the content check refuses it
 	wantError(t, s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat(`\n`, 64<<10+1)+`"}`), 413, "too_large")
 	// invalid UTF-8 and lone surrogates are refused by the body decoder
@@ -262,14 +262,13 @@ func TestMemoryContentLimits(t *testing.T) {
 		r2.Header.Set("If-Match", et)
 		wantError(t, s.serve(r2), 400, "invalid_request")
 	}
-	// a valid 64 KiB file of newlines (a ~128 KiB body) and of control
-	// characters (a ~384 KiB body) passes
-	for _, esc := range []string{`\n`, `\u0001`} {
-		body := `{"content":"` + strings.Repeat(esc, 64<<10) + `"}`
-		if rec := s.putMem("einstein", "profile.md", s.memETag(t, einsteinDrive, einsteinMD), body); rec.Code != 200 {
-			t.Errorf("64 KiB of %s = %d %.200s", esc, rec.Code, rec.Body)
-		}
+	// a valid 64 KiB file of newlines (a ~128 KiB body) passes
+	if rec := s.putMem("einstein", "profile.md", s.memETag(t, einsteinDrive, einsteinMD), `{"content":"`+strings.Repeat(`\n`, 64<<10)+`"}`); rec.Code != 200 {
+		t.Errorf("64 KiB of newlines = %d %.200s", rec.Code, rec.Body)
 	}
+	// documented limit: a valid file dense with control characters (6x
+	// escaped, ~384 KiB) is over the 200 KiB body limit
+	wantError(t, s.putMem("einstein", "profile.md", s.memETag(t, einsteinDrive, einsteinMD), `{"content":"`+strings.Repeat(`\u0001`, 64<<10)+`"}`), 413, "too_large")
 	et = s.memETag(t, einsteinDrive, einsteinMD)
 	// exactly 64 KiB works
 	if rec := s.putMem("einstein", "profile.md", et, `{"content":"`+strings.Repeat("a", 64<<10)+`"}`); rec.Code != 200 {

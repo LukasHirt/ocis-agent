@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/textcap"
 )
 
 // The memory routes show and edit the user's files under /.ocis-agent/memory/
@@ -23,11 +23,13 @@ import (
 // nor revokes the model's right to replace it.
 
 const (
-	// memoryMaxBody: a valid 64 KiB file of control characters escapes to
-	// \u00XX (6x) and one of newlines, quotes or backslashes to 2x, so the
-	// body of a valid file reaches ~385 KiB. The content limit (64 KiB) is
-	// checked by the service after the body is decoded.
-	memoryMaxBody = 400 << 10
+	// memoryMaxBody: a valid 64 KiB file of newlines, quotes or backslashes
+	// escapes to 2x (~130 KiB). A file dense with control characters escapes
+	// to \u00XX (6x) and may get 413 although it is valid: the body is read
+	// and parsed generically (~24x its size in heap per request), so the
+	// limit stays small. The content limit (64 KiB) is checked by the
+	// service after the body is decoded.
+	memoryMaxBody = 200 << 10
 	// maxDiffResponse caps the diff in the response of an edit.
 	maxDiffResponse = 16 << 10
 	// maxDiffAudit caps the diff bytes in the audit detail; the audit log
@@ -136,17 +138,6 @@ func memoryError(err error, write bool) error {
 	return err
 }
 
-// cutBytes returns s cut to at most n bytes at a rune boundary.
-func cutBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
 // listMemory is GET /agent-api/v1/memory: the memory files, sorted by name;
 // an empty list when the folder does not exist.
 func (s *Server) listMemory(w http.ResponseWriter, r *http.Request) error {
@@ -186,7 +177,7 @@ func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("ETag", f.ETag)
 	doc := memoryFileDoc{Name: f.Name, Content: f.Content, ETag: f.ETag, Editable: true}
 	if max := svc.Limits().MaxFileBytes; int64(len(f.Content)) > max {
-		doc.Content, doc.Truncated, doc.Editable = cutBytes(f.Content, int(max)), true, false
+		doc.Content, doc.Truncated, doc.Editable = textcap.Cut(f.Content, int(max)), true, false
 	}
 	writeJSON(w, http.StatusOK, doc)
 	return nil
@@ -265,7 +256,7 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) error {
 }
 
 func editView(ch memory.Change) memoryEditView {
-	return memoryEditView{Name: ch.Name, ETag: ch.ETag, Diff: cutBytes(ch.Diff, maxDiffResponse)}
+	return memoryEditView{Name: ch.Name, ETag: ch.ETag, Diff: textcap.Cut(ch.Diff, maxDiffResponse)}
 }
 
 // auditMemoryEdit records memory_edited after the write to oCIS succeeded. It
@@ -278,7 +269,7 @@ func editView(ch memory.Change) memoryEditView {
 // The detail holds the name and the first 1500 bytes of the diff, never the
 // file.
 func (s *Server) auditMemoryEdit(r *http.Request, p Principal, ch memory.Change, outcome string) {
-	detail := "name=" + ch.Name + "; diff=" + cutBytes(ch.Diff, maxDiffAudit)
+	detail := "name=" + ch.Name + "; diff=" + textcap.Cut(ch.Diff, maxDiffAudit)
 	// the write happened: a client that disconnected or a route deadline that
 	// ended must not drop the record
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
