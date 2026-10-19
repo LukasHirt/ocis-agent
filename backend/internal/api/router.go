@@ -5,12 +5,10 @@ import (
 	"net/http"
 )
 
-// NewRouter returns the sidecar's HTTP handler.
+// NewRouter returns a handler that serves only GET /agent-api/healthz. It is
+// what the api role serves until the process wires NewServer.
 func NewRouter() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /agent-api/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
-	})
+	mux.HandleFunc("GET /agent-api/healthz", healthz)
 	return mux
 }
