@@ -125,3 +125,30 @@ func TestLoadErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadNormalisesOrigins(t *testing.T) {
+	for in, want := range map[string]string{
+		"HTTPS://Cloud.Example.COM":      "https://cloud.example.com",
+		"https://cloud.example.com:443/": "https://cloud.example.com",
+		"http://Cloud.Example.com:80":    "http://cloud.example.com",
+		"https://cloud.example.com:8443": "https://cloud.example.com:8443",
+		"http://cloud.example.com:443":   "http://cloud.example.com:443",
+		"https://cloud.example.com:80":   "https://cloud.example.com:80",
+		"https://[2001:DB8::1]:443":      "https://[2001:db8::1]",
+		"https://[2001:db8::1]:9200":     "https://[2001:db8::1]:9200",
+		"https://localhost:9200/":        "https://localhost:9200",
+	} {
+		cfg, err := Load(env(map[string]string{
+			"AGENT_OCIS_URL":       in,
+			"AGENT_ALLOWED_ORIGIN": in,
+			"AGENT_MASTER_KEY":     key32(),
+		}))
+		if err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		if cfg.OCISURL != want || cfg.AllowedOrigin != want {
+			t.Errorf("%s: OCISURL %q, AllowedOrigin %q, want %q", in, cfg.OCISURL, cfg.AllowedOrigin, want)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 const masterKeyLen = 32
@@ -97,7 +98,8 @@ func Load(getenv func(string) string) (Config, error) {
 }
 
 // parseOrigin accepts only scheme://host[:port] (an optional trailing slash is
-// dropped) and returns it without the slash.
+// dropped) and returns it without the slash, the host in lower case and
+// without the scheme's default port.
 func parseOrigin(name, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -115,7 +117,13 @@ func parseOrigin(name, raw string) (string, error) {
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("%s must be scheme://host[:port] without a path, query or fragment", name)
 	}
-	return u.Scheme + "://" + u.Host, nil
+	// normalise to what browsers send in Origin: a lower-case host and no
+	// default port
+	host := strings.ToLower(u.Host)
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		host = strings.TrimSuffix(host, ":"+u.Port())
+	}
+	return u.Scheme + "://" + host, nil
 }
 
 func valueOr(v, def string) string {
