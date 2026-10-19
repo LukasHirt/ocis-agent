@@ -67,7 +67,7 @@ type Options struct {
 // tuning shortens fixed delays in tests.
 type tuning struct {
 	queuePoll            time.Duration // queue poll interval
-	eventsPoll           time.Duration // api.Deps.EventsPoll
+	eventsPoll           time.Duration // api.Deps.EventsPollForTest
 	shutdownRequeueDelay time.Duration // agent.Config.ShutdownRequeueDelay
 	// wrapWaker wraps the queue the API wakes (to observe the wakes)
 	wrapWaker func(api.Waker) api.Waker
@@ -215,7 +215,7 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
 				StreamsPerUser: cfg.API.StreamsPerUser, StreamsTotal: cfg.API.StreamsTotal,
 			},
-			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPoll: opts.tune.eventsPoll,
+			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPollForTest: opts.tune.eventsPoll,
 		}); err != nil {
 			return nil, fmt.Errorf("app: api: %w", err)
 		}

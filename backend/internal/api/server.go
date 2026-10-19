@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -98,9 +99,9 @@ type Deps struct {
 	// shutdown, before the listener's graceful stop, which would otherwise
 	// wait for the streams. nil: never.
 	Stop <-chan struct{}
-	// EventsPoll replaces the event stream's 2 s database poll (tests
-	// only; 0 or less: 2 s).
-	EventsPoll time.Duration
+	// EventsPollForTest replaces the event stream's 2 s database poll. Test
+	// only: production code never sets it (0 or less: 2 s).
+	EventsPollForTest time.Duration
 }
 
 // Principal is the authenticated caller, taken only from the identity the
@@ -139,6 +140,8 @@ type Server struct {
 	// write deadline of each frame; fields for tests
 	eventTimers        func(userID string) eventTimers
 	eventWriteDeadline time.Duration
+	eventsPoll         time.Duration       // the real timers' poll interval
+	lifetimeJitter     func(n int64) int64 // returns [0, n); draws a stream's lifetime
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
@@ -188,11 +191,13 @@ func NewServer(d Deps) (*Server, error) {
 		messages: newCooldown(messageCooldown, maxLimiterKeys, d.Now),
 
 		streams:            newStreamSlots(d.Cfg.StreamsPerUser, d.Cfg.StreamsTotal),
-		eventTimers:        eventTimersEvery(d.EventsPoll),
+		eventsPoll:         pollInterval(d.EventsPollForTest),
+		lifetimeJitter:     rand.Int64N,
 		eventWriteDeadline: eventsWriteDeadline,
 		baseTimeout:        defaultTimeout,
 		exportPageDeadline: exportPageDeadline,
 	}
+	s.eventTimers = s.defaultEventTimers
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)
 	s.routes()

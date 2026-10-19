@@ -155,6 +155,11 @@ func openSSE(t *testing.T, ts *httptest.Server, token, target string) *sseClient
 	}
 	c := &sseClient{t: t, res: res, frames: make(chan string, 1024), cancel: cancel}
 	t.Cleanup(c.close)
+	if res.StatusCode != http.StatusOK {
+		// a refused stream: the test reads the error body itself
+		close(c.frames)
+		return c
+	}
 	go func() {
 		defer close(c.frames)
 		br := bufio.NewReader(res.Body)
@@ -292,7 +297,16 @@ func TestEventsReportTheKindsThatChanged(t *testing.T) {
 	c.want(changedFrame("messages"))
 	quiet() // reported once
 
-	// a new job, then a state change of it
+	// only a message, in the existing conversation: exactly messages
+	s.fake.Advance(time.Second)
+	s.mustTx(t, func(tx store.Tx) error {
+		_, err := tx.InsertMessage(store.Message{UserID: einsteinID, ConversationID: conv.ID, Role: store.RoleUser, Content: "only"})
+		return err
+	})
+	st.pollOnce(t)
+	c.want(changedFrame("messages"))
+
+	// a new job, then a state change of it (no audit: exactly jobs)
 	s.fake.Advance(time.Second)
 	var job store.Job
 	s.mustTx(t, func(tx store.Tx) error {
@@ -460,18 +474,153 @@ func TestEventsEndAtTheLifetime(t *testing.T) {
 	}
 }
 
-// The lifetime is one hour, polls run every 2 s and pings every 25 s.
+// The lifetime is about one hour (55 to 65 min), polls run every 2 s and
+// pings every 25 s; the route's context outlives the longest lifetime.
 func TestEventsDefaultTimers(t *testing.T) {
-	if eventsPollEvery != 2*time.Second || eventsPingEvery != 25*time.Second || eventsLifetime != time.Hour ||
-		eventsWriteDeadline != 15*time.Second {
-		t.Errorf("poll %v ping %v lifetime %v write %v", eventsPollEvery, eventsPingEvery, eventsLifetime, eventsWriteDeadline)
+	if eventsPollEvery != 2*time.Second || eventsPingEvery != 25*time.Second || eventsLifetimeMin != 55*time.Minute ||
+		eventsLifetimeMax != 65*time.Minute || eventsWriteDeadline != 15*time.Second || eventsRouteTimeout <= eventsLifetimeMax {
+		t.Errorf("poll %v ping %v lifetime %v..%v write %v route %v", eventsPollEvery, eventsPingEvery,
+			eventsLifetimeMin, eventsLifetimeMax, eventsWriteDeadline, eventsRouteTimeout)
 	}
 	f := newFixture(t)
+	var calls atomic.Int32
+	f.srv.lifetimeJitter = func(n int64) int64 { calls.Add(1); return 0 }
 	et := f.srv.eventTimers("u")
 	defer et.stop()
 	if et.poll == nil || et.ping == nil || et.lifetime == nil || et.afterPoll != nil {
 		t.Errorf("default timers %+v", et)
 	}
+	if calls.Load() != 1 {
+		t.Errorf("the default timers drew %d jittered lifetimes, want 1", calls.Load())
+	}
+}
+
+// Each stream draws its lifetime from 55 to 65 min, so streams opened
+// together do not all reconnect together.
+func TestEventsLifetimeIsJittered(t *testing.T) {
+	f := newFixture(t)
+	span := int64(eventsLifetimeMax - eventsLifetimeMin)
+	var gotN int64
+	f.srv.lifetimeJitter = func(n int64) int64 { gotN = n; return 0 }
+	if d := f.srv.streamLifetime(); d != 55*time.Minute || gotN != span+1 {
+		t.Errorf("lowest lifetime %v (n %d)", d, gotN)
+	}
+	f.srv.lifetimeJitter = func(n int64) int64 { return n - 1 }
+	if d := f.srv.streamLifetime(); d != 65*time.Minute {
+		t.Errorf("highest lifetime %v", d)
+	}
+	f.srv.lifetimeJitter = func(n int64) int64 { return n / 2 }
+	if d := f.srv.streamLifetime(); d != 60*time.Minute {
+		t.Errorf("middle lifetime %v", d)
+	}
+	// the real source
+	f = newFixture(t)
+	seen := map[time.Duration]bool{}
+	for range 1000 {
+		d := f.srv.streamLifetime()
+		if d < 55*time.Minute || d > 65*time.Minute {
+			t.Fatalf("lifetime %v out of range", d)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 100 {
+		t.Errorf("only %d distinct lifetimes in 1000 draws", len(seen))
+	}
+}
+
+// The real lifetime timer fires after the lifetime it was given.
+func TestEventsRealLifetimeTimerFires(t *testing.T) {
+	et := realEventTimers(time.Hour, 20*time.Millisecond)
+	defer et.stop()
+	select {
+	case <-et.lifetime:
+	case <-time.After(waitLimit):
+		t.Fatal("the lifetime timer did not fire")
+	}
+}
+
+// Deps.EventsPollForTest of 0 or less means the real 2 s poll.
+func TestEventsPollIntervalDefault(t *testing.T) {
+	for _, c := range []struct {
+		in, want time.Duration
+	}{{0, 2 * time.Second}, {-time.Second, 2 * time.Second}, {7 * time.Millisecond, 7 * time.Millisecond}} {
+		f := newFixture(t, func(d *Deps) { d.EventsPollForTest = c.in })
+		if f.srv.eventsPoll != c.want {
+			t.Errorf("EventsPollForTest %v: poll %v, want %v", c.in, f.srv.eventsPoll, c.want)
+		}
+	}
+}
+
+// flakyStore fails the next fail read transactions.
+type flakyStore struct {
+	store.Store
+	fail atomic.Int32
+}
+
+func (s *flakyStore) View(ctx context.Context, fn func(tx store.Tx) error) error {
+	if s.fail.Add(-1) >= 0 {
+		return errNotUsed
+	}
+	s.fail.Store(0)
+	return s.Store.View(ctx, fn)
+}
+
+func newFlakyFixture(t *testing.T) (*fixture, *flakyStore) {
+	fs := &flakyStore{}
+	f := newFixture(t, func(d *Deps) { fs.Store = d.Store; d.Store = fs })
+	return f, fs
+}
+
+// One failed poll is skipped: the stream stays open and reports the next
+// change against the marks from before the failure.
+func TestEventsSurviveATransientPollFailure(t *testing.T) {
+	f, fs := newFlakyFixture(t)
+	ft := installTimers(f.srv)
+	ts := newEventServer(t, f.h)
+	c, st := openReady(t, ts, ft, goodToken)
+	fs.fail.Store(1)
+	st.pollOnce(t)
+	st.send(t, st.ping)
+	c.want(pingFrame)
+	seedAudit(t, f.st, aliceID.UserID, 1, nil)
+	st.pollOnce(t)
+	c.want(changedFrame("activity"))
+	if f.srv.streams.open() != 1 {
+		t.Error("the stream lost its slot")
+	}
+}
+
+// Three failed polls in a row end the stream with bye/unavailable.
+func TestEventsEndAfterThreeFailedPolls(t *testing.T) {
+	f, fs := newFlakyFixture(t)
+	ft := installTimers(f.srv)
+	ts := newEventServer(t, f.h)
+	c, st := openReady(t, ts, ft, goodToken)
+	fs.fail.Store(3)
+	st.pollOnce(t)
+	st.pollOnce(t)
+	st.send(t, st.poll)
+	c.want(byeFrame("unavailable"))
+	c.wantEnd()
+	waitUntil(t, "the slot to be released", func() bool { return f.srv.streams.open() == 0 })
+}
+
+// The failure count resets on a successful poll: 2 failures, a success and
+// 2 more failures leave the stream open.
+func TestEventsPollFailuresResetOnSuccess(t *testing.T) {
+	f, fs := newFlakyFixture(t)
+	ft := installTimers(f.srv)
+	ts := newEventServer(t, f.h)
+	c, st := openReady(t, ts, ft, goodToken)
+	fs.fail.Store(2)
+	st.pollOnce(t)
+	st.pollOnce(t)
+	st.pollOnce(t) // succeeds
+	fs.fail.Store(2)
+	st.pollOnce(t)
+	st.pollOnce(t)
+	st.send(t, st.ping)
+	c.want(pingFrame)
 }
 
 // Closing Deps.Stop ends every open stream with bye/shutdown; a stream
@@ -941,7 +1090,7 @@ func TestEventsSetTheirOwnDeadlines(t *testing.T) {
 		t.Fatalf("write deadlines %v (%d before the ping)", dw.writes, beforePing)
 	}
 	for i := 2; i < 4; i++ {
-		if d := dw.writes[i].Sub(dw.setAt[i]); d < 7*time.Second-time.Millisecond || d > 7*time.Second+time.Millisecond {
+		if d := dw.writes[i].Sub(dw.setAt[i]); d < 7*time.Second-100*time.Millisecond || d > 7*time.Second {
 			t.Errorf("frame %d: write deadline %v ahead, want 7s", i, d)
 		}
 	}

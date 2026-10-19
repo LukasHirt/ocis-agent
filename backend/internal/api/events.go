@@ -27,39 +27,53 @@ import (
 // the client refetches everything. The marks have millisecond resolution,
 // so a change committed in the same millisecond as the previous mark is
 // reported only with the next change; clients therefore also refresh fully on
-// a slow timer (60 s).
+// a slow timer (60 s). Some changes move no mark at all (deleting an older
+// message, the operator's kill switch), which the slow refresh also covers.
 //
-// The stream ends after eventsLifetime (`event: bye`, `data:
-// {"reason":"lifetime"}`; clients reconnect), when Deps.Stop is closed
-// (reason "shutdown"), when the client goes away, when a write or flush
-// fails (each frame must be written within eventsWriteDeadline) and when a
-// poll fails (the client reconnects). Streams are capped per user
+// The stream ends after its lifetime, drawn per stream from
+// eventsLifetimeMin to eventsLifetimeMax so that streams opened together do
+// not reconnect together (`event: bye`, `data: {"reason":"lifetime"}`;
+// clients reconnect), when Deps.Stop is closed (reason "shutdown"), when the
+// client goes away, when a write or flush fails (each frame must be written
+// within eventsWriteDeadline) and after eventsMaxPollFailures failed polls
+// in a row (reason "unavailable"); a single failed poll is skipped, so a
+// short database hiccup does not end every stream at once.
+//
+// The bearer is validated only when the stream opens: after a revoke or an
+// unenrol an open stream keeps reporting (kinds only, for the same user) until
+// its lifetime ends, at most eventsLifetimeMax. auth.Identity carries no token
+// expiry, so the stream cannot be capped at it. Streams are capped per user
 // (Settings.StreamsPerUser) and in the process (Settings.StreamsTotal); over
 // a cap the answer is 429 rate_limited with Retry-After: 5. HEAD is 405 and
 // no query parameter is accepted.
 const (
 	eventsPollEvery     = 2 * time.Second
 	eventsPingEvery     = 25 * time.Second
-	eventsLifetime      = time.Hour
+	eventsLifetimeMin   = 55 * time.Minute
+	eventsLifetimeMax   = 65 * time.Minute
 	eventsWriteDeadline = 15 * time.Second
 	eventsRetryAfter    = 5 * time.Second
 	// eventsPollTimeout bounds one poll's read transaction
 	eventsPollTimeout = 5 * time.Second
 	// eventsRouteTimeout is the stream route's context deadline, a backstop
 	// behind the lifetime timer
-	eventsRouteTimeout = eventsLifetime + time.Minute
+	eventsRouteTimeout = eventsLifetimeMax + time.Minute
+	// eventsMaxPollFailures failed polls in a row end a stream
+	eventsMaxPollFailures = 3
 
 	defaultStreamsPerUser = 3
 	defaultStreamsTotal   = 200
 )
 
 const (
-	frameReady         = "event: ready\ndata: {\"v\":1}\n\n"
-	framePing          = ": ping\n\n"
-	frameByeLifetime   = "event: bye\ndata: {\"reason\":\"lifetime\"}\n\n"
-	frameByeShutdown   = "event: bye\ndata: {\"reason\":\"shutdown\"}\n\n"
-	frameChangedPrefix = "event: changed\ndata: {\"kinds\":["
-	frameChangedSuffix = "]}\n\n"
+	frameReady       = "event: ready\ndata: {\"v\":1}\n\n"
+	framePing        = ": ping\n\n"
+	frameByeLifetime = "event: bye\ndata: {\"reason\":\"lifetime\"}\n\n"
+	frameByeShutdown = "event: bye\ndata: {\"reason\":\"shutdown\"}\n\n"
+	// frameByeUnavailable ends a stream whose polls keep failing
+	frameByeUnavailable = "event: bye\ndata: {\"reason\":\"unavailable\"}\n\n"
+	frameChangedPrefix  = "event: changed\ndata: {\"kinds\":["
+	frameChangedSuffix  = "]}\n\n"
 )
 
 // eventTimers are the timers of one stream; a field of the server, so tests
@@ -70,19 +84,29 @@ type eventTimers struct {
 	afterPoll            func() // tests only: runs after every poll
 }
 
-// eventTimersEvery returns the real timers with a poll every d (0 or less:
-// eventsPollEvery).
-func eventTimersEvery(d time.Duration) func(string) eventTimers {
+// pollInterval is d, or eventsPollEvery for 0 or less.
+func pollInterval(d time.Duration) time.Duration {
 	if d <= 0 {
-		d = eventsPollEvery
+		return eventsPollEvery
 	}
-	return func(string) eventTimers { return realEventTimers(d) }
+	return d
 }
 
-func realEventTimers(pollEvery time.Duration) eventTimers {
+// streamLifetime draws a stream's lifetime from eventsLifetimeMin to
+// eventsLifetimeMax (both included) with s.lifetimeJitter.
+func (s *Server) streamLifetime() time.Duration {
+	return eventsLifetimeMin + time.Duration(s.lifetimeJitter(int64(eventsLifetimeMax-eventsLifetimeMin)+1))
+}
+
+// defaultEventTimers are the real timers of a stream.
+func (s *Server) defaultEventTimers(string) eventTimers {
+	return realEventTimers(s.eventsPoll, s.streamLifetime())
+}
+
+func realEventTimers(pollEvery, lifetime time.Duration) eventTimers {
 	poll := time.NewTicker(pollEvery)
 	ping := time.NewTicker(eventsPingEvery)
-	life := time.NewTimer(eventsLifetime)
+	life := time.NewTimer(lifetime)
 	return eventTimers{poll: poll.C, ping: ping.C, lifetime: life.C, stop: func() {
 		poll.Stop()
 		ping.Stop()
@@ -243,6 +267,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) error {
 	if !write([]byte(frameReady)) {
 		return nil
 	}
+	failures := 0 // failed polls in a row
 	for {
 		select {
 		case <-ctx.Done():
@@ -260,13 +285,25 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) error {
 		case <-timers.poll:
 			cur, err := s.marks(ctx, p.UserID)
 			if err != nil {
-				// the response has started: end the stream, the client
-				// reconnects (and gets a normal error while the store fails)
-				if ri := infoFrom(ctx); ri != nil && ctx.Err() == nil {
-					ri.category = "poll_failed"
+				if ctx.Err() != nil {
+					return nil // the client went away
 				}
-				return nil
+				// skip the tick; end the stream (the client reconnects and
+				// gets a normal error while the store fails) only after
+				// several failures in a row
+				if failures++; failures >= eventsMaxPollFailures {
+					if ri := infoFrom(ctx); ri != nil {
+						ri.category = "poll_failed"
+					}
+					write([]byte(frameByeUnavailable))
+					return nil
+				}
+				if timers.afterPoll != nil {
+					timers.afterPoll()
+				}
+				continue
 			}
+			failures = 0
 			if kinds := changedKinds(prev, cur); len(kinds) > 0 {
 				prev = cur
 				if !write(changedFrameOf(kinds)) {
