@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,39 @@ var testCatalog = llm.Catalog{
 
 func newStack(t *testing.T, mod ...func(*Deps)) *stack {
 	t.Helper()
+	return newStackStore(t, nil, mod...)
+}
+
+// txSpy counts the write transactions of a store.
+type txSpy struct {
+	store.Store
+	mu sync.Mutex
+	n  int
+}
+
+func (s *txSpy) InTx(ctx context.Context, fn func(tx store.Tx) error) error {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	return s.Store.InTx(ctx, fn)
+}
+
+func (s *txSpy) writes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+func (s *txSpy) reset() {
+	s.mu.Lock()
+	s.n = 0
+	s.mu.Unlock()
+}
+
+// newStackStore is newStack with the store every component uses replaced
+// by wrap(store) (nil: unchanged).
+func newStackStore(t *testing.T, wrap func(store.Store) store.Store, mod ...func(*Deps)) *stack {
+	t.Helper()
 	fake := fakeocis.New(t)
 	fake.AddUser("einstein", "relativity", einsteinID, einsteinDrive)
 	fake.AddUser("marie", "radium", marieID, marieDrive)
@@ -61,19 +95,23 @@ func newStack(t *testing.T, mod ...func(*Deps)) *stack {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sec, err := secrets.New(st, []byte("0123456789abcdef0123456789abcdef"))
+	var used store.Store = st
+	if wrap != nil {
+		used = wrap(st)
+	}
+	sec, err := secrets.New(used, []byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mem := memory.New(client, st, memory.Limits{})
-	svc, err := auth.New(bg, auth.Deps{Store: st, Secrets: sec, Client: client, Memory: mem, Now: fake.Now})
+	mem := memory.New(client, used, memory.Limits{})
+	svc, err := auth.New(bg, auth.Deps{Store: used, Secrets: sec, Client: client, Memory: mem, Now: fake.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	val := auth.NewValidator(client)
 	s := &stack{fake: fake, client: client, svc: svc, val: val}
 	all := append([]func(*Deps){func(d *Deps) {
-		d.Store, d.Validator, d.Auth, d.Now, d.Catalog = st, val, svc, fake.Now, testCatalog
+		d.Store, d.Validator, d.Auth, d.Now, d.Catalog = used, val, svc, fake.Now, testCatalog
 	}}, mod...)
 	s.fixture = newFixture(t, all...)
 	s.st = st

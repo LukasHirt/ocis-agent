@@ -768,15 +768,33 @@ func TestResponseControllerOverARealServer(t *testing.T) {
 	_ = res2.Body.Close()
 }
 
-func TestSeenRunsBeforeTheUserLimit(t *testing.T) {
+// Seen comes after the per-user limit: a limited request is not recorded
+// (it costs a database write).
+func TestSeenRunsAfterTheUserLimit(t *testing.T) {
 	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 0.001, 1 })
 	if rec := f.do(http.MethodGet, "/agent-api/v1/test/whoami", ""); rec.Code != 200 {
 		t.Fatalf("first: %d", rec.Code)
 	}
 	f.clock.Advance(61 * time.Second) // Seen is due again, the user bucket is still empty
 	wantError(t, f.do(http.MethodGet, "/agent-api/v1/test/whoami", ""), 429, "rate_limited")
-	if n := len(f.cr.seenCalls()); n != 2 {
-		t.Errorf("Seen calls = %d, want 2 (the limited request is a visit too)", n)
+	if n := len(f.cr.seenCalls()); n != 1 {
+		t.Errorf("Seen calls = %d, want 1 (the limited request is not recorded)", n)
+	}
+}
+
+// A user who has not enrolled has no row: Seen finds nothing to update, and
+// is then throttled like a success, not tried on every request.
+func TestSeenOfANotEnrolledUserIsThrottled(t *testing.T) {
+	spy := &txSpy{}
+	s := newStackStore(t, func(st store.Store) store.Store { spy.Store = st; return spy })
+	spy.reset()
+	for range 200 {
+		if rec := s.as("einstein", http.MethodGet, "/agent-api/v1/status", ""); rec.Code != 200 {
+			t.Fatalf("status %d", rec.Code)
+		}
+	}
+	if n := spy.writes(); n > 1 {
+		t.Errorf("%d write transactions for 200 requests of a user who is not enrolled", n)
 	}
 }
 

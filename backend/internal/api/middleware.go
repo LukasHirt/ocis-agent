@@ -37,9 +37,10 @@ import (
 //  6. Authorization: Bearer <token>, validated by oCIS (TokenValidator); a
 //     missing, malformed or rejected token stays charged to the IP, as does a
 //     request whose own context ended; success and oCIS failures refund
-//  7. Seen(userID), at most once a minute per user (seen.go); a failure is
-//     logged and ignored, and retried by the next request
-//  8. per-user rate limit
+//  7. per-user rate limit
+//  8. Seen(userID), at most once a minute per user (seen.go), also for a
+//     user who has not enrolled; a failure is logged and ignored, and
+//     retried by the next request
 //  9. body rules (requireJSON) and the body limit
 //  10. the handler, under the route's deadline
 //
@@ -336,18 +337,20 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		ri.user = p.UserID
 		ctx = context.WithValue(context.WithValue(ctx, principalKey, p), bearerKey, tok)
 		r = r.WithContext(ctx)
-		// 7: a user who has not enrolled has no row yet (ErrNotFound)
-		if s.seen.due(p.UserID) {
-			if err := s.d.Auth.Seen(ctx, p.UserID); err == nil {
-				s.seen.done(p.UserID)
-			} else if !errors.Is(err, store.ErrNotFound) {
-				s.d.Log.Warn("api: recording the visit failed", "category", "seen", "request_id", ri.id, "user", p.UserID)
-			}
-		}
-		// 8
+		// 7
 		if ok, wait := s.userLm.allow(p.UserID); !ok {
 			rateLimited(w, r, wait)
 			return
+		}
+		// 8: a user who has not enrolled has no row (ErrNotFound): nothing
+		// to record, throttled like a success (enrolment records the visit)
+		if s.seen.due(p.UserID) {
+			switch err := s.d.Auth.Seen(ctx, p.UserID); {
+			case err == nil, errors.Is(err, store.ErrNotFound):
+				s.seen.done(p.UserID)
+			default:
+				s.d.Log.Warn("api: recording the visit failed", "category", "seen", "request_id", ri.id, "user", p.UserID)
+			}
 		}
 		// 9
 		if err := requireJSON(r); err != nil {
