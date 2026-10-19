@@ -1,5 +1,5 @@
 import type { StreamState } from '../api/events'
-import type { Status } from '../api/types'
+import type { PauseReason, Status } from '../api/types'
 
 // The status banner shows the single most severe state, in this order.
 export type BannerKind =
@@ -11,7 +11,11 @@ export type BannerKind =
   | 'dormant'
   | 'budget'
 
-const CREDENTIAL_REASONS = new Set(['credential_invalid', 'credential_revoked', 'credential_expired'])
+const CREDENTIAL_REASONS = new Set<Status['pause_reason']>([
+  'credential_invalid',
+  'credential_revoked',
+  'credential_expired'
+] satisfies PauseReason[])
 
 export const budgetUsedUp = (s: Status): boolean => {
   const b = s.budget
@@ -24,9 +28,9 @@ export const bannerOf = (s: Status | null): BannerKind | null => {
   if (s.paused) {
     const r = s.pause_reason
     if (CREDENTIAL_REASONS.has(r)) return 'reconnect'
-    if (r === 'token_anomaly') return 'token_anomaly'
-    if (r === 'user') return 'user'
-    if (r === 'dormant') return 'dormant'
+    if (r === ('token_anomaly' satisfies PauseReason)) return 'token_anomaly'
+    if (r === ('user' satisfies PauseReason)) return 'user'
+    if (r === ('dormant' satisfies PauseReason)) return 'dormant'
     return 'paused'
   }
   if (budgetUsedUp(s)) return 'budget'

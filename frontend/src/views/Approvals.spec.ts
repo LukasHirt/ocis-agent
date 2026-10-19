@@ -519,6 +519,19 @@ describe('Approvals', () => {
     expect(w.text()).toContain('Nothing needs your approval')
   })
 
+  it('takes the count in the title from the status when the list is cut off', async () => {
+    const { w, store } = await setup(serve({ pending: [approvalOf('a1'), approvalOf('a2')] }))
+    expect(w.find('h1').text()).toBe('Approvals (2)')
+    store.status = { ...store.status!, pending_approvals: 345 }
+    store.approvals = { ...store.approvals, complete: false }
+    await flushPromises()
+    expect(w.find('h1').text()).toBe('Approvals (345)')
+    // never below what is shown, even with an older status
+    store.status = { ...store.status!, pending_approvals: 1 }
+    await flushPromises()
+    expect(w.find('h1').text()).toBe('Approvals (2)')
+  })
+
   it('says when more approvals exist than are shown', async () => {
     const { w, store } = await setup(serve({ pending: [approvalOf('a1')] }))
     store.approvals = { ...store.approvals, complete: false }

@@ -3,7 +3,7 @@ import { useGettext } from 'vue3-gettext'
 import { usePlatform } from '../../platform'
 import { useAgentStore } from '../../stores/agent'
 import { ApiError, describeError, isAbortError } from '../../api/errors'
-import type { Approval, Decision } from '../../api/types'
+import type { Approval, ApprovalState, Decision, Risk } from '../../api/types'
 import { quote, targetsOf } from './targets'
 
 // The most approvals one bulk decision may carry (the server's limit).
@@ -18,7 +18,8 @@ const inflight = reactive(new Set<string>())
 
 // Risks whose approval needs an explicit confirmation. Unknown risks are
 // treated like the dangerous ones.
-export const needsConfirm = (risk: string): boolean => risk !== 'write' && risk !== 'read'
+export const needsConfirm = (risk: Approval['risk']): boolean =>
+  risk !== ('write' satisfies Risk) && risk !== ('read' satisfies Risk)
 
 export interface Decisions {
   busy(id: string): boolean
@@ -37,15 +38,15 @@ const createDecisions = (): Decisions => {
   const platform = usePlatform()
   const { $gettext, interpolate } = useGettext()
 
-  const riskLabel = (risk: string) => {
+  const riskLabel = (risk: Approval['risk']) => {
     switch (risk) {
-      case 'destructive':
+      case 'destructive' satisfies Risk:
         return $gettext('Destructive')
-      case 'outward':
+      case 'outward' satisfies Risk:
         return $gettext('Outward')
-      case 'write':
+      case 'write' satisfies Risk:
         return $gettext('Write')
-      case 'read':
+      case 'read' satisfies Risk:
         return $gettext('Read')
     }
     return interpolate($gettext('Unknown (%{risk})'), { risk: quote(risk) }, true)
@@ -87,7 +88,7 @@ const createDecisions = (): Decisions => {
   }
 
   const decide = async (a: Approval, d: Decision) => {
-    if (inflight.has(a.id) || a.job_ended || a.state !== 'pending') return
+    if (inflight.has(a.id) || a.job_ended || a.state !== ('pending' satisfies ApprovalState)) return
     const id = a.id
     const hash = a.args_hash
     inflight.add(id)
@@ -111,7 +112,7 @@ const createDecisions = (): Decisions => {
   }
 
   const decideAll = async (list: Approval[], d: Decision) => {
-    const items = list.filter((a) => !a.job_ended && a.state === 'pending')
+    const items = list.filter((a) => !a.job_ended && a.state === ('pending' satisfies ApprovalState))
     if (items.length === 0 || items.length > MAX_BULK) return
     if (items.some((a) => inflight.has(a.id))) return
     if (new Set(items.map((a) => a.job_id)).size !== 1) return

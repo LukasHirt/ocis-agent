@@ -49,7 +49,7 @@ import { MAX_BULK, useDecisions } from './decisions'
 import { shortId } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
 import { quote } from './targets'
-import type { Approval } from '../../api/types'
+import type { Approval, ApprovalState } from '../../api/types'
 
 // JobGroup shows the pending approvals of one job with the job's goal
 // (untrusted text; absent when it could not be read) and a bulk decision
@@ -59,7 +59,7 @@ const { $gettext, $ngettext, interpolate } = useGettext()
 const decisions = useDecisions()
 
 const headingId = computed(() => `agent-group-${props.jobId.replace(/[^A-Za-z0-9_-]/g, '_')}`)
-const live = computed(() => props.items.filter((a) => a.state === 'pending' && !a.job_ended))
+const live = computed(() => props.items.filter((a) => a.state === ('pending' satisfies ApprovalState) && !a.job_ended))
 const tooMany = computed(() => live.value.length > MAX_BULK)
 const bulkDisabled = computed(() => tooMany.value || live.value.some((a) => decisions.busy(a.id)))
 

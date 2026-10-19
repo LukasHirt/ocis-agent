@@ -80,7 +80,7 @@ import { usePlatform } from '../../platform'
 import { formatDuration, formatTime } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
 import { needsConfirm, useDecisions } from './decisions'
-import type { Approval } from '../../api/types'
+import type { Approval, ApprovalState, Risk } from '../../api/types'
 
 // ApprovalCard shows one approval: exactly what will execute (the stored
 // arguments, always in full), the server's preview, and the model's
@@ -90,19 +90,19 @@ const { $gettext, interpolate } = useGettext()
 const platform = usePlatform()
 const decisions = useDecisions()
 
-const pending = computed(() => props.approval.state === 'pending')
+const pending = computed(() => props.approval.state === ('pending' satisfies ApprovalState))
 const ended = computed(() => props.approval.job_ended)
 const danger = computed(() => needsConfirm(props.approval.risk))
 const disabled = computed(() => ended.value || decisions.busy(props.approval.id))
 
 const warning = computed(() => {
   switch (props.approval.risk) {
-    case 'write':
-    case 'read':
+    case 'write' satisfies Risk:
+    case 'read' satisfies Risk:
       return ''
-    case 'destructive':
+    case 'destructive' satisfies Risk:
       return $gettext('This action is irreversible')
-    case 'outward':
+    case 'outward' satisfies Risk:
       return $gettext('This action is visible to other people')
   }
   return $gettext('The risk of this action is unknown')
@@ -129,9 +129,9 @@ const stateLabel = computed(() => {
   const a = props.approval
   if (pending.value || a.outcome) return ''
   switch (a.state) {
-    case 'approved':
+    case 'approved' satisfies ApprovalState:
       return $gettext('Approved, waiting to run')
-    case 'executing':
+    case 'executing' satisfies ApprovalState:
       return $gettext('Running')
   }
   return interpolate($gettext('State: %{state}'), { state: visibleText(String(a.state)).text }, true)

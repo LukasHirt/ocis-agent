@@ -28,19 +28,27 @@ import type {
 // Full refreshes (ready, poll) start at most once per FULL_REFRESH_MIN_MS;
 // a request inside the window is deferred to its end and coalesced.
 export const FULL_REFRESH_MIN_MS = 1_000
-// The approvals lists are read in pages of APPROVAL_PAGE_LIMIT, at most
-// APPROVAL_MAX_PAGES of them per refresh.
+// The approvals lists are read in pages of APPROVAL_PAGE_LIMIT (the
+// server's cap), at most APPROVAL_MAX_PAGES of them per full refresh.
 export const APPROVAL_PAGE_LIMIT = 100
 export const APPROVAL_MAX_PAGES = 10
 
 export type Resource = 'status' | 'approvals' | 'settings'
 const RESOURCES: readonly Resource[] = ['status', 'approvals', 'settings']
 
+// Depth of a refresh: 'full' reads every page (start, ready, poll, the
+// user's refresh, after an action); 'head' only the first page of each
+// list (change events, which arrive every few seconds on a busy agent).
+// A head refresh replaces the lists with their first pages, so `complete`
+// turns false until the next full one when more pages exist.
+type Depth = 'head' | 'full'
+
 export interface ApprovalsState {
   pending: Approval[] // newest first; includes ended jobs' approvals (job_ended)
   verify: Approval[] // state unknown: the user must check the outcome
-  counts: { pending: number; live: number; verify: number }
-  complete: boolean // false when more pages exist than were read
+  counts: { pending: number; live: number; verify: number } // of the loaded lists
+  complete: boolean // pending: false when more pages exist than were read
+  verifyComplete: boolean // verify: false when more pages exist than were read
 }
 
 export interface StartOptions {
@@ -69,10 +77,16 @@ const emptyApprovals = (): ApprovalsState => ({
   pending: [],
   verify: [],
   counts: { pending: 0, live: 0, verify: 0 },
-  complete: true
+  complete: true,
+  verifyComplete: true
 })
 
-const approvalsOf = (pending: Approval[], verify: Approval[], complete: boolean): ApprovalsState => ({
+const approvalsOf = (
+  pending: Approval[],
+  verify: Approval[],
+  complete: boolean,
+  verifyComplete: boolean
+): ApprovalsState => ({
   pending,
   verify,
   counts: {
@@ -80,7 +94,8 @@ const approvalsOf = (pending: Approval[], verify: Approval[], complete: boolean)
     live: pending.filter((a) => !a.job_ended).length,
     verify: verify.length
   },
-  complete
+  complete,
+  verifyComplete
 })
 
 // Codes after which a decision's list is out of date.
@@ -88,7 +103,8 @@ const REFETCH_CODES = new Set(['stale_arguments', 'expired', 'already_decided', 
 
 // useAgentStore keeps the agent's status, the pending approvals and the
 // settings fresh: refreshAll on every ready and poll of the event stream,
-// only the implied resources on a change. A refresh already in flight is
+// only the implied resources on a change (the approvals then only their
+// first pages, see Depth). A refresh already in flight is
 // reused; a change or an action that needs data newer than the request in
 // flight queues ONE follow-up. Errors are kept per resource as fixed texts
 // and never blank the data of the others.
@@ -104,7 +120,9 @@ export const useAgentStore = defineStore('ocis-agent', () => {
 
   let session: Session | null = null
   const inflight = new Map<Resource, Promise<void>>()
+  const inflightDepth = new Map<Resource, Depth>()
   const queued = new Map<Resource, Promise<void>>()
+  const queuedDepth = new Map<Resource, Depth>()
   // writes counts the writes of each resource; a refresh stores its answer
   // only if nothing was written since it started (an action's answer is
   // newer than a refresh that began before it)
@@ -114,7 +132,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   let lastFull = -Infinity
   let deferred: { handle: unknown; promise: Promise<void>; resolve: () => void } | null = null
 
-  const loaders: Record<Resource, (s: Session) => Promise<() => void>> = {
+  const loaders: Record<Resource, (s: Session, depth: Depth) => Promise<() => void>> = {
     status: async (s) => {
       const v = await s.client.getStatus(s.abort.signal)
       return () => {
@@ -127,11 +145,12 @@ export const useAgentStore = defineStore('ocis-agent', () => {
         settings.value = v
       }
     },
-    approvals: async (s) => {
+    approvals: async (s, depth) => {
+      const pages = depth === 'full' ? APPROVAL_MAX_PAGES : 1
       const list = async (state?: string) => {
         const out: Approval[] = []
         let cursor: string | undefined
-        for (let i = 0; i < APPROVAL_MAX_PAGES; i++) {
+        for (let i = 0; i < pages; i++) {
           const page = await s.client.listApprovals(
             { state, limit: APPROVAL_PAGE_LIMIT, cursor },
             s.abort.signal
@@ -145,19 +164,20 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       }
       const [pending, verify] = await Promise.all([list(), list('unknown')])
       return () => {
-        approvals.value = approvalsOf(pending.out, verify.out, pending.complete && verify.complete)
+        approvals.value = approvalsOf(pending.out, verify.out, pending.complete, verify.complete)
       }
     }
   }
 
-  const load = (key: Resource): Promise<void> => {
+  const load = (key: Resource, depth: Depth): Promise<void> => {
     const s = session
     if (!s) return Promise.resolve()
     const running = inflight.get(key)
     if (running) return running
     const seq = writes[key]
     loading[key] = true
-    const p = loaders[key](s).then(
+    inflightDepth.set(key, depth)
+    const p = loaders[key](s, depth).then(
       (apply) => {
         if (session !== s) return
         if (writes[key] === seq) {
@@ -174,6 +194,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     const done = p.then(() => {
       if (inflight.get(key) === done) {
         inflight.delete(key)
+        inflightDepth.delete(key)
         loading[key] = false
       }
     })
@@ -181,17 +202,26 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     return done
   }
 
-  // refresh reuses a request in flight; with fresh it waits for that one and
-  // then makes one more (shared by every fresh caller meanwhile).
-  const refresh = (key: Resource, fresh = false): Promise<void> => {
+  // refresh reuses a request in flight that reads at least as deep; with
+  // fresh, or when the one in flight reads less, it waits for that one and
+  // then makes one more (shared by every such caller meanwhile, as deep as
+  // the deepest of them asked).
+  const refresh = (key: Resource, fresh = false, want: Depth = 'full'): Promise<void> => {
+    const depth: Depth = key === 'approvals' ? want : 'full' // only the approvals have pages
     const running = inflight.get(key)
-    if (!running || !fresh) return load(key)
+    if (!running) return load(key, depth)
+    const covers = depth === 'head' || inflightDepth.get(key) === 'full'
+    if (!fresh && covers) return running
+    if (depth === 'full') queuedDepth.set(key, 'full')
+    else if (!queuedDepth.has(key)) queuedDepth.set(key, 'head')
     const q = queued.get(key)
     if (q) return q
     const s = session
     const next = running.then(() => {
       queued.delete(key)
-      return session === s ? load(key) : undefined
+      const d = queuedDepth.get(key) ?? 'full'
+      queuedDepth.delete(key)
+      return session === s ? refresh(key, false, d) : undefined
     })
     queued.set(key, next)
     return next
@@ -203,7 +233,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
 
   const runFull = (s: Session): Promise<void> => {
     lastFull = s.platform.now()
-    const p = Promise.all(RESOURCES.map((k) => load(k))).then(() => {
+    const p = Promise.all(RESOURCES.map((k) => refresh(k))).then(() => {
       if (session === s && RESOURCES.every((k) => errors[k] === null)) {
         lastRefreshed.value = s.platform.now()
       }
@@ -256,7 +286,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   const onChanged = async (kinds: ChangeKind[]) => {
     const keys = new Set<Resource>()
     for (const k of kinds) for (const r of KIND_RESOURCES[k] ?? []) keys.add(r)
-    await Promise.all([...keys].map((k) => refresh(k, true)))
+    await Promise.all([...keys].map((k) => refresh(k, true, 'head')))
   }
 
   // reset forgets everything of a session, so a new one (maybe of another
@@ -271,7 +301,9 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       writes[k] = 0
     }
     inflight.clear()
+    inflightDepth.clear()
     queued.clear()
+    queuedDepth.clear()
     fullInflight = null
     fullQueued = null
     lastFull = -Infinity
@@ -347,7 +379,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     approvals.value = approvalsOf(
       cur.pending.filter((a) => !ids.has(a.id)),
       cur.verify,
-      cur.complete
+      cur.complete,
+      cur.verifyComplete
     )
     writes.approvals++
   }

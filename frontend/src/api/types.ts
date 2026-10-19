@@ -6,6 +6,12 @@
 
 // A page of a list: follow next_cursor until it is null. A page can hold
 // fewer entries than the limit, even none, and still carry a cursor.
+//
+// Enumerations are written `X | (string & {})`: the server may send a value
+// this client does not know yet, and the type keeps X's members (a bare
+// `X | string` collapses to string). A comparison with a misspelt literal is
+// still not an error, so write case labels and compared literals as
+// `'value' satisfies X`.
 export type Page<K extends string, T> = { [P in K]: T[] } & { next_cursor: string | null }
 
 export type PauseReason =
@@ -26,7 +32,7 @@ export interface StatusUser {
 }
 
 export interface StatusToken {
-  status: TokenStatus | string
+  status: TokenStatus | (string & {})
   expires_at: string | null
 }
 
@@ -62,7 +68,7 @@ export interface Status {
   enrolled: boolean
   user: StatusUser
   paused: boolean
-  pause_reason: PauseReason | string
+  pause_reason: PauseReason | (string & {})
   token: StatusToken
   budget: Budget
   kill_switch: KillSwitch
@@ -121,7 +127,7 @@ export interface Job {
   id: string
   trigger_kind: string
   goal: string // untrusted, capped
-  state: JobState | string
+  state: JobState | (string & {})
   attempt: number
   runs: number
   created_at: string | null
@@ -174,13 +180,13 @@ export interface Approval {
   job_id: string
   call_id: string
   tool: string
-  risk: Risk | string
+  risk: Risk | (string & {})
   args: unknown // the stored JSON, exactly what executes: untrusted
   args_hash: string
   target_etag: string
   rationale: string // the model's explanation: untrusted, unverified
   preview: unknown // untrusted
-  state: ApprovalState | string
+  state: ApprovalState | (string & {})
   requested_at: string | null
   expires_at: string | null
   decided_by: string
@@ -215,13 +221,13 @@ export type ConversationPage = Page<'conversations', Conversation>
 
 export interface MessageJob {
   id: string
-  state: JobState | string
+  state: JobState | (string & {})
   error: string
 }
 
 export interface Message {
   id: string
-  role: 'user' | 'assistant' | 'system' | string
+  role: 'user' | 'assistant' | 'system' | (string & {})
   content: string // untrusted, capped
   job_id: string
   created_at: string | null
@@ -232,8 +238,8 @@ export type MessagePage = Page<'messages', Message>
 
 export interface Sent {
   message: Message
-  job: { id: string; state: JobState | string }
-  agent: { paused: boolean; pause_reason: PauseReason | string; kill_switch: boolean }
+  job: { id: string; state: JobState | (string & {}) }
+  agent: { paused: boolean; pause_reason: PauseReason | (string & {}); kill_switch: boolean }
 }
 
 export interface MemoryFileInfo {

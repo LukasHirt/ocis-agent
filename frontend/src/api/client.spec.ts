@@ -240,6 +240,30 @@ describe('createClient: path and query encoding', () => {
     expect(platform.fetch).not.toHaveBeenCalled()
   })
 
+  // the server's page caps: approvals and chat 100, jobs and audit 200
+  type LimitRow = [string, (c: ApiClient, limit: number) => Promise<unknown>, number]
+  const limitRows: LimitRow[] = [
+    ['listApprovals', (c, limit) => c.listApprovals({ limit }), 100],
+    ['listConversations', (c, limit) => c.listConversations({ limit }), 100],
+    ['listMessages', (c, limit) => c.listMessages(ID, { limit }), 100],
+    ['listJobs', (c, limit) => c.listJobs({ limit }), 200],
+    ['listAudit', (c, limit) => c.listAudit({ limit }), 200]
+  ]
+
+  it.each(limitRows)('%s accepts a limit up to the server cap %i', async (_name, call, max) => {
+    const { client, calls } = setup()
+    await call(client, max)
+    expect(String(calls()[0][0])).toContain(`limit=${max}`)
+  })
+
+  it.each(limitRows)('%s refuses a limit above the server cap %i without a request', async (_name, call, max) => {
+    const { client, platform } = setup()
+    const e = (await caught(call(client, max + 1))) as ApiError
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.code).toBe('invalid_request')
+    expect(platform.fetch).not.toHaveBeenCalled()
+  })
+
   it('omits empty optional parameters', async () => {
     const { client, calls } = setup()
     await client.listJobs({ state: undefined, cursor: '' })

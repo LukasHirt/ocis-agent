@@ -93,6 +93,7 @@ import { useAgentStore } from '../../stores/agent'
 import { usePlatform } from '../../platform'
 import TextBlock from '../../components/TextBlock.vue'
 import { useReport, type ErrorText } from './report'
+import type { PauseReason } from '../../api/types'
 
 // AgentSection: who the agent works for, pause and resume, the operator's
 // kill switch and disabling (unenrolling) the agent.
@@ -110,17 +111,17 @@ const stateText = computed(() => {
   const s = status.value
   if (!s?.paused) return $gettext('The agent is running.')
   switch (s.pause_reason) {
-    case 'user':
+    case 'user' satisfies PauseReason:
       return $gettext('You paused the agent.')
-    case 'dormant':
+    case 'dormant' satisfies PauseReason:
       return $gettext('Paused because you were away; it resumes when you visit.')
-    case 'token_anomaly':
+    case 'token_anomaly' satisfies PauseReason:
       return $gettext(
         'Paused because an unknown app token of the agent was found. Check your app tokens below (Incident revoke lists them all) before you resume.'
       )
-    case 'credential_invalid':
-    case 'credential_revoked':
-    case 'credential_expired':
+    case 'credential_invalid' satisfies PauseReason:
+    case 'credential_revoked' satisfies PauseReason:
+    case 'credential_expired' satisfies PauseReason:
       return $gettext('Paused because the agent lost access to your files. Reconnect it to continue.')
   }
   return $gettext('The agent is paused.')

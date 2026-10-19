@@ -84,7 +84,7 @@ import { useAgentStore } from '../stores/agent'
 import { usePlatform } from '../platform'
 import { createClient } from '../api/client'
 import { describeError, isAbortError } from '../api/errors'
-import type { Approval } from '../api/types'
+import type { Approval, ApprovalState } from '../api/types'
 import ApprovalCard from './approvals/ApprovalCard.vue'
 import JobGroup from './approvals/JobGroup.vue'
 import { provideDecisions } from './approvals/decisions'
@@ -110,9 +110,16 @@ provideDecisions()
 const abort = new AbortController()
 onBeforeUnmount(() => abort.abort())
 
-const title = computed(() =>
-  interpolate($gettext('Approvals (%{count})'), { count: store.approvals.counts.live }, true)
-)
+// The title counts the approvals that can still be decided: the loaded
+// ones, or the status's exact count when the list is cut off (never fewer
+// than are shown, since the status may be older than the list).
+const liveCount = computed(() => {
+  const loaded = store.approvals.counts.live
+  const exact = store.status?.pending_approvals
+  if (store.approvals.complete || typeof exact !== 'number') return loaded
+  return Math.max(loaded, exact)
+})
+const title = computed(() => interpolate($gettext('Approvals (%{count})'), { count: liveCount.value }, true))
 
 // loaded: the pending list has been read (or failed) at least once in
 // this session. A reset store (no status) has not loaded anything yet.
@@ -169,7 +176,9 @@ watch(
 const settled = ref<Approval[]>([])
 const addSettled = (list: Approval[]) => {
   const seen = new Set(settled.value.map((a) => a.id))
-  const add = list.filter((a) => a.needs_verification && a.state !== 'unknown' && !seen.has(a.id))
+  const add = list.filter(
+    (a) => a.needs_verification && a.state !== ('unknown' satisfies ApprovalState) && !seen.has(a.id)
+  )
   if (add.length > 0) settled.value = [...settled.value, ...add]
 }
 for (const state of ['executed', 'failed']) {
@@ -201,7 +210,8 @@ const loadHistory = async () => {
     )
     const list = Array.isArray(page?.approvals) ? page.approvals : []
     const seen = new Set(history.value.map((a) => a.id))
-    history.value = [...history.value, ...list.filter((a) => a.state !== 'pending' && !seen.has(a.id))]
+    const decided = list.filter((a) => a.state !== ('pending' satisfies ApprovalState) && !seen.has(a.id))
+    history.value = [...history.value, ...decided]
     addSettled(list)
     historyCursor.value = typeof page?.next_cursor === 'string' ? page.next_cursor : null
     historyDone.value = true

@@ -119,7 +119,7 @@ import { useGettext } from 'vue3-gettext'
 import { useAgentStore } from '../../stores/agent'
 import { usePlatform } from '../../platform'
 import { isAbortError } from '../../api/errors'
-import type { TokenSummary } from '../../api/types'
+import type { TokenStatus, TokenSummary } from '../../api/types'
 import TextBlock from '../../components/TextBlock.vue'
 import { formatTime } from '../../util/format'
 import { useReport, type ErrorText } from './report'
@@ -143,13 +143,13 @@ onBeforeUnmount(() => {
 
 const tokenText = computed(() => {
   switch (status.value?.token.status) {
-    case 'valid':
+    case 'valid' satisfies TokenStatus:
       return $gettext("The agent's token is valid.")
-    case 'invalid':
+    case 'invalid' satisfies TokenStatus:
       return $gettext("The agent's token no longer works. Reconnect the agent.")
-    case 'revoked':
+    case 'revoked' satisfies TokenStatus:
       return $gettext("The agent's token was revoked.")
-    case 'none':
+    case 'none' satisfies TokenStatus:
       return $gettext('The agent has no token.')
   }
   return $gettext("The state of the agent's token is unknown.")

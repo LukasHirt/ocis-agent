@@ -165,6 +165,89 @@ describe('useAgentStore', () => {
     expect(s.store.approvals.complete).toBe(true)
   })
 
+  // two pages of pending and two of unknown approvals
+  const twoPages = (): Handler => (url) => {
+    const unknown = url.searchParams.get('state') === 'unknown'
+    const second = url.searchParams.get('cursor') === 'p2'
+    const id = (unknown ? 'u' : 'a') + (second ? '2' : '1')
+    const extra = unknown ? { state: 'unknown', needs_verification: true } : {}
+    return json({ approvals: [approvalOf(id, extra)], next_cursor: second ? null : 'p2' })
+  }
+  const cursorReads = (s: ReturnType<typeof setup>) =>
+    s.server.calls.filter((c) => c.key === 'GET /approvals' && c.url.searchParams.has('cursor')).length
+
+  it('reads only the first page of each approvals list on a change event', async () => {
+    const s = (current = setup(defaultHandlers({ 'GET /approvals': twoPages() })))
+    s.start()
+    await flush()
+    expect(s.store.approvals.pending.map((a) => a.id)).toEqual(['a1', 'a2'])
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1', 'u2'])
+    expect(s.store.approvals.complete).toBe(true)
+    expect(cursorReads(s)).toBe(2)
+
+    for (const kind of ['jobs', 'activity'] as const) {
+      const before = s.server.count('GET /approvals')
+      await s.events.made.opts!.onChanged([kind])
+      await flush()
+      expect(s.server.count('GET /approvals'), kind).toBe(before + 2)
+      expect(cursorReads(s), kind).toBe(2) // no further pages
+      expect(s.store.approvals.pending.map((a) => a.id)).toEqual(['a1'])
+      expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
+      expect(s.store.approvals.complete).toBe(false)
+      expect(s.store.approvals.verifyComplete).toBe(false)
+    }
+  })
+
+  it('reads every page again on ready, poll and an explicit refresh', async () => {
+    const s = (current = setup(defaultHandlers({ 'GET /approvals': twoPages() })))
+    s.start()
+    await flush()
+    const full = async (run: () => Promise<void> | void, name: string) => {
+      await s.events.made.opts!.onChanged(['jobs'])
+      await flush()
+      expect(s.store.approvals.complete).toBe(false)
+      const before = cursorReads(s)
+      s.advance(FULL_REFRESH_MIN_MS)
+      await run()
+      await flush()
+      expect(cursorReads(s), name).toBe(before + 2)
+      expect(s.store.approvals.pending.map((a) => a.id), name).toEqual(['a1', 'a2'])
+      expect(s.store.approvals.verify.map((a) => a.id), name).toEqual(['u1', 'u2'])
+      expect(s.store.approvals.complete, name).toBe(true)
+      expect(s.store.approvals.verifyComplete, name).toBe(true)
+    }
+    await full(() => s.events.made.opts!.onReady(), 'ready')
+    await full(() => s.events.made.opts!.onPoll(), 'poll')
+    await full(() => s.store.refreshApprovals(), 'refreshApprovals')
+  })
+
+  it('a full refresh during a first-page refresh waits for it and reads every page', async () => {
+    let release!: () => void
+    let gate: Promise<void> = Promise.resolve()
+    const pages = twoPages()
+    const s = (current = setup(
+      defaultHandlers({
+        'GET /approvals': async (url, init) => {
+          await gate
+          return pages(url, init)
+        }
+      })
+    ))
+    s.start()
+    await flush()
+    gate = new Promise<void>((r) => (release = r))
+    const change = s.events.made.opts!.onChanged(['jobs'])
+    await flush()
+    const before = cursorReads(s)
+    const explicit = s.store.refreshApprovals()
+    release()
+    await Promise.all([change, explicit])
+    await flush()
+    expect(cursorReads(s)).toBe(before + 2)
+    expect(s.store.approvals.pending.map((a) => a.id)).toEqual(['a1', 'a2'])
+    expect(s.store.approvals.complete).toBe(true)
+  })
+
   it('keeps the other resources when one fails and shows a fixed message', async () => {
     let fail = false
     const s = (current = setup(

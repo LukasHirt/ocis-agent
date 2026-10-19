@@ -131,13 +131,19 @@ const memoryPath = (name: unknown): string => {
   throw invalid()
 }
 
-type QueryKind = 'string' | 'name' | 'tool' | 'limit' | 'seq'
+type QueryKind = 'string' | 'name' | 'tool' | 'limit100' | 'limit200' | 'seq'
+
+// a page limit within the server's cap of the route
+const limitUpTo = (max: number) => (v: unknown) =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= max
 
 const QUERY_RULES: Record<QueryKind, (v: unknown) => boolean> = {
   string: (v) => typeof v === 'string' && v.length <= MAX_VALUE_LEN,
   name: (v) => typeof v === 'string' && /^[a-z_]{1,32}$/.test(v),
   tool: (v) => typeof v === 'string' && /^[a-z0-9_.]{1,64}$/.test(v),
-  limit: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000,
+  // the server's page caps: approvals and chat 100, jobs and audit 200
+  limit100: limitUpTo(100),
+  limit200: limitUpTo(200),
   seq: (v) => typeof v === 'string' && /^\d{1,19}$/.test(v)
 }
 
@@ -154,8 +160,11 @@ const query = (entries: Array<[string, unknown, QueryKind]>): string => {
   return s ? '?' + s : ''
 }
 
-const pageQuery = (p: PageParams | undefined): Array<[string, unknown, QueryKind]> => [
-  ['limit', p?.limit, 'limit'],
+const pageQuery = (
+  p: PageParams | undefined,
+  limit: 'limit100' | 'limit200'
+): Array<[string, unknown, QueryKind]> => [
+  ['limit', p?.limit, limit],
   ['cursor', p?.cursor, 'string']
 ]
 
@@ -400,7 +409,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
           query([
             ['state', params?.state, 'name'],
             ['job_id', params?.jobId, 'string'],
-            ...pageQuery(params)
+            ...pageQuery(params, 'limit100')
           ]),
         signal
       ),
@@ -423,10 +432,10 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       )
     },
     listJobs: async (params, signal) =>
-      get('/jobs' + query([['state', params?.state, 'name'], ...pageQuery(params)]), signal),
+      get('/jobs' + query([['state', params?.state, 'name'], ...pageQuery(params, 'limit200')]), signal),
     getJob: async (id, signal) => get('/jobs/' + segment(id), signal),
     cancelJob: async (id, signal) => post('/jobs/' + segment(id) + '/cancel', {}, signal),
-    listConversations: async (params, signal) => get('/conversations' + query(pageQuery(params)), signal),
+    listConversations: async (params, signal) => get('/conversations' + query(pageQuery(params, 'limit100')), signal),
     getConversation: async (id, signal) => get('/conversations/' + segment(id), signal),
     createConversation: async (title, signal) =>
       post('/conversations', title === undefined ? {} : { title: text(title) }, signal),
@@ -435,7 +444,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
     deleteConversation: async (id, signal) =>
       call({ method: 'DELETE', path: '/conversations/' + segment(id), signal }),
     listMessages: async (id, params, signal) =>
-      get('/conversations/' + segment(id) + '/messages' + query(pageQuery(params)), signal),
+      get('/conversations/' + segment(id) + '/messages' + query(pageQuery(params, 'limit100')), signal),
     sendMessage: async (id, content, signal) =>
       post('/conversations/' + segment(id) + '/messages', { content: text(content) }, signal),
     listMemory: (signal) => get('/memory', signal),
@@ -459,7 +468,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
         '/audit' +
           query([
             ['cursor', params?.cursor, 'seq'],
-            ['limit', params?.limit, 'limit'],
+            ['limit', params?.limit, 'limit200'],
             ['job_id', params?.jobId, 'string'],
             ['tool', params?.tool, 'tool'],
             ['risk', params?.risk, 'name']
