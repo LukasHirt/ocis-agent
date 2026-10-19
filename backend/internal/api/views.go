@@ -166,9 +166,11 @@ type stepView struct {
 	CreatedAt  *string `json:"created_at"`
 }
 
+// jobPageView is a page of jobView entries (encoded one by one for the
+// byte budget).
 type jobPageView struct {
-	Jobs       []jobView `json:"jobs"`
-	NextCursor *string   `json:"next_cursor"`
+	Jobs       []json.RawMessage `json:"jobs"`
+	NextCursor *string           `json:"next_cursor"`
 }
 
 // approvalView is one approval. Args and Preview are the stored JSON,
@@ -211,9 +213,10 @@ type outcomeView struct {
 	Diff    string `json:"diff"` // untrusted, capped
 }
 
+// approvalPageView is a page of approvalView entries.
 type approvalPageView struct {
-	Approvals  []approvalView `json:"approvals"`
-	NextCursor *string        `json:"next_cursor"`
+	Approvals  []json.RawMessage `json:"approvals"`
+	NextCursor *string           `json:"next_cursor"`
 }
 
 type approvalsView struct {

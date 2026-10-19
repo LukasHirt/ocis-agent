@@ -124,10 +124,13 @@ func outcomeOf(a store.Approval, j *store.Job) *outcomeView {
 		// Expired without a record: by its deadline (ExpireApprovals) or
 		// because its job ended first (the scheduler's SettleEnded). A job
 		// that ended before the deadline is the second case.
+		// An approved one without a record was settled because its job
+		// ended before a worker ran it (deadline or not: the executor's own
+		// expiry writes a record).
+		if a.DecidedAt != nil {
+			return &outcomeView{State: "expired", Reason: reasonJobEndedUnrun}
+		}
 		if j != nil && j.State.Terminal() && j.UpdatedAt.Before(a.ExpiresAt) {
-			if a.DecidedAt != nil {
-				return &outcomeView{State: "expired", Reason: reasonJobEndedUnrun}
-			}
 			return &outcomeView{State: "expired", Reason: reasonJobEnded}
 		}
 		return &outcomeView{State: "expired", Reason: reasonExpired}
@@ -153,7 +156,11 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	f := store.ApprovalFilter{Limit: pageWindow}
+	limit, cursor, err := pageParams(q, maxApprovPageLimit)
+	if err != nil {
+		return err
+	}
+	f := store.ApprovalFilter{Limit: limit + 1}
 	switch {
 	case state == "":
 		f.States = []store.ApprovalState{store.ApprovalPending}
@@ -169,27 +176,26 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	if f.JobID != "" && !validID(f.JobID) {
 		return errBadQuery
 	}
-	limit, cursor, err := pageParams(q)
-	if err != nil {
-		return err
-	}
-	out := approvalPageView{Approvals: []approvalView{}}
+	out := approvalPageView{}
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
+		if cursor != "" {
+			a, err := tx.GetApproval(p.UserID, cursor)
+			if errors.Is(err, store.ErrNotFound) {
+				return errBadQuery
+			}
+			if err != nil {
+				return err
+			}
+			f.Before = &store.PageKey{At: a.RequestedAt, ID: a.ID}
+		}
 		list, err := tx.ListApprovals(p.UserID, f)
 		if err != nil {
 			return err
 		}
-		items, next := page(list, func(a store.Approval) string { return a.ID }, cursor, limit)
-		out.NextCursor = next
 		vw := newApprovalViewer(tx, p.UserID)
-		for _, a := range items {
-			v, err := vw.view(a)
-			if err != nil {
-				return err
-			}
-			out.Approvals = append(out.Approvals, v)
-		}
-		return nil
+		out.Approvals, out.NextCursor, err = encodePage(list, limit, func(a store.Approval) string { return a.ID },
+			func(a store.Approval) (any, error) { return vw.view(a) })
+		return err
 	})
 	if err != nil {
 		return err

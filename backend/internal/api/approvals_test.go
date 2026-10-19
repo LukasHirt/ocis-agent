@@ -288,7 +288,7 @@ func TestApprovalUnreadableResult(t *testing.T) {
 func TestApprovalUntrustedFieldsAreCapped(t *testing.T) {
 	s := newWorkStack(t)
 	c := s.startJob(t, einsteinID, "chat", "w")
-	a := s.requestApprovals(t, c, `{"n":1}`)[0]
+	a := s.requestApprovalsWith(t, c, func(a *store.Approval) { a.Rationale = strings.Repeat("ß", 3000) }, `{"n":1}`)[0]
 	s.decideInStore(t, a, store.ApprovalApproved)
 	res, _ := json.Marshal(map[string]any{
 		"outcome": "done",
@@ -296,7 +296,11 @@ func TestApprovalUntrustedFieldsAreCapped(t *testing.T) {
 		"reason":  strings.Repeat("r", 3000),
 	})
 	s.settle(t, a, store.ApprovalExecuted, string(res))
-	out := s.getApproval(t, "einstein", a.ID)["outcome"].(map[string]any)
+	m := s.getApproval(t, "einstein", a.ID)
+	if r := m["rationale"].(string); len(r) > 4<<10 || !strings.HasSuffix(r, truncMarker) || !strings.HasPrefix(r, "ßß") {
+		t.Errorf("rationale: len %d", len(r))
+	}
+	out := m["outcome"].(map[string]any)
 	for k, limit := range map[string]int{"summary": 4 << 10, "diff": 16 << 10, "reason": 1 << 10} {
 		v := out[k].(string)
 		if len(v) > limit || !strings.HasSuffix(v, truncMarker) || len(v) < limit-len(truncMarker)-4 {
@@ -623,5 +627,124 @@ func TestDecideMapsALateConflictToAlreadyDecided(t *testing.T) {
 	err := f.srv.decide(r, Principal{UserID: "u", Subject: "u"}, []approvals.DecisionItem{{ApprovalID: store.NewID()}})
 	if st, code, _ := mapError(err); st != http.StatusConflict || code != "already_decided" {
 		t.Errorf("late conflict = %d %s", st, code)
+	}
+}
+
+func TestApprovalCursorSurvivesADecision(t *testing.T) {
+	s := newWorkStack(t)
+	c := s.startJob(t, einsteinID, "chat", "w")
+	aps := s.requestApprovals(t, c, `{"n":1}`, `{"n":2}`, `{"n":3}`, `{"n":4}`, `{"n":5}`)
+	want := []string{aps[4].ID, aps[3].ID, aps[2].ID, aps[1].ID, aps[0].ID}
+	p1 := s.listApprovals(t, "einstein", "?limit=2")
+	if strings.Join(ids(p1.Approvals), ",") != strings.Join(want[:2], ",") || *p1.NextCursor != want[1] {
+		t.Fatalf("page 1 = %v", ids(p1.Approvals))
+	}
+	// deciding the last item of page 1 must not hide the remaining ones
+	if rec := s.decide("einstein", aps[3].ID, decisionDoc("reject", aps[3].ArgsHash)); rec.Code != http.StatusOK {
+		t.Fatalf("decide = %d", rec.Code)
+	}
+	p2 := s.listApprovals(t, "einstein", "?limit=2&cursor="+*p1.NextCursor)
+	if strings.Join(ids(p2.Approvals), ",") != strings.Join(want[2:4], ",") || p2.NextCursor == nil {
+		t.Fatalf("page 2 = %v, want %v", ids(p2.Approvals), want[2:4])
+	}
+	p3 := s.listApprovals(t, "einstein", "?limit=2&cursor="+*p2.NextCursor)
+	if strings.Join(ids(p3.Approvals), ",") != want[4] || p3.NextCursor != nil {
+		t.Fatalf("page 3 = %v", ids(p3.Approvals))
+	}
+	// a cursor that is not one of the caller's approvals is invalid
+	cm := s.startJob(t, marieID, "chat", "m")
+	theirs := s.requestApprovals(t, cm, `{"n":"m"}`)[0]
+	for _, cur := range []string{theirs.ID, store.NewID(), c.Job.ID} {
+		wantError(t, s.as("einstein", http.MethodGet, approvalsPath+"?cursor="+cur, ""), http.StatusBadRequest, "invalid_request")
+	}
+}
+
+// bigArgs is a valid arguments document of about n bytes.
+func bigArgs(tag string, n int) string {
+	return `{"content":"` + tag + strings.Repeat("x", n) + `"}`
+}
+
+func TestApprovalPagesStayWithinTheByteBudget(t *testing.T) {
+	s := newWorkStack(t)
+	c := s.startJob(t, einsteinID, "chat", "w")
+	var args []string
+	for i := range 5 {
+		args = append(args, bigArgs(fmt.Sprint(i), 3<<20))
+	}
+	aps := s.requestApprovals(t, c, args...)
+	var got []string
+	var sizes []int
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 6 {
+			t.Fatal("pagination does not end")
+		}
+		q := "?limit=100"
+		if cursor != "" {
+			q += "&cursor=" + cursor
+		}
+		rec := s.as("einstein", http.MethodGet, approvalsPath+q, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d", rec.Code)
+		}
+		if rec.Body.Len() > maxListBytes+64<<10 {
+			t.Errorf("page of %d bytes", rec.Body.Len())
+		}
+		var p approvalPage
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, ids(p.Approvals)...)
+		sizes = append(sizes, len(p.Approvals))
+		if p.NextCursor == nil {
+			break
+		}
+		cursor = *p.NextCursor
+	}
+	if fmt.Sprint(sizes) != "[2 2 1]" || len(got) != 5 || got[0] != aps[4].ID || got[4] != aps[0].ID {
+		t.Errorf("pages %v, ids %d", sizes, len(got))
+	}
+}
+
+func TestAnOversizedApprovalIsAloneInItsPage(t *testing.T) {
+	s := newWorkStack(t)
+	c := s.startJob(t, einsteinID, "chat", "w")
+	aps := s.requestApprovals(t, c, `{"n":1}`, bigArgs("big", maxListBytes+1), `{"n":3}`)
+	var sizes []int
+	var got []string
+	cursor := ""
+	for pages := 0; pages < 5; pages++ {
+		q := ""
+		if cursor != "" {
+			q = "?cursor=" + cursor
+		}
+		p := s.listApprovals(t, "einstein", q)
+		sizes = append(sizes, len(p.Approvals))
+		got = append(got, ids(p.Approvals)...)
+		if p.NextCursor == nil {
+			break
+		}
+		cursor = *p.NextCursor
+	}
+	if fmt.Sprint(sizes) != "[1 1 1]" || strings.Join(got, ",") != aps[2].ID+","+aps[1].ID+","+aps[0].ID {
+		t.Errorf("pages %v", sizes)
+	}
+	// its args are never cut
+	if m := s.getApproval(t, "einstein", aps[1].ID); len(fmt.Sprint(m["args"])) < maxListBytes {
+		t.Error("args were truncated")
+	}
+}
+
+func TestApprovedThenSettledReasonIgnoresTiming(t *testing.T) {
+	s := newWorkStack(t)
+	c := s.startJob(t, einsteinID, "chat", "w")
+	a := s.requestApprovals(t, c, `{"n":1}`)[0]
+	s.decideInStore(t, a, store.ApprovalApproved) // no worker runs it
+	s.fake.Advance(2 * time.Hour)                 // the deadline passes
+	s.cancelInStore(t, einsteinID, c.Job.ID)      // the job ends after the deadline
+	s.mustTx(t, func(tx store.Tx) error { _, err := tx.ExpireEndedJobApprovals(100); return err })
+	out := s.getApproval(t, "einstein", a.ID)["outcome"].(map[string]any)
+	if out["state"] != "expired" || out["reason"] != "The job ended before this was executed." {
+		t.Errorf("outcome = %v", out)
 	}
 }

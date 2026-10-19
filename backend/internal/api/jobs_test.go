@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,9 +24,9 @@ const jobsPath = "/agent-api/v1/jobs"
 
 // newWorkStack is the stack with the real approvals.Gate (its clock is the
 // fake's) and both users enrolled.
-func newWorkStack(t *testing.T) *stack {
+func newWorkStack(t *testing.T, mods ...func(*Deps)) *stack {
 	t.Helper()
-	s := newStack(t, func(d *Deps) {
+	s := newStack(t, append(mods, func(d *Deps) {
 		reg, err := tools.NewRegistry(tools.All()...)
 		if err != nil {
 			t.Fatal(err)
@@ -35,7 +36,7 @@ func newWorkStack(t *testing.T) *stack {
 			t.Fatal(err)
 		}
 		d.Gate = g
-	})
+	})...)
 	s.enroll(t, "einstein")
 	s.enroll(t, "marie")
 	return s
@@ -103,16 +104,27 @@ func hashOf(args string) string {
 // the job to sleep, in one transaction (as Gate.Request does).
 func (s *stack) requestApprovals(t *testing.T, c store.Claim, args ...string) []store.Approval {
 	t.Helper()
+	return s.requestApprovalsWith(t, c, nil, args...)
+}
+
+// requestApprovalsWith is requestApprovals with mod applied to every
+// approval before it is inserted.
+func (s *stack) requestApprovalsWith(t *testing.T, c store.Claim, mod func(*store.Approval), args ...string) []store.Approval {
+	t.Helper()
 	var out []store.Approval
 	s.mustTx(t, func(tx store.Tx) error {
 		for i, a := range args {
 			call := fmt.Sprintf("c%d", i)
-			ap, err := tx.InsertApproval(store.Approval{
+			ap := store.Approval{
 				UserID: c.Job.UserID, JobID: c.Job.ID, CallID: call, Tool: "files.write", Risk: store.RiskWrite,
 				Args: json.RawMessage(a), ArgsHash: hashOf(a), TargetETag: `"etag-1"`, Rationale: "the model says so",
 				Preview: json.RawMessage(`{"action":"write","paths":["/a.txt"]}`), IdemKey: c.Job.ID + ":" + call + ":" + hashOf(a),
 				ExpiresAt: s.fake.Now().Add(time.Hour),
-			}, c.Fence)
+			}
+			if mod != nil {
+				mod(&ap)
+			}
+			ap, err := tx.InsertApproval(ap, c.Fence)
 			if err != nil {
 				return err
 			}
@@ -280,14 +292,15 @@ func TestJobListPagination(t *testing.T) {
 	if p := s.listJobs(t, "einstein", "?limit=1"); len(p.Jobs) != 1 || *p.NextCursor != want[0] {
 		t.Errorf("limit=1 = %v", ids(p.Jobs))
 	}
-	// a well-formed cursor that is not one of the caller's jobs: an empty page
-	other := s.queuedJob(t, marieID, "chat", "x")
-	if p := s.listJobs(t, "einstein", "?cursor="+other.ID); len(p.Jobs) != 0 || p.NextCursor != nil {
-		t.Errorf("foreign cursor = %v", ids(p.Jobs))
+	if p := s.listJobs(t, "einstein", "?limit=200"); len(p.Jobs) != 200 || *p.NextCursor != want[199] {
+		t.Errorf("limit=200 = %d", len(p.Jobs))
 	}
+	// a well-formed cursor that is not one of the caller's jobs is invalid
+	other := s.queuedJob(t, marieID, "chat", "x")
 	for _, q := range []string{
+		"?cursor=" + other.ID, "?cursor=" + store.NewID(), "?limit=201",
 		"?cursor=nope", "?cursor=" + strings.ToLower(want[0]), "?cursor=" + want[0] + "x", "?cursor=8" + want[0][1:],
-		"?cursor=" + want[0][:25] + "U", "?limit=0", "?limit=101", "?limit=-1", "?limit=+5", "?limit=x", "?limit=1&limit=2",
+		"?cursor=" + want[0][:25] + "U", "?limit=0", "?limit=-1", "?limit=+5", "?limit=x", "?limit=1&limit=2",
 		"?state=done", "?state=QUEUED", "?state=queued&state=failed", "?cursor=" + want[0] + "&cursor=" + want[1],
 	} {
 		wantError(t, s.as("einstein", http.MethodGet, jobsPath+q, ""), http.StatusBadRequest, "invalid_request")
@@ -491,5 +504,99 @@ func TestMalformedIDsNeverReachTheStore(t *testing.T) {
 	}
 	if strings.Contains(f.logs.String(), "store reached") {
 		t.Error("an error text reached the logs")
+	}
+}
+
+func TestJobCursorSurvivesAStateChange(t *testing.T) {
+	s := newWorkStack(t)
+	var want []string // newest first
+	for i := range 5 {
+		want = append([]string{s.queuedJob(t, einsteinID, "chat", fmt.Sprint(i)).ID}, want...)
+	}
+	p1 := s.listJobs(t, "einstein", "?state=queued&limit=2")
+	if strings.Join(ids(p1.Jobs), ",") != strings.Join(want[:2], ",") || *p1.NextCursor != want[1] {
+		t.Fatalf("page 1 = %v", ids(p1.Jobs))
+	}
+	// the cursor row leaves the filter: the next page still starts after it
+	s.cancelInStore(t, einsteinID, want[1])
+	p2 := s.listJobs(t, "einstein", "?state=queued&limit=2&cursor="+*p1.NextCursor)
+	if strings.Join(ids(p2.Jobs), ",") != strings.Join(want[2:4], ",") || p2.NextCursor == nil {
+		t.Fatalf("page 2 = %v, want %v", ids(p2.Jobs), want[2:4])
+	}
+	p3 := s.listJobs(t, "einstein", "?state=queued&limit=2&cursor="+*p2.NextCursor)
+	if strings.Join(ids(p3.Jobs), ",") != want[4] || p3.NextCursor != nil {
+		t.Fatalf("page 3 = %v", ids(p3.Jobs))
+	}
+}
+
+// spyStore wraps the store's read transactions: the list routes must use
+// the job summaries (no checkpoints, no ListSteps per job) and bounded
+// fetches.
+type spyStore struct {
+	store.Store
+	mu        sync.Mutex
+	jobLimits []int
+	apLimits  []int
+}
+
+func (s *spyStore) View(ctx context.Context, fn func(store.Tx) error) error {
+	return s.Store.View(ctx, func(tx store.Tx) error { return fn(spyTx{tx, s}) })
+}
+
+func (s *spyStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobLimits, s.apLimits = nil, nil
+}
+
+type spyTx struct {
+	store.Tx
+	s *spyStore
+}
+
+func (spyTx) ListJobs(string, store.JobFilter) ([]store.Job, error) {
+	return nil, errors.New("spy: ListJobs loads every checkpoint")
+}
+
+func (spyTx) ListSteps(string, string) ([]store.JobStep, error) {
+	return nil, errors.New("spy: ListSteps per job")
+}
+
+func (t spyTx) ListJobSummaries(user string, f store.JobFilter) ([]store.JobSummary, error) {
+	t.s.mu.Lock()
+	t.s.jobLimits = append(t.s.jobLimits, f.Limit)
+	t.s.mu.Unlock()
+	return t.Tx.ListJobSummaries(user, f)
+}
+
+func (t spyTx) ListApprovals(user string, f store.ApprovalFilter) ([]store.Approval, error) {
+	t.s.mu.Lock()
+	t.s.apLimits = append(t.s.apLimits, f.Limit)
+	t.s.mu.Unlock()
+	return t.Tx.ListApprovals(user, f)
+}
+
+func TestListsLoadNoCheckpointsAndFetchBounded(t *testing.T) {
+	spy := &spyStore{}
+	s := newWorkStack(t, func(d *Deps) { spy.Store = d.Store; d.Store = spy })
+	for i := range 3 {
+		c := s.startJob(t, einsteinID, "chat", fmt.Sprint(i))
+		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok"})
+		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok"})
+		s.requestApprovals(t, c, `{"n":1}`)
+	}
+	spy.reset()
+	p := s.listJobs(t, "einstein", "?limit=2")
+	if len(p.Jobs) != 2 || p.Jobs[0]["steps_count"] != float64(2) || p.NextCursor == nil {
+		t.Fatalf("jobs = %v", p.Jobs)
+	}
+	s.listJobs(t, "einstein", "?limit=200&cursor="+*p.NextCursor)
+	s.listJobs(t, "einstein", "")
+	s.listApprovals(t, "einstein", "?limit=100&state=all")
+	s.listApprovals(t, "einstein", "")
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if fmt.Sprint(spy.jobLimits) != "[3 201 51]" || fmt.Sprint(spy.apLimits) != "[101 51]" {
+		t.Errorf("fetch limits: jobs %v approvals %v", spy.jobLimits, spy.apLimits)
 	}
 }

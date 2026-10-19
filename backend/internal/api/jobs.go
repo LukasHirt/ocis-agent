@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/agent"
@@ -39,18 +42,27 @@ func capText(s string, limit int) string {
 	return s[:cut] + truncMarker
 }
 
-// Pagination. A page is cut from ONE bounded fetch of the newest pageWindow
-// rows (the store's ListJobs/ListApprovals maximum): the cursor is the id of
-// the last item of the previous page, and the page holds the items after it.
-// Known bound: only the newest pageWindow rows (of the filter) are reachable;
-// next_cursor is null at the end of the window even if older rows exist. A
-// well-formed cursor that is not in the window (another user's id, or a row
-// that fell out of it) gives an empty page.
+// Pagination is keyset pagination in the store's newest-first order: the
+// cursor is the id of the last item of the previous page, resolved with the
+// caller's own GetJob/GetApproval (an unknown or another user's id is 400)
+// into the store's sort key (created_at or requested_at, id). The next page
+// holds the rows strictly older than that key, so a cursor row that changed
+// state meanwhile does not hide or repeat rows. Each request fetches
+// limit+1 rows (the extra row says whether there is a next page).
+//
+// Byte budget: a page's encoded entries stop at maxListBytes. The entry
+// that would exceed it starts the next page (next_cursor is the last
+// included item), so nothing is skipped and an entry is never cut; a page
+// always has at least one entry, so a single entry larger than the budget
+// is returned alone in its page.
 const (
-	pageWindow       = 500
-	defaultPageLimit = 50
-	maxPageLimit     = 100
+	defaultPageLimit   = 50
+	maxJobPageLimit    = 200
+	maxApprovPageLimit = 100 // approvals carry their arguments (up to 2 MiB each)
 )
+
+// maxListBytes is the byte budget of a list page's entries.
+const maxListBytes = 8 << 20
 
 var errBadQuery = newAPIError(http.StatusBadRequest, "invalid_request")
 
@@ -67,9 +79,9 @@ func queryValue(q url.Values, key string) (string, error) {
 	return "", errBadQuery
 }
 
-// pageParams reads limit (1..maxPageLimit, decimal digits only, default
+// pageParams reads limit (1..maxLimit, decimal digits only, default
 // defaultPageLimit) and cursor (an id, see validID).
-func pageParams(q url.Values) (limit int, cursor string, err error) {
+func pageParams(q url.Values, maxLimit int) (limit int, cursor string, err error) {
 	ls, err := queryValue(q, "limit")
 	if err != nil {
 		return 0, "", err
@@ -86,7 +98,7 @@ func pageParams(q url.Values) (limit int, cursor string, err error) {
 			}
 			limit = limit*10 + int(c-'0')
 		}
-		if limit < 1 || limit > maxPageLimit {
+		if limit < 1 || limit > maxLimit {
 			return 0, "", errBadQuery
 		}
 	}
@@ -99,29 +111,37 @@ func pageParams(q url.Values) (limit int, cursor string, err error) {
 	return limit, cursor, nil
 }
 
-// page returns up to limit items after the one with the cursor id (from the
-// start without a cursor) and the next cursor (nil at the end).
-func page[T any](items []T, id func(T) string, cursor string, limit int) ([]T, *string) {
-	start := 0
-	if cursor != "" {
-		start = -1
-		for i, it := range items {
-			if id(it) == cursor {
-				start = i + 1
-				break
-			}
-		}
-		if start < 0 {
-			return nil, nil
-		}
+// encodePage encodes up to limit of rows (fetched with limit+1) within the
+// byte budget and returns the entries and the next cursor (nil on the last
+// page).
+func encodePage[T any](rows []T, limit int, id func(T) string, encode func(T) (any, error)) ([]json.RawMessage, *string, error) {
+	more := len(rows) > limit
+	if more {
+		rows = rows[:limit]
 	}
-	end := min(start+limit, len(items))
-	out := items[start:end]
-	if end < len(items) && len(out) > 0 {
-		next := id(out[len(out)-1])
-		return out, &next
+	out := make([]json.RawMessage, 0, len(rows))
+	total, last := 0, ""
+	for _, r := range rows {
+		v, err := encode(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(out) > 0 && total+len(b) > maxListBytes {
+			more = true
+			break
+		}
+		out = append(out, b)
+		total += len(b)
+		last = id(r)
 	}
-	return out, nil
+	if !more {
+		return out, nil, nil
+	}
+	return out, &last, nil
 }
 
 // crockford is the ULID alphabet (upper case, without I, L, O and U).
@@ -135,29 +155,31 @@ func validID(s string) bool {
 		return false
 	}
 	for i := range len(s) {
-		ok := false
-		for j := range len(crockford) {
-			if s[i] == crockford[j] {
-				ok = true
-				break
-			}
-		}
-		if !ok {
+		if strings.IndexByte(crockford, s[i]) < 0 {
 			return false
 		}
 	}
 	return true
 }
 
-func jobViewOf(j store.Job, steps int) jobView {
-	return jobView{
-		ID: j.ID, TriggerKind: j.TriggerKind, Goal: capText(j.Goal, maxGoalView), State: string(j.State),
-		Attempt: j.Attempt, Runs: j.Runs, CreatedAt: timeView(j.CreatedAt), UpdatedAt: timeView(j.UpdatedAt),
-		Error: j.Error, StepsCount: steps,
+func summaryOf(j store.Job, steps int) store.JobSummary {
+	return store.JobSummary{
+		ID: j.ID, UserID: j.UserID, TriggerKind: j.TriggerKind, TriggerRef: j.TriggerRef, Goal: j.Goal, State: j.State,
+		Attempt: j.Attempt, Runs: j.Runs, NotBefore: j.NotBefore, Error: j.Error, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
+		StepCount: steps,
 	}
 }
 
-// listJobs is GET /agent-api/v1/jobs?state=&limit=&cursor= (newest first).
+func jobViewOf(j store.JobSummary) jobView {
+	return jobView{
+		ID: j.ID, TriggerKind: j.TriggerKind, Goal: capText(j.Goal, maxGoalView), State: string(j.State),
+		Attempt: j.Attempt, Runs: j.Runs, CreatedAt: timeView(j.CreatedAt), UpdatedAt: timeView(j.UpdatedAt),
+		Error: j.Error, StepsCount: j.StepCount,
+	}
+}
+
+// listJobs is GET /agent-api/v1/jobs?state=&limit=&cursor= (newest first;
+// summaries only: no checkpoint is loaded).
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
@@ -168,33 +190,36 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	f := store.JobFilter{Limit: pageWindow}
+	limit, cursor, err := pageParams(q, maxJobPageLimit)
+	if err != nil {
+		return err
+	}
+	f := store.JobFilter{Limit: limit + 1}
 	if state != "" {
 		if !store.JobState(state).Valid() {
 			return errBadQuery
 		}
 		f.States = []store.JobState{store.JobState(state)}
 	}
-	limit, cursor, err := pageParams(q)
-	if err != nil {
-		return err
-	}
-	out := jobPageView{Jobs: []jobView{}}
+	out := jobPageView{}
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
-		list, err := tx.ListJobs(p.UserID, f)
-		if err != nil {
-			return err
-		}
-		items, next := page(list, func(j store.Job) string { return j.ID }, cursor, limit)
-		out.NextCursor = next
-		for _, j := range items {
-			steps, err := tx.ListSteps(p.UserID, j.ID)
+		if cursor != "" {
+			j, err := tx.GetJob(p.UserID, cursor)
+			if errors.Is(err, store.ErrNotFound) {
+				return errBadQuery
+			}
 			if err != nil {
 				return err
 			}
-			out.Jobs = append(out.Jobs, jobViewOf(j, len(steps)))
+			f.Before = &store.PageKey{At: j.CreatedAt, ID: j.ID}
 		}
-		return nil
+		list, err := tx.ListJobSummaries(p.UserID, f)
+		if err != nil {
+			return err
+		}
+		out.Jobs, out.NextCursor, err = encodePage(list, limit, func(j store.JobSummary) string { return j.ID },
+			func(j store.JobSummary) (any, error) { return jobViewOf(j), nil })
+		return err
 	})
 	if err != nil {
 		return err
@@ -223,7 +248,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		v = jobDetailView{jobView: jobViewOf(j, len(steps)), Steps: make([]stepView, 0, len(steps))}
+		v = jobDetailView{jobView: jobViewOf(summaryOf(j, len(steps))), Steps: make([]stepView, 0, len(steps))}
 		for _, st := range steps {
 			v.Steps = append(v.Steps, stepView{
 				N: st.N, Kind: st.Kind, Tool: st.Tool, CallID: st.CallID, Status: st.Status,
@@ -279,7 +304,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		v = jobViewOf(j, len(steps))
+		v = jobViewOf(summaryOf(j, len(steps)))
 		return nil
 	})
 	if err != nil {
