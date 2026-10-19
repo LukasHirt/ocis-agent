@@ -224,6 +224,13 @@ func (t faultTx) ListRecentMessages(userID, conv string, n int, excludeJobID str
 	return t.Tx.ListRecentMessages(userID, conv, n, excludeJobID)
 }
 
+func (t faultTx) JobStatuses(userID string, ids []string) (map[string]store.JobStatus, error) {
+	if err := t.s.hit("JobStatuses"); err != nil {
+		return nil, err
+	}
+	return t.Tx.JobStatuses(userID, ids)
+}
+
 func (t faultTx) FinishIdempotent(userID, key string, state store.IdemState, result json.RawMessage) error {
 	t.called["FinishIdempotent"] = true
 	if err := t.s.hit("FinishIdempotent"); err != nil {

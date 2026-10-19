@@ -32,7 +32,7 @@ func (f *fixture) newConversation() string {
 
 // addMessage adds a message one second after the previous one, so the
 // conversation's order is unambiguous. Without a jobID a user message gets
-// a new ended chat job of its own and any other message the job of the
+// a new succeeded chat job of its own and any other message the job of the
 // last user message, like an earlier question and its answer.
 func (f *fixture) addMessage(conv, role, content, jobID string) {
 	f.t.Helper()
@@ -42,25 +42,46 @@ func (f *fixture) addMessage(conv, role, content, jobID string) {
 
 func (f *fixture) insertMessage(conv, role, content, jobID string) {
 	f.t.Helper()
+	if jobID == "" && role == store.RoleUser {
+		f.pastJob = f.chatJobIn(conv, content, store.JobSucceeded)
+	}
+	if jobID == "" {
+		jobID = f.pastJob
+	}
 	if err := f.st.InTx(bg, func(tx store.Tx) error {
-		if jobID == "" && role == store.RoleUser {
-			j, err := tx.InsertJob(store.Job{UserID: userID, TriggerKind: store.TriggerChat, TriggerRef: conv, Goal: content})
-			if err != nil {
-				return err
-			}
-			if err := tx.CancelJob(userID, j.ID); err != nil {
-				return err
-			}
-			f.pastJob = j.ID
-		}
-		if jobID == "" {
-			jobID = f.pastJob
-		}
 		_, err := tx.InsertMessage(store.Message{ConversationID: conv, UserID: userID, Role: role, Content: content, JobID: jobID})
 		return err
 	}); err != nil {
 		f.t.Fatal(err)
 	}
+}
+
+// chatJobIn adds a chat job of conv in state (set behind the store's
+// back), not claimable unless queued.
+func (f *fixture) chatJobIn(conv, goal string, state store.JobState) string {
+	f.t.Helper()
+	var j store.Job
+	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		var err error
+		j, err = tx.InsertJob(store.Job{UserID: userID, TriggerKind: store.TriggerChat, TriggerRef: conv, Goal: goal})
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if state != store.JobQueued {
+		f.rawSQL(`UPDATE jobs SET state = ? WHERE id = ?`, string(state), j.ID)
+	}
+	return j.ID
+}
+
+// question adds a user message whose job is in state.
+func (f *fixture) question(conv, content string, state store.JobState) string {
+	f.t.Helper()
+	f.clk.Advance(time.Second)
+	id := f.chatJobIn(conv, content, state)
+	f.insertMessage(conv, store.RoleUser, content, id)
+	f.pastJob = id
+	return id
 }
 
 // postChat is what the chat API does: a chat job for conv whose goal is
@@ -173,10 +194,10 @@ func TestTheConversationPrefixIsCappedPerMessageAndInTotal(t *testing.T) {
 		f.postChat(conv, "g")
 		f.runOnce()
 		ms := sent(t, p, 0)
-		if len(ms) != 2 {
+		if len(ms) != 1 || !strings.HasSuffix(ms[0].Content, "\n\ng") {
 			t.Fatalf("sent %d messages", len(ms))
 		}
-		c := ms[0].Content
+		c := strings.TrimSuffix(ms[0].Content, "\n\ng")
 		if len(c) > 4096 || len(c) < 4096-len(marker)-2 || !strings.HasSuffix(c, marker) || !utf8.ValidString(c) ||
 			!strings.HasPrefix(c, "üü") {
 			t.Errorf("capped message: %d bytes, suffix %q", len(c), c[max(0, len(c)-20):])
@@ -245,7 +266,7 @@ func TestTheConversationPrefixIsCappedPerMessageAndInTotal(t *testing.T) {
 		f.runOnce()
 		// the last 20 start with a3, whose question is outside the window
 		ms := sent(t, p, 0)
-		if len(ms) != 20 || ms[0].Role != llm.RoleUser || ms[0].Content != "q4" || ms[18].Content != "unanswered" {
+		if len(ms) != 19 || ms[0].Role != llm.RoleUser || ms[0].Content != "q4" || ms[18].Content != "unanswered\n\ng" {
 			t.Errorf("sent %d messages: %s", len(ms), roles(ms))
 		}
 	})
@@ -263,8 +284,8 @@ func TestTheConversationPrefixIsCappedPerMessageAndInTotal(t *testing.T) {
 		f.runOnce()
 		// 7 capped messages are over 24 KiB: q0 goes, and a0 with it
 		ms := sent(t, p, 0)
-		if len(ms) != 6 || ms[0].Role != llm.RoleUser || !strings.HasPrefix(ms[0].Content, "q1:") ||
-			!strings.HasPrefix(ms[4].Content, "q3:") {
+		if len(ms) != 5 || ms[0].Role != llm.RoleUser || !strings.HasPrefix(ms[0].Content, "q1:") ||
+			!strings.HasPrefix(ms[4].Content, "q3:") || !strings.HasSuffix(ms[4].Content, "\n\ng") {
 			t.Errorf("sent %d messages: %.80s", len(ms), roles(ms))
 		}
 	})
@@ -280,7 +301,7 @@ func TestUserMessagesPostedAfterTheJobAreNotItsContext(t *testing.T) {
 	f.addMessage(conv, store.RoleUser, "later", "") // a later message, not yet answered
 	f.lastJob = id
 	f.runOnce()
-	if got := roles(sent(t, p, 0)); got != "user:before|user:first" {
+	if got := roles(sent(t, p, 0)); got != "user:before\n\nfirst" {
 		t.Errorf("sent %s", got)
 	}
 }
@@ -626,6 +647,9 @@ func TestAnAnswerWithoutItsQuestionIsNeverContext(t *testing.T) {
 	if f.job().State != store.JobSucceeded {
 		t.Fatalf("J2 = %s", f.job().State)
 	}
+	if got := roles(sent(t, p, 1)); got != "user:Q2" {
+		t.Errorf("J2 sent %s: J1's queued question must not be answered twice", got)
+	}
 	f.lastJob = j1
 	f.clk.Advance(time.Hour)
 	f.runOnce()
@@ -652,7 +676,7 @@ func TestAnAnswerWithoutItsQuestionIsNeverContext(t *testing.T) {
 		f.provider = p
 		f.postChat(conv, "g")
 		f.runOnce()
-		if got := roles(sent(t, p, 0)); got != "user:q|user:g" {
+		if got := roles(sent(t, p, 0)); got != "user:q\n\ng" {
 			t.Errorf("sent %s", got)
 		}
 	})
@@ -674,7 +698,7 @@ func TestAnEmptyPrefixChatJobSavesItsCheckpointAtOnce(t *testing.T) {
 func TestConsecutiveUserMessagesAreMergedInThePrefix(t *testing.T) {
 	f := newFixture(t)
 	conv := f.newConversation()
-	f.addMessage(conv, store.RoleUser, "q0", "")
+	f.question(conv, "q0", store.JobFailed)
 	f.addMessage(conv, store.RoleSystem, ReasonModelBad, "")
 	f.addMessage(conv, store.RoleUser, "q1", "")
 	f.addMessage(conv, store.RoleAssistant, "a1", "")
@@ -717,7 +741,7 @@ func TestAQuestionInTheSameMillisecondAsTheJobIsContext(t *testing.T) {
 	f.insertMessage(conv, store.RoleUser, "same ms", "") // no clock advance
 	f.lastJob = id
 	f.runOnce()
-	if got := roles(sent(t, p, 0)); got != "user:same ms|user:g" {
+	if got := roles(sent(t, p, 0)); got != "user:same ms\n\ng" {
 		t.Errorf("sent %s", got)
 	}
 }
@@ -739,7 +763,91 @@ func TestTheByteCapCountsTheJoinOfMergedMessages(t *testing.T) {
 	// 6 x 4096 bytes are exactly 24 KiB, the blank line of the merge is
 	// over it: u0 goes
 	ms := sent(t, p, 0)
-	if len(ms) != 6 || !strings.HasPrefix(ms[0].Content, "q1:") || strings.Contains(ms[0].Content, "u0:") {
+	if len(ms) != 5 || !strings.HasPrefix(ms[0].Content, "q1:") || strings.Contains(ms[0].Content, "u0:") {
 		t.Errorf("sent %d messages: %.60s", len(ms), roles(ms))
+	}
+}
+
+func TestQuestionsOfLiveOrCancelledJobsAreNotContext(t *testing.T) {
+	for _, tc := range []struct {
+		state store.JobState
+		want  string
+	}{
+		{store.JobQueued, "user:g"},
+		{store.JobRunning, "user:g"},
+		{store.JobWaitingApproval, "user:g"},
+		{store.JobCancelled, "user:g"},
+		{store.JobFailed, "user:q\n\ng"},
+		{store.JobSucceeded, "user:q|assistant:a|user:g"},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			f := newFixture(t)
+			conv := f.newConversation()
+			f.question(conv, "q", tc.state)
+			if tc.state == store.JobSucceeded {
+				f.addMessage(conv, store.RoleAssistant, "a", "")
+			}
+			p := llmtest.New(llmtest.Say("ok", 1, 1))
+			f.provider = p
+			id := f.postChat(conv, "g")
+			if tc.state == store.JobQueued {
+				// the queued question's job is older: run g's job directly
+				f.rawSQL(`UPDATE jobs SET not_before = ? WHERE id = ?`, f.clk.Now().Add(time.Hour).UnixMilli(), f.pastJob)
+			}
+			f.lastJob = id
+			f.runOnce()
+			if got := roles(sent(t, p, 0)); got != tc.want {
+				t.Errorf("sent %q, want %q", got, tc.want)
+			}
+		})
+	}
+	t.Run("an answer of a cancelled job goes with its question", func(t *testing.T) {
+		f := newFixture(t)
+		conv := f.newConversation()
+		f.question(conv, "q", store.JobCancelled)
+		f.addMessage(conv, store.RoleAssistant, "a", "")
+		p := llmtest.New(llmtest.Say("ok", 1, 1))
+		f.provider = p
+		f.postChat(conv, "g")
+		f.runOnce()
+		if got := roles(sent(t, p, 0)); got != "user:g" {
+			t.Errorf("sent %q", got)
+		}
+	})
+}
+
+func TestAQuestionWaitingForApprovalIsNotAskedAgain(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	p := llmtest.New(llmtest.Calls(1, 1, writeNew("w", "/old.txt", "x")), llmtest.Say("ok", 1, 1))
+	f.provider = p
+	j1 := f.postChat(conv, "write old.txt")
+	f.runOnce()
+	if f.job().State != store.JobWaitingApproval {
+		t.Fatalf("J1 = %s", f.job().State)
+	}
+	f.postChat(conv, "what is the weather")
+	f.runOnce()
+	if got := roles(sent(t, p, 1)); got != "user:what is the weather" {
+		t.Errorf("J2 sent %q", got)
+	}
+	_ = j1
+}
+
+func TestAJobStatusLookupFailureMeansNoPrefix(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	f.addMessage(conv, store.RoleUser, "u1", "")
+	f.addMessage(conv, store.RoleAssistant, "a1", "")
+	p := llmtest.New(llmtest.Say("ok", 1, 1))
+	f.provider = p
+	f.postChat(conv, "g")
+	f.faults.failAt("JobStatuses", 1)
+	f.runOnce()
+	if got := roles(sent(t, p, 0)); got != "user:g" {
+		t.Errorf("sent %q", got)
+	}
+	if f.job().State != store.JobSucceeded {
+		t.Errorf("job = %s", f.job().State)
 	}
 }

@@ -73,10 +73,9 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 		return r.fail(ctx, claim, ReasonInternal)
 	}
 	if len(cp.Messages) == 0 {
-		// a fresh job: a chat job's conversation, then its goal as the
+		// a fresh job: a chat job's conversation, then its goal ending the
 		// last user message
-		goal := llm.Message{Role: llm.RoleUser, Content: claim.Job.Goal}
-		cp.Messages = append(r.history(ctx, claim.Job), goal)
+		cp.Messages = withGoal(r.history(ctx, claim.Job), claim.Job.Goal)
 		if isChat(claim.Job) {
 			// stored at once, even without history, so a requeued run is
 			// never rebuilt and sees the same context
