@@ -27,13 +27,25 @@ func TestKeysetPagesUseAnIndexRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ccond, ccargs, err := keysetBefore("updated_at", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcond, mcargs, err := keysetBefore("created_at", key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, q := range map[string]struct {
 		sql   string
 		args  []any
 		index string
 	}{
-		"jobs":      {`SELECT id` + tail, args, "jobs_user (user_id=? AND created_at<?)"},
-		"approvals": {`SELECT id FROM approvals WHERE user_id = ?` + cond + ` ORDER BY requested_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, cargs...), "approvals_user (user_id=? AND requested_at<?)"},
+		"jobs":                  {`SELECT id` + tail, args, "jobs_user (user_id=? AND created_at<?)"},
+		"approvals":             {`SELECT id FROM approvals WHERE user_id = ?` + cond + ` ORDER BY requested_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, cargs...), "approvals_user (user_id=? AND requested_at<?)"},
+		"conversations":         {`SELECT id FROM conversations WHERE user_id = ?` + ccond + ` ORDER BY updated_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, ccargs...), "conversations_user (user_id=? AND updated_at<?)"},
+		"messages":              {`SELECT id FROM messages WHERE conversation_id = ? AND user_id = ?` + mcond + ` ORDER BY created_at DESC, id DESC LIMIT 10`, append([]any{"c1", "u1"}, mcargs...), "messages_conversation (conversation_id=? AND created_at<?)"},
+		"change marks jobs":     {`SELECT COALESCE(MAX(updated_at), 0) FROM jobs WHERE user_id = ?`, []any{"u1"}, "jobs_user_updated (user_id=?)"},
+		"change marks messages": {`SELECT COALESCE(MAX(created_at), 0) FROM messages WHERE user_id = ?`, []any{"u1"}, "messages_user (user_id=?)"},
 	} {
 		rows, err := s.r.Query(`EXPLAIN QUERY PLAN `+q.sql, q.args...)
 		if err != nil {

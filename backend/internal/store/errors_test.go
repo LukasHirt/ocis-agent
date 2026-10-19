@@ -24,7 +24,7 @@ func TestInvalidSurvivesWrapping(t *testing.T) {
 }
 
 func TestSentinelsAreDistinct(t *testing.T) {
-	all := []error{ErrNotFound, ErrFenceLost, ErrConflict, ErrInvalid, ErrExpired}
+	all := []error{ErrNotFound, ErrFenceLost, ErrConflict, ErrInvalid, ErrExpired, ErrLimit}
 	for i, a := range all {
 		for j, b := range all {
 			if i != j && errors.Is(a, b) {
