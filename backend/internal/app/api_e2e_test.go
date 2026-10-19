@@ -165,12 +165,17 @@ func TestTheRESTAPIEndToEnd(t *testing.T) {
 	)
 	spy := newClaimSpy(f.st)
 	wakes := &countingWaker{}
-	// the production queue poll (2s): a decision must wake the worker itself
+	// a queue poll of an hour: the worker only runs when something wakes it,
+	// so a decision that does not reach the real queue leaves the job waiting
 	a, err := Build(bg, f.cfg, spy, Options{Provider: p, Log: quietLog(), tune: tuning{
+		queuePoll: time.Hour,
 		wrapWaker: func(w api.Waker) api.Waker { wakes.Waker = w; return wakes },
 	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if wakes.Waker != api.Waker(a.queue) {
+		t.Fatalf("the API wakes %T, not the workers' queue", wakes.Waker)
 	}
 	start(t, a)
 	c := newClient(t, a, f.cfg.AllowedOrigin)
@@ -231,19 +236,14 @@ func TestTheRESTAPIEndToEnd(t *testing.T) {
 		t.Fatalf("after refused decisions: approval %s, job %s", got[0].State, f.job(j).State)
 	}
 
-	// the decision wakes the worker: the job finishes well within the 2s
-	// queue poll
+	// the decision wakes the worker (with an hour's poll nothing else would)
 	before := wakes.n.Load()
 	c.must(http.StatusOK, login, http.MethodPost, "/agent-api/v1/approvals/"+ap.ID+"/decision",
 		`{"decision":"approve","args_hash":"`+ap.ArgsHash+`"}`)
-	decided := time.Now()
 	if wakes.n.Load() <= before {
 		t.Error("the decision did not wake the queue")
 	}
 	f.waitState(j, store.JobSucceeded, 10*time.Second)
-	if d := time.Since(decided); d > 1500*time.Millisecond {
-		t.Errorf("the job finished %v after the decision, want well under the 2s poll", d)
-	}
 	data, _, ok := f.fake.File(drive, "/a.txt")
 	if !ok || string(data) != "hi" {
 		t.Errorf("file = %q, %v", data, ok)
@@ -336,9 +336,18 @@ func TestTheRESTAPIEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	st = status{}
+	// the next UTC midnight by the server's own clock, read around the
+	// request (a request across midnight may see either day)
+	nextMidnight := func() string {
+		y, m, d := a.now().UTC().Date()
+		return time.Date(y, m, d+1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	}
+	resetsBefore := nextMidnight()
 	c.must(http.StatusOK, login, http.MethodGet, "/agent-api/v1/status", "").decode(t, &st)
-	y, m, d := time.Now().UTC().Date()
-	resets := time.Date(y, m, d+1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	resets := nextMidnight()
+	if st.Budget.ResetsAt != nil && *st.Budget.ResetsAt == resetsBefore {
+		resets = resetsBefore
+	}
 	if !st.Enrolled || !st.KillSwitch.Database || st.KillSwitch.Environment {
 		t.Errorf("status = %+v, want the database kill switch", st)
 	}
