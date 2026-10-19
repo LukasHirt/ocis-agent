@@ -67,8 +67,6 @@ const maxListBytes = 8 << 20
 
 var errBadQuery = newAPIError(http.StatusBadRequest, "invalid_request")
 
-// queryValue returns the single value of key ("" if absent); a repeated
-// parameter is refused.
 // query parses the request's query string strictly: a malformed one (which
 // r.URL.Query would drop silently) or a parameter not in allowed is
 // errBadQuery.
@@ -85,6 +83,8 @@ func query(r *http.Request, allowed ...string) (url.Values, error) {
 	return q, nil
 }
 
+// queryValue returns the single value of key ("" if absent); a repeated
+// parameter is refused.
 func queryValue(q url.Values, key string) (string, error) {
 	v := q[key]
 	switch len(v) {
