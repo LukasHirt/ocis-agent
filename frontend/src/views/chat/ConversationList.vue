@@ -57,7 +57,7 @@
             <oc-button
               appearance="raw"
               size="small"
-              :aria-label="interpolate($gettext('Rename %{title}'), { title: nameOf(c) })"
+              :aria-label="interpolate($gettext('Rename %{title}'), { title: nameOf(c) }, true)"
               @click="edit(c)"
             >
               <oc-icon name="pencil" size="small" />
@@ -65,7 +65,7 @@
             <oc-button
               appearance="raw"
               size="small"
-              :aria-label="interpolate($gettext('Delete %{title}'), { title: nameOf(c) })"
+              :aria-label="interpolate($gettext('Delete %{title}'), { title: nameOf(c) }, true)"
               :disabled="deleting === c.id"
               @click="remove(c.id)"
             >
@@ -103,7 +103,9 @@ const emit = defineEmits<{ deleted: [string] }>()
 const chat = useChatStore()
 const { $gettext, interpolate } = useGettext()
 
-// nameOf is a title for labels: control characters made visible.
+// nameOf is a title for labels: control characters made visible. The
+// labels are attribute bindings, so interpolate must not HTML-escape it
+// (its third argument).
 const nameOf = (c: Conversation) => (c.title ? visibleText(c.title).text : $gettext('New conversation'))
 
 const editing = ref<string | null>(null)

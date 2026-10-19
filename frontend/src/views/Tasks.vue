@@ -86,6 +86,7 @@ watch(
   () => props.id,
   (id) => {
     if (id) {
+      jobs.syncSession() // a new session forgot the job shown before
       if (id === jobs.detailId && jobs.detailLoaded) void jobs.refreshDetail()
       else void jobs.openJob(id)
     } else {

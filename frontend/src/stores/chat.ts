@@ -117,6 +117,12 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     return s
   }
 
+  // syncSession drops the data of an earlier session (call it before
+  // relying on what the store holds, such as the open conversation).
+  const syncSession = (): void => {
+    session()
+  }
+
   const describe = (s: SessionHandle, e: unknown) => describeError(e, s.gettext)
   const fmtSeconds = (secs: number) => formatDuration(Math.max(1, secs) * 1000)
 
@@ -690,6 +696,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     notices,
     jobApprovals,
     attach,
+    syncSession,
     loadConversations,
     loadMoreConversations,
     openConversation,

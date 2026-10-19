@@ -4,7 +4,7 @@ import { apiErr, json } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { auditHandler, auditReads, auditState, eventOf, eventsUpTo, type AuditState } from '../test/audit'
 import { errWithRetry } from '../test/chat'
-import { AUDIT_PAGE, useAuditStore } from './audit'
+import { AUDIT_PAGE, MAX_KEPT_EVENTS, useAuditStore } from './audit'
 import { useAgentStore } from './agent'
 
 const saved = vi.hoisted(() => [] as Array<{ blob: Blob; filename: string }>)
@@ -182,6 +182,28 @@ describe('useAuditStore: live updates', () => {
     expect(audit.events[0].seq).toBe(5000)
     expect(audit.events).toHaveLength(AUDIT_PAGE)
     expect(audit.hasOlder).toBe(true)
+  })
+
+  it('keeps at most MAX_KEPT_EVENTS events, dropping the oldest, and pages back to them', async () => {
+    const st = auditState({ events: eventsUpTo(3) })
+    const { audit, events } = await setup(st)
+    await audit.refresh()
+    expect(audit.hasOlder).toBe(false)
+    let n = 3
+    while (n < MAX_KEPT_EVENTS + 300) {
+      const to = n + 400
+      for (n++; n <= to; n++) st.events.push(eventOf(n))
+      n = to
+      events().onChanged(['activity'])
+      await flushPromises()
+    }
+    expect(audit.events).toHaveLength(MAX_KEPT_EVENTS)
+    expect(audit.events[0].seq).toBe(n)
+    expect(seqs(audit.events)).toEqual(range(n, n - MAX_KEPT_EVENTS + 1))
+    // the dropped ones are older events again
+    expect(audit.hasOlder).toBe(true)
+    await audit.loadOlder()
+    expect(seqs(audit.events)).toEqual(range(n, n - MAX_KEPT_EVENTS + 1 - AUDIT_PAGE))
   })
 
   it('can still load older events after a fresh lookup interrupted a running one', async () => {

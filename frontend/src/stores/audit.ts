@@ -14,6 +14,9 @@ const MAX_PROBES = 64
 // The most pages of new events read after a change; with more the newest
 // page is looked up afresh.
 const MAX_NEW_PAGES = 10
+// The most events kept while new ones arrive; the oldest are dropped (and
+// can be paged back to as older events).
+export const MAX_KEPT_EVENTS = 1000
 
 export type VerifyResult = 'ok' | 'broken'
 
@@ -92,6 +95,12 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
       bound = s
     }
     return s
+  }
+
+  // syncSession drops the data of an earlier session (call it before the
+  // screen first shows what the store holds).
+  const syncSession = (): void => {
+    session()
   }
 
   const describe = (s: SessionHandle, e: unknown) => describeError(e, s.gettext)
@@ -180,8 +189,19 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
       return
     }
     if (got.length === 0) return
-    events.value = merge(events.value, got)
-    newest = Math.max(newest, events.value[0].seq)
+    const all = merge(events.value, got)
+    newest = Math.max(newest, all[0].seq)
+    if (all.length > MAX_KEPT_EVENTS) {
+      // every event above the newest dropped one is still kept
+      floor.value = Math.max(floor.value, all[MAX_KEPT_EVENTS].seq)
+      // a page of older events read meanwhile belongs to the old floor
+      gen++
+      olderInflight = null
+      olderLoading.value = false
+      events.value = all.slice(0, MAX_KEPT_EVENTS)
+    } else {
+      events.value = all
+    }
   }
 
   const sync = coalesce(async () => {
@@ -390,6 +410,7 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     exportBytes,
     exportError,
     attach,
+    syncSession,
     refresh,
     loadOlder,
     setKind,

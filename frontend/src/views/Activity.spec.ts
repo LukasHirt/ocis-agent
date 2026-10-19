@@ -151,6 +151,21 @@ describe('Activity', () => {
     expect(saved).toHaveLength(0)
     expect(w.find('.agent-activity-export-error').exists()).toBe(false)
   })
+
+  it('never shows the events of an earlier session, not even for the first render', async () => {
+    const st = auditState({ events: eventsUpTo(3) })
+    const { w, store, server, platform } = await setup(st)
+    expect(kinds(w)).toHaveLength(3)
+    w.unmount()
+    wrapper = undefined
+    store.stop()
+    st.events = []
+    await startStore(server, platform)
+    wrapper = mount(Activity, {
+      global: { provide: { [PLATFORM_KEY as symbol]: platform }, mocks: { $router: { push: vi.fn() } } }
+    })
+    expect(kinds(wrapper)).toHaveLength(0)
+  })
 })
 
 describe('Activity without a session', () => {

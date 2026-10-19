@@ -84,6 +84,7 @@ import { formatBytes } from '../util/format'
 // export. It listens for changes only while shown; leaving it stops a
 // running export.
 const audit = useAuditStore()
+audit.syncSession() // the first render never shows an earlier session's events
 const { $gettext, interpolate } = useGettext()
 
 interface KindOption {

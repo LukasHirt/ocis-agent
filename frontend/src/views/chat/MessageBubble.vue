@@ -12,7 +12,8 @@
       />
     </header>
     <div class="agent-msg-content">
-      <TextBlock :text="message.content" />
+      <span v-if="systemText" v-text="systemText" />
+      <TextBlock v-else :text="message.content" />
     </div>
 
     <div v-if="kind === 'user' && message.job" class="agent-msg-status">
@@ -26,7 +27,8 @@
       />
     </div>
     <p v-if="failed && message.job?.error" class="agent-msg-error">
-      <TextBlock :text="message.job.error" />
+      <span v-if="jobErrorText" v-text="jobErrorText" />
+      <TextBlock v-else :text="message.job.error" />
     </p>
     <p v-if="noticeText" class="agent-msg-notice" v-text="noticeText" />
 
@@ -54,6 +56,7 @@ import TextBlock from '../../components/TextBlock.vue'
 import RiskBadge from '../../components/RiskBadge.vue'
 import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
+import { errorText } from '../../util/reasons'
 import type { AgentNotice, JobApprovals } from '../../stores/chat'
 import type { JobState, Message } from '../../api/types'
 
@@ -111,6 +114,13 @@ const state = computed(() => {
     ? { known, icon: STATES[s].icon, label: STATES[s].label() }
     : { known, icon: 'question', label: $gettext('Unknown state:') }
 })
+
+// the runner's fixed texts are translated (as on the tasks screen); any
+// other text is shown as it is, as untrusted text
+const systemText = computed(() =>
+  kind.value === 'system' ? errorText(String(props.message.content ?? ''), $gettext) : null
+)
+const jobErrorText = computed(() => errorText(String(props.message.job?.error ?? ''), $gettext))
 
 const waiting = computed(() => props.message.job?.state === ('waiting_approval' satisfies JobState))
 const failed = computed(() => props.message.job?.state === ('failed' satisfies JobState))

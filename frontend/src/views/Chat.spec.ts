@@ -223,6 +223,24 @@ describe('Chat', () => {
     )
     expect(w.find('.agent-msg-approvals').text()).toContain('files.write')
   })
+
+  it('opens the conversation again when it is shown in a new session', async () => {
+    const st = withThread()
+    const { w, store, server, platform } = await setup(st, { id: 'c1' })
+    w.unmount()
+    wrapper = undefined
+    // the app is left and opened again on the same address
+    store.stop()
+    await startStore(server, platform)
+    wrapper = mount(Chat, {
+      props: { id: 'c1' },
+      global: { provide: { [PLATFORM_KEY as symbol]: platform }, mocks: { $router: { push: vi.fn() } } },
+      attachTo: document.body
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.agent-msg-content').map((m) => m.text())).toEqual(['Summarise', 'Here you go'])
+    expect(wrapper.find('.agent-chat-main [data-stub=OcSpinner]').exists()).toBe(false)
+  })
 })
 
 describe('Chat without a session', () => {

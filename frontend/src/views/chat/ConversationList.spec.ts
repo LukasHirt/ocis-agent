@@ -88,6 +88,13 @@ describe('ConversationList', () => {
     expect(button(w, 'Load more')).toBeUndefined()
   })
 
+  it('names the title in the action labels as it is, without HTML escaping', async () => {
+    const { w } = await setup(chatState({ conversations: [conversationOf('c1', { title: 'R&D <plan>' })] }))
+    const labels = w.findAll('.agent-conv button').map((b) => b.attributes('aria-label'))
+    expect(labels).toContain('Rename R&D <plan>')
+    expect(labels).toContain('Delete R&D <plan>')
+  })
+
   it('renames inline, with Enter to save and the server limits checked', async () => {
     const st = chatState({ conversations: [conversationOf('c1', { title: 'Old' })] })
     const { w, server } = await setup(st)

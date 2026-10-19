@@ -94,6 +94,22 @@ describe('Tasks', () => {
     expect(goals(w)).toEqual(['goal of j2', 'the one'])
   })
 
+  it('opens the task again when it is shown in a new session', async () => {
+    const st = jobsState({ jobs: [jobOf('j2'), jobOf('j1', { goal: 'the one' })] })
+    const { w, store, server, platform } = await setup(st, { id: 'j1' })
+    w.unmount()
+    wrapper = undefined
+    // the app is left and opened again on the same address
+    store.stop()
+    await startStore(server, platform)
+    wrapper = mount(Tasks, {
+      props: { id: 'j1' },
+      global: { provide: { [PLATFORM_KEY as symbol]: platform }, mocks: { $router: { push: vi.fn() } } }
+    })
+    await flushPromises()
+    expect(wrapper.find('.agent-job-detail-goal').text()).toBe('the one')
+  })
+
   it('stops listening once it is left', async () => {
     const { w, server, events } = await setup(jobsState({ jobs: [jobOf('j1')] }))
     w.unmount()

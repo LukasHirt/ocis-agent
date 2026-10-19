@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { createGettext } from 'vue3-gettext'
 import MessageBubble from './MessageBubble.vue'
 import { answer, messageOf, userMessage } from '../../test/chat'
 import { approvalOf } from '../../test/fixtures'
@@ -9,6 +10,22 @@ import type { JobApprovals } from '../../stores/chat'
 const job = (state: string, error = ''): MessageJob => ({ id: 'j1', state, error })
 
 const mountBubble = (props: Record<string, unknown>) => mount(MessageBubble, { props: props as never })
+
+const BUDGET = 'The agent stopped because the usage budget is used up.'
+const BUDGET_DE = 'Der Agent hat angehalten, weil das Budget aufgebraucht ist.'
+const mountGerman = (props: Record<string, unknown>) =>
+  mount(MessageBubble, {
+    props: props as never,
+    global: {
+      plugins: [
+        createGettext({
+          availableLanguages: { de: 'Deutsch' },
+          defaultLanguage: 'de',
+          translations: { de: { [BUDGET]: BUDGET_DE } }
+        })
+      ]
+    }
+  })
 
 describe('MessageBubble', () => {
   it.each([
@@ -38,6 +55,27 @@ describe('MessageBubble', () => {
       message: userMessage('m1', job('failed', 'The agent stopped because the usage budget is used up.'))
     })
     expect(w.find('.agent-msg-error').text()).toBe('The agent stopped because the usage budget is used up.')
+  })
+
+  it('translates a known job error and a known system message like the tasks screen', () => {
+    const failed = mountGerman({ message: userMessage('m1', job('failed', BUDGET)) })
+    expect(failed.find('.agent-msg-error').text()).toBe(BUDGET_DE)
+    const notice = mountGerman({ message: messageOf('m2', { role: 'system', content: BUDGET }) })
+    expect(notice.find('.agent-msg-content').text()).toBe(BUDGET_DE)
+  })
+
+  it('shows an unknown job error and system message as raw text', () => {
+    const failed = mountGerman({ message: userMessage('m1', job('failed', 'odd\u202e error')) })
+    expect(failed.find('.agent-msg-error').text()).toBe('odd\\u{202E} error')
+    const notice = mountGerman({ message: messageOf('m2', { role: 'system', content: 'odd\u202e notice' }) })
+    expect(notice.find('.agent-msg-content').text()).toBe('odd\\u{202E} notice')
+  })
+
+  it('never translates an answer or a question', () => {
+    const w = mountGerman({ message: answer('m3', BUDGET) })
+    expect(w.find('.agent-msg-content').text()).toBe(BUDGET)
+    const q = mountGerman({ message: messageOf('m4', { content: BUDGET }) })
+    expect(q.find('.agent-msg-content').text()).toBe(BUDGET)
   })
 
   it('links a question that needs an approval to the inbox filtered by its job', () => {

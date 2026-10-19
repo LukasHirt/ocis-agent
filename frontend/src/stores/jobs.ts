@@ -92,6 +92,12 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
     return s
   }
 
+  // syncSession drops the data of an earlier session (call it before
+  // relying on what the store holds, such as the open job).
+  const syncSession = (): void => {
+    session()
+  }
+
   const describe = (s: SessionHandle, e: unknown) => describeError(e, s.gettext)
 
   const params = (c?: string) => ({
@@ -394,6 +400,7 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
     cancelling,
     actionError,
     attach,
+    syncSession,
     refresh,
     loadMore,
     setFilter,

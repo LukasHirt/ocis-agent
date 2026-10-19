@@ -102,6 +102,7 @@ watch(
   () => props.id,
   (id) => {
     if (id) {
+      chat.syncSession() // a new session forgot the conversation shown before
       // shown again after the screen was left: read what changed meanwhile
       if (id === chat.current && chat.messagesLoaded) void chat.refreshOpen()
       else void chat.openConversation(id)
