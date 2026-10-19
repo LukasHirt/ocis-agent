@@ -67,6 +67,7 @@ type Options struct {
 // tuning shortens fixed delays in tests.
 type tuning struct {
 	queuePoll            time.Duration // queue poll interval
+	eventsPoll           time.Duration // api.Deps.EventsPoll
 	shutdownRequeueDelay time.Duration // agent.Config.ShutdownRequeueDelay
 	// wrapWaker wraps the queue the API wakes (to observe the wakes)
 	wrapWaker func(api.Waker) api.Waker
@@ -207,13 +208,14 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 		// chosen and models.available is empty
 		a.apiStop = make(chan struct{})
 		if a.api, err = api.NewServer(api.Deps{
-			Store: st, Validator: a.validator, Auth: a.auth, Gate: a.gate, Queue: waker, Catalog: cfg.LLM.Catalog,
+			Store: st, Validator: a.validator, Auth: a.auth, Gate: a.gate, Queue: waker, Memory: a.memory,
+			Catalog: cfg.LLM.Catalog,
 			Cfg: api.Settings{
 				AllowedOrigin: cfg.AllowedOrigin, KillSwitchEnv: cfg.Agent.KillSwitch,
 				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
 				StreamsPerUser: cfg.API.StreamsPerUser, StreamsTotal: cfg.API.StreamsTotal,
 			},
-			Log: a.log, Now: a.now, Stop: a.apiStop,
+			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPoll: opts.tune.eventsPoll,
 		}); err != nil {
 			return nil, fmt.Errorf("app: api: %w", err)
 		}

@@ -70,8 +70,17 @@ type eventTimers struct {
 	afterPoll            func() // tests only: runs after every poll
 }
 
-func realEventTimers(string) eventTimers {
-	poll := time.NewTicker(eventsPollEvery)
+// eventTimersEvery returns the real timers with a poll every d (0 or less:
+// eventsPollEvery).
+func eventTimersEvery(d time.Duration) func(string) eventTimers {
+	if d <= 0 {
+		d = eventsPollEvery
+	}
+	return func(string) eventTimers { return realEventTimers(d) }
+}
+
+func realEventTimers(pollEvery time.Duration) eventTimers {
+	poll := time.NewTicker(pollEvery)
 	ping := time.NewTicker(eventsPingEvery)
 	life := time.NewTimer(eventsLifetime)
 	return eventTimers{poll: poll.C, ping: ping.C, lifetime: life.C, stop: func() {

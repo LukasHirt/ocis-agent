@@ -318,7 +318,9 @@ type messageJobView struct {
 
 // sentView is the 202 of POST /conversations/{id}/messages. The message is
 // accepted even while the agent is paused or the kill switch is on (the job
-// waits): agent tells the UI.
+// waits): agent tells the UI. The job is run only by a process with the
+// worker role, which the API cannot detect: in an api-only deployment the
+// job stays queued.
 type sentView struct {
 	Message messageView `json:"message"`
 	Job     sentJobView `json:"job"`

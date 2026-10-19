@@ -97,6 +97,9 @@ type Deps struct {
 	// shutdown, before the listener's graceful stop, which would otherwise
 	// wait for the streams. nil: never.
 	Stop <-chan struct{}
+	// EventsPoll replaces the event stream's 2 s database poll (tests
+	// only; 0 or less: 2 s).
+	EventsPoll time.Duration
 }
 
 // Principal is the authenticated caller, taken only from the identity the
@@ -184,7 +187,7 @@ func NewServer(d Deps) (*Server, error) {
 		messages: newCooldown(messageCooldown, maxLimiterKeys, d.Now),
 
 		streams:            newStreamSlots(d.Cfg.StreamsPerUser, d.Cfg.StreamsTotal),
-		eventTimers:        realEventTimers,
+		eventTimers:        eventTimersEvery(d.EventsPoll),
 		eventWriteDeadline: eventsWriteDeadline,
 		baseTimeout:        defaultTimeout,
 		exportPageDeadline: exportPageDeadline,
