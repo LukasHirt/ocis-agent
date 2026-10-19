@@ -114,6 +114,9 @@ func parseOrigin(name, raw string) (string, error) {
 	if u.User != nil {
 		return "", fmt.Errorf("%s must not contain credentials", name)
 	}
+	if strings.HasSuffix(u.Host, ":") {
+		return "", fmt.Errorf("%s must not have an empty port", name)
+	}
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("%s must be scheme://host[:port] without a path, query or fragment", name)
 	}

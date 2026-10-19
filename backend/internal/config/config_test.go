@@ -152,3 +152,14 @@ func TestLoadNormalisesOrigins(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadRejectsAnEmptyPort(t *testing.T) {
+	for _, name := range []string{"AGENT_OCIS_URL", "AGENT_ALLOWED_ORIGIN"} {
+		m := map[string]string{"AGENT_OCIS_URL": "https://cloud.example.com", "AGENT_MASTER_KEY": key32()}
+		m[name] = "https://zzhostzz:"
+		_, err := Load(env(m))
+		if err == nil || !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), "zzhostzz") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
