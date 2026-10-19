@@ -5,10 +5,14 @@ import { ApiError } from './errors'
 import {
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
+  FIRST_READY_MS,
+  IDLE_MS,
   POLL_EVERY_MS,
   REFRESH_EVERY_MS,
   STABLE_AFTER_MS,
+  STREAM_RETRY_CAP_MS,
   STREAM_RETRY_MS,
+  VISIBLE_JITTER_MS,
   createEventClient,
   type EventClientOptions,
   type Visibility
@@ -82,6 +86,12 @@ class FakeVisibility implements Visibility {
     this.isHidden = hidden
     this.listener?.()
   }
+}
+
+// untilCall advances the clock in 100 ms steps until fn gets a new call
+const untilCall = async (fn: { mock: { calls: unknown[] } }) => {
+  const before = fn.mock.calls.length
+  for (let i = 0; i < 1000 && fn.mock.calls.length === before; i++) await advance(100)
 }
 
 const harness = (over: Partial<EventClientOptions> = {}) => {
@@ -280,7 +290,7 @@ describe('createEventClient: reconnect', () => {
       s.ready()
       s.bye()
       await flush()
-      await advance(BACKOFF_CAP_MS)
+      await untilCall(h.openEvents)
     }
     const s = await h.accept()
     s.ready()
@@ -373,6 +383,22 @@ describe('createEventClient: polling', () => {
     h.ec.stop()
   })
 
+  it('honours a Retry-After longer than a minute, up to the cap', async () => {
+    const h = harness()
+    h.ec.start()
+    await h.fail(new ApiError(429, 'rate_limited', 120))
+    await advance(120_000 - 1)
+    expect(h.openEvents).toHaveBeenCalledTimes(1)
+    await advance(1)
+    expect(h.openEvents).toHaveBeenCalledTimes(2)
+    await h.fail(new ApiError(503, 'unavailable', 86_400))
+    await advance(STREAM_RETRY_CAP_MS - 1)
+    expect(h.openEvents).toHaveBeenCalledTimes(2)
+    await advance(1)
+    expect(h.openEvents).toHaveBeenCalledTimes(3)
+    h.ec.stop()
+  })
+
   it('polls after three connect failures in a row', async () => {
     const h = harness()
     h.ec.start()
@@ -424,6 +450,7 @@ describe('createEventClient: full refresh', () => {
     await advance(1)
     expect(h.onPoll).toHaveBeenCalledTimes(1)
     // a reconnect's ready refetches everything, so it moves the next refresh
+    s.send(': ping\n\n')
     await advance(40_000)
     s.bye()
     await flush()
@@ -446,7 +473,7 @@ describe('createEventClient: full refresh', () => {
       s.ready()
       s.bye()
       await flush()
-      await advance(BACKOFF_CAP_MS / 2)
+      await untilCall(h.openEvents)
     }
     expect(h.onReady).toHaveBeenCalledTimes(6)
     expect(h.onPoll).not.toHaveBeenCalled()
@@ -455,7 +482,7 @@ describe('createEventClient: full refresh', () => {
 })
 
 describe('createEventClient: visibility', () => {
-  it('closes the stream while hidden and reconnects when visible', async () => {
+  it('closes the stream while hidden and reconnects with jitter when visible', async () => {
     const h = harness()
     h.ec.start()
     const s = await h.accept()
@@ -465,18 +492,24 @@ describe('createEventClient: visibility', () => {
     await flush()
     expect(h.calls[0].signal.aborted).toBe(true)
     expect(s.cancelled).toBe(true)
-    expect(h.states()).toEqual(['streaming', 'offline'])
+    // hidden is not a connection problem: the last state stays
+    expect(h.states()).toEqual(['streaming'])
     await advance(10 * 60_000)
     expect(h.openEvents).toHaveBeenCalledTimes(1)
     expect(h.onPoll).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
     h.visibility.set(false)
     await flush()
+    // random 0.5 of the 1 s visibility jitter
+    await advance(VISIBLE_JITTER_MS / 2 - 1)
+    expect(h.openEvents).toHaveBeenCalledTimes(1)
+    await advance(1)
     expect(h.openEvents).toHaveBeenCalledTimes(2)
     const s2 = await h.accept()
     s2.ready()
     await flush()
     expect(h.onReady).toHaveBeenCalledTimes(2)
-    expect(h.states()).toEqual(['streaming', 'offline', 'streaming'])
+    expect(h.states()).toEqual(['streaming'])
     h.ec.stop()
   })
 
@@ -488,12 +521,12 @@ describe('createEventClient: visibility', () => {
     await advance(60_000)
     expect(h.openEvents).not.toHaveBeenCalled()
     visibility.set(false)
-    await flush()
+    await advance(VISIBLE_JITTER_MS)
     expect(h.openEvents).toHaveBeenCalledTimes(1)
     h.ec.stop()
   })
 
-  it('polls and retries the stream at once when visible again in polling mode', async () => {
+  it('polls at once and retries the stream soon when visible again in polling mode', async () => {
     const h = harness()
     h.ec.start()
     await h.fail(new ApiError(503, 'unavailable'))
@@ -505,20 +538,87 @@ describe('createEventClient: visibility', () => {
     h.visibility.set(false)
     await flush()
     expect(h.onPoll).toHaveBeenCalledTimes(2)
+    await advance(VISIBLE_JITTER_MS)
     expect(h.openEvents).toHaveBeenCalledTimes(2)
-    expect(h.states()).toEqual(['polling', 'offline', 'polling'])
+    expect(h.states()).toEqual(['polling'])
     h.ec.stop()
   })
 
-  it('ignores a hidden page that hides again quickly', async () => {
+  it('reconnects once after a quick hide and show flicker', async () => {
     const h = harness()
     h.ec.start()
     h.visibility.set(true)
     h.visibility.set(false)
     h.visibility.set(true)
     h.visibility.set(false)
-    await flush()
+    await advance(VISIBLE_JITTER_MS)
+    expect(h.openEvents).toHaveBeenCalledTimes(2)
     expect(h.calls.filter((c) => !c.signal.aborted)).toHaveLength(1)
+    h.ec.stop()
+  })
+})
+
+describe('createEventClient: watchdog', () => {
+  it('gives up on a connection that sends headers but no ready', async () => {
+    const h = harness()
+    h.ec.start()
+    const s = await h.accept()
+    s.send(': ping\n\n')
+    await advance(FIRST_READY_MS - 1)
+    expect(s.cancelled).toBe(false)
+    await advance(1)
+    expect(s.cancelled).toBe(true)
+    expect(h.calls[0].signal.aborted).toBe(true)
+    expect(h.states()).toEqual(['offline'])
+    await advance(BACKOFF_BASE_MS)
+    expect(h.openEvents).toHaveBeenCalledTimes(2)
+    h.ec.stop()
+  })
+
+  it('gives up on a request that never gets headers', async () => {
+    const h = harness()
+    h.ec.start()
+    await flush()
+    await advance(FIRST_READY_MS - 1)
+    expect(h.calls[0].signal.aborted).toBe(false)
+    await advance(1)
+    expect(h.calls[0].signal.aborted).toBe(true)
+    // the real client rejects when its signal aborts; the fake has to be told
+    await h.fail(new DOMException('aborted', 'AbortError'))
+    expect(h.states()).toEqual(['offline'])
+    h.ec.stop()
+  })
+
+  it('recycles a stream that goes silent after ready', async () => {
+    const h = harness()
+    h.ec.start()
+    const s = await h.accept()
+    s.ready()
+    await flush()
+    await advance(IDLE_MS - 1)
+    expect(s.cancelled).toBe(false)
+    await advance(1)
+    expect(s.cancelled).toBe(true)
+    expect(h.states()).toEqual(['streaming', 'offline'])
+    await advance(BACKOFF_BASE_MS)
+    expect(h.openEvents).toHaveBeenCalledTimes(2)
+    h.ec.stop()
+  })
+
+  it('keeps a stream alive while pings arrive', async () => {
+    const h = harness()
+    h.ec.start()
+    const s = await h.accept()
+    s.ready()
+    await flush()
+    for (let n = 0; n < 12; n++) {
+      await advance(25_000)
+      s.send(': ping\n\n')
+      await flush()
+    }
+    expect(s.cancelled).toBe(false)
+    expect(h.openEvents).toHaveBeenCalledTimes(1)
+    expect(h.states()).toEqual(['streaming'])
     h.ec.stop()
   })
 })
@@ -575,6 +675,45 @@ describe('createEventClient: stop', () => {
     expect(h.onPoll).not.toHaveBeenCalled()
     expect(h.onState).not.toHaveBeenCalled()
     expect(h.openEvents).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves no timer when a callback stops it', async () => {
+    let h!: ReturnType<typeof harness>
+    const stop = () => h.ec.stop()
+    // stop inside onReady
+    h = harness({ onReady: stop })
+    h.ec.start()
+    let s = await h.accept()
+    s.ready()
+    await flush()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(s.cancelled).toBe(true)
+    // stop inside onChanged
+    h = harness({ onChanged: stop })
+    h.ec.start()
+    s = await h.accept()
+    s.ready()
+    s.changed('{"kinds":["jobs"]}')
+    await flush()
+    expect(vi.getTimerCount()).toBe(0)
+    // stop inside onPoll: the full refresh while streaming
+    h = harness({ onPoll: stop })
+    h.ec.start()
+    s = await h.accept()
+    s.ready()
+    await advance(REFRESH_EVERY_MS)
+    expect(vi.getTimerCount()).toBe(0)
+    // stop inside onPoll: polling mode
+    h = harness({ onPoll: stop })
+    h.ec.start()
+    await h.fail(new ApiError(503, 'unavailable'))
+    expect(vi.getTimerCount()).toBe(0)
+    // stop inside onState
+    h = harness({ onState: stop })
+    h.ec.start()
+    await h.fail(new ApiError(0, 'unavailable'))
+    expect(vi.getTimerCount()).toBe(0)
+    expect(h.openEvents).toHaveBeenCalledTimes(1)
   })
 
   it('can be started again after stop', async () => {

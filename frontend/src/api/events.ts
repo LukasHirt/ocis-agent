@@ -14,6 +14,10 @@ import { parseSSE } from './sse'
 export const CHANGE_KINDS = ['jobs', 'messages', 'activity', 'settings'] as const
 export type ChangeKind = (typeof CHANGE_KINDS)[number]
 
+// StreamState is reported on changes only: 'streaming' after a ready,
+// 'polling' in the fallback mode, 'offline' while reconnecting. Nothing is
+// reported before the first ready or fallback, nor while the page is hidden
+// (the last state stays until the next connection reports a new one).
 export type StreamState = 'streaming' | 'polling' | 'offline'
 
 // Reconnect delay: full jitter, random() * min(cap, base * 2^attempt).
@@ -34,6 +38,14 @@ export const STREAM_RETRY_CAP_MS = 10 * 60_000
 // refetch (onReady or onPoll), never sooner than REFRESH_MIN_MS after it.
 export const REFRESH_EVERY_MS = 60_000
 export const REFRESH_MIN_MS = 30_000
+// Watchdog: a connection without a ready FIRST_READY_MS after it was opened
+// (headers included), or a stream silent for IDLE_MS after its ready (the
+// server pings every 25 s), is aborted and handled as lost.
+export const FIRST_READY_MS = 15_000
+export const IDLE_MS = 70_000
+// When the page becomes visible again, the stream reconnects after a random
+// delay of up to VISIBLE_JITTER_MS, so tabs that show together spread out.
+export const VISIBLE_JITTER_MS = 1_000
 
 export interface Timers {
   setTimeout(fn: () => void, ms: number): unknown
@@ -98,7 +110,7 @@ const parseKinds = (data: string): ChangeKind[] => {
   return CHANGE_KINDS.filter((k) => kinds.includes(k))
 }
 
-type TimerName = 'reconnect' | 'retry' | 'poll' | 'refresh'
+type TimerName = 'reconnect' | 'retry' | 'poll' | 'refresh' | 'watchdog'
 
 export const createEventClient = (opts: EventClientOptions): EventClient => {
   const timers = opts.timers ?? globalTimers
@@ -129,8 +141,11 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
   const clearAll = () => {
     for (const name of [...pending.keys()]) clear(name)
   }
+  // later schedules fn; nothing is scheduled once stopped (a callback may
+  // have called stop())
   const later = (name: TimerName, ms: number, fn: () => void) => {
     clear(name)
+    if (!running) return
     const h = timers.setTimeout(
       () => {
         if (pending.get(name) !== h) return
@@ -160,6 +175,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
 
   const disconnect = () => {
     conn++
+    clear('watchdog')
     abort?.abort()
     abort = undefined
   }
@@ -170,6 +186,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     later('refresh', Math.max(REFRESH_MIN_MS, lastRefresh + REFRESH_EVERY_MS - now()), () => {
       lastRefresh = now()
       call(opts.onPoll)
+      if (!running) return
       scheduleRefresh()
     })
   }
@@ -178,6 +195,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     later('poll', lastRefresh + POLL_EVERY_MS - now(), () => {
       lastRefresh = now()
       call(opts.onPoll)
+      if (!running) return
       schedulePoll()
     })
   }
@@ -193,6 +211,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     clear('reconnect')
     clear('refresh')
     setState('polling')
+    if (!running) return
     schedulePoll()
     scheduleRetry(err)
   }
@@ -206,8 +225,10 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
       clear('retry')
     }
     setState('streaming')
+    if (!running) return
     lastRefresh = now()
     call(opts.onReady)
+    if (!running) return
     scheduleRefresh()
   }
 
@@ -215,6 +236,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
   const lost = (gotReady: boolean, err?: unknown) => {
     abort = undefined
     clear('refresh')
+    clear('watchdog')
     if (gotReady && readyAt !== undefined && now() - readyAt >= STABLE_AFTER_MS) attempt = 0
     readyAt = undefined
     if (!gotReady) failures++
@@ -228,6 +250,7 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
       return
     }
     setState('offline')
+    if (!running) return
     const delay = opts.platform.random() * Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** attempt)
     attempt++
     later('reconnect', delay, () => void connect())
@@ -239,6 +262,10 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     const my = conn
     const ac = new AbortController()
     abort = ac
+    // the watchdog aborts the connection; the aborted request or stream then
+    // ends below and is handled as lost
+    const watch = (ms: number) => later('watchdog', ms, () => ac.abort())
+    watch(FIRST_READY_MS)
     let res: Response
     try {
       res = await opts.client.openEvents(ac.signal)
@@ -256,11 +283,16 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     }
     let gotReady = false
     try {
-      for await (const ev of parseSSE(res.body, { signal: ac.signal })) {
+      const onChunk = () => {
+        if (gotReady && my === conn) watch(IDLE_MS)
+      }
+      for await (const ev of parseSSE(res.body, { signal: ac.signal, onChunk })) {
         if (my !== conn) return
         if (ev.event === 'ready') {
           gotReady = true
           onReady()
+          if (my !== conn) return
+          watch(IDLE_MS)
         } else if (ev.event === 'changed') {
           const kinds = parseKinds(ev.data)
           if (kinds.length > 0) call(opts.onChanged, kinds)
@@ -280,18 +312,16 @@ export const createEventClient = (opts: EventClientOptions): EventClient => {
     if (h === hidden) return
     hidden = h
     if (h) {
+      // a hidden page is not a connection problem: the state is left as it
+      // was (the next connection reports the new one)
       disconnect()
       clearAll()
       readyAt = undefined
-      setState('offline')
       return
     }
     attempt = 0
-    if (polling) {
-      setState('polling')
-      schedulePoll()
-    }
-    void connect()
+    if (polling) schedulePoll()
+    later('reconnect', opts.platform.random() * VISIBLE_JITTER_MS, () => void connect())
   }
 
   return {

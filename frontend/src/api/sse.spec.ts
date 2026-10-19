@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_LINE, SSEError, parseSSE, type SSEEvent } from './sse'
+import { MAX_EVENT, MAX_LINE, SSEError, parseSSE, type SSEEvent } from './sse'
 
 const enc = new TextEncoder()
 
@@ -123,6 +123,29 @@ describe('parseSSE', () => {
       break
     }
     expect(cancelled).toBe(true)
+  })
+
+  it('keeps a pending CR across an empty chunk', async () => {
+    const evs = await collect(streamOf('event: a\r', new Uint8Array(0), '\ndata: 1\r\n\r\n'))
+    expect(evs).toEqual([{ event: 'a', data: '1' }])
+  })
+
+  it('aborts when the data of one event grows past the limit', async () => {
+    const line = 'data: ' + 'x'.repeat(32 * 1024) + '\n'
+    const lines = Array.from({ length: MAX_EVENT / (32 * 1024) + 1 }, () => line)
+    await expect(collect(streamOf(...lines, '\n'))).rejects.toBeInstanceOf(SSEError)
+    // the same amount spread over separate events is fine
+    const events = Array.from({ length: 10 }, () => line + '\n')
+    expect(await collect(streamOf(...events))).toHaveLength(10)
+  })
+
+  it('reports every received chunk', async () => {
+    const seen: number[] = []
+    const s = streamOf(': ping\n\n', new Uint8Array(0), 'data: 1\n\n')
+    const out: SSEEvent[] = []
+    for await (const ev of parseSSE(s, { onChunk: () => seen.push(1) })) out.push(ev)
+    expect(seen).toHaveLength(3)
+    expect(out).toHaveLength(1)
   })
 
   it('returns at once for an already aborted signal', async () => {

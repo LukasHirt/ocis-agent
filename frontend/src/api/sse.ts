@@ -10,6 +10,8 @@ export interface SSEEvent {
 // MAX_LINE caps one line (in UTF-16 code units); a longer line, terminated
 // or not, aborts the stream with an SSEError.
 export const MAX_LINE = 64 * 1024
+// MAX_EVENT caps the data of one event (all its data lines together).
+export const MAX_EVENT = 256 * 1024
 
 export class SSEError extends Error {
   constructor(message: string) {
@@ -22,6 +24,10 @@ export interface ParseOptions {
   // signal ends the stream: the reader is cancelled and the generator returns
   signal?: AbortSignal
   maxLine?: number
+  maxEvent?: number
+  // onChunk is called for every chunk read from the stream, before it is
+  // parsed (a liveness signal: comments such as pings count too)
+  onChunk?: () => void
 }
 
 // parseSSE yields the events of stream as they are completed by a blank
@@ -34,6 +40,7 @@ export async function* parseSSE(
   opts: ParseOptions = {}
 ): AsyncGenerator<SSEEvent> {
   const maxLine = opts.maxLine ?? MAX_LINE
+  const maxEvent = opts.maxEvent ?? MAX_EVENT
   const signal = opts.signal
   const reader = stream.getReader()
   const onAbort = () => {
@@ -50,6 +57,7 @@ export async function* parseSSE(
   let skipLF = false // the previous chunk ended with CR, a following LF belongs to it
   let type = ''
   let data: string[] = []
+  let size = 0
 
   // line handles one complete line; it returns an event to dispatch, if any
   const line = (l: string): SSEEvent | undefined => {
@@ -57,6 +65,7 @@ export async function* parseSSE(
       const ev = data.length > 0 ? { event: type || 'message', data: data.join('\n') } : undefined
       type = ''
       data = []
+      size = 0
       return ev
     }
     if (l.startsWith(':')) return undefined
@@ -65,7 +74,11 @@ export async function* parseSSE(
     let value = colon < 0 ? '' : l.slice(colon + 1)
     if (value.startsWith(' ')) value = value.slice(1)
     if (field === 'event') type = value
-    else if (field === 'data') data.push(value)
+    else if (field === 'data') {
+      size += value.length + 1
+      if (size > maxEvent) throw new SSEError('event stream event too large')
+      data.push(value)
+    }
     return undefined
   }
 
@@ -73,9 +86,14 @@ export async function* parseSSE(
     for (;;) {
       const { value, done } = await reader.read()
       if (done || signal?.aborted) return
+      opts.onChunk?.()
       buf += decoder.decode(value, { stream: true })
-      if (skipLF && buf.startsWith('\n')) buf = buf.slice(1)
-      skipLF = false
+      // a chunk that decodes to nothing (empty, or the first bytes of a
+      // multi-byte character) must not drop a pending CR
+      if (buf.length > 0) {
+        if (skipLF && buf.startsWith('\n')) buf = buf.slice(1)
+        skipLF = false
+      }
 
       let start = 0
       for (let i = 0; i < buf.length; i++) {
