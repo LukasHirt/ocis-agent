@@ -342,9 +342,30 @@ func TestChatMemoryAndEventsEndToEnd(t *testing.T) {
 			t.Fatal("the job's model call did not start")
 		}
 	}
+	// the approval's frame is the first activity frame after its
+	// approval_requested audit event was committed
+	approvalAudited := func() bool {
+		n := 0
+		_ = f.st.View(bg, func(tx store.Tx) error {
+			recs, err := tx.ReadAudit(userID, 0, 1000)
+			for _, r := range recs {
+				if r.Kind == "approval_requested" && r.JobID == s3.Job.ID {
+					n++
+				}
+			}
+			return err
+		})
+		return n == 1
+	}
+	if approvalAudited() {
+		t.Fatal("the approval was requested before the model call returned")
+	}
+	drain(frames)
 	close(release3)
+	wantFrame(t, frames, func(fr string) bool {
+		return changedWith("jobs", "activity")(fr) && approvalAudited()
+	}, "the approval", 10*time.Second)
 	f.waitState(s3.Job.ID, store.JobWaitingApproval, 10*time.Second)
-	wantFrame(t, frames, changedWith("jobs", "activity"), "the approval", 5*time.Second)
 	var page approvalPage
 	c.must(http.StatusOK, login, http.MethodGet, "/agent-api/v1/approvals", "").decode(t, &page)
 	if len(page.Approvals) != 1 || page.Approvals[0].JobID != s3.Job.ID || page.Approvals[0].Tool != "files.write_new" ||
