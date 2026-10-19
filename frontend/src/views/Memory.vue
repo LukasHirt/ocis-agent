@@ -37,7 +37,7 @@
         <p role="alert" v-text="mem.listError" />
         <oc-button size="small" :disabled="mem.listLoading" @click="mem.refreshList()" v-text="$gettext('Try again')" />
       </div>
-      <oc-spinner v-if="!mem.listLoaded && mem.listLoading" :aria-label="$gettext('Loading the memory files')" />
+      <oc-spinner v-if="!mem.listLoaded && !mem.listError" :aria-label="$gettext('Loading the memory files')" />
       <FileList v-if="mem.listLoaded" />
     </template>
   </section>

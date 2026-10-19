@@ -12,7 +12,7 @@
       <p role="alert" v-text="jobs.detailError" />
       <oc-button size="small" :disabled="jobs.detailLoading" @click="jobs.refreshDetail()" v-text="$gettext('Try again')" />
     </div>
-    <oc-spinner v-if="!job && jobs.detailLoading" :aria-label="$gettext('Loading the task')" />
+    <oc-spinner v-else-if="!job" :aria-label="$gettext('Loading the task')" />
 
     <template v-if="job && !jobs.detailMissing">
       <h2 v-text="$gettext('Task')" />

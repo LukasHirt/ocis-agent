@@ -91,3 +91,11 @@ describe('Memory', () => {
     expect(server.count('GET', '/memory')).toBe(n)
   })
 })
+
+describe('Memory without a session', () => {
+  it('shows a spinner instead of a blank list', async () => {
+    wrapper = mount(Memory, { global: { mocks: { $router: { push: vi.fn(), beforeEach: vi.fn(() => () => {}) } } } })
+    await flushPromises()
+    expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})

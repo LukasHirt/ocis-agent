@@ -323,6 +323,9 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     return promise
   }
 
+  // KIND_RESOURCES is what a change kind rereads here (first pages). The
+  // screen stores (chat, jobs, audit, memory) react to the kinds themselves
+  // through subscribe, and only while their screen is mounted.
   const KIND_RESOURCES: Record<ChangeKind, Resource[]> = {
     jobs: ['status', 'approvals'],
     activity: ['status', 'approvals'],

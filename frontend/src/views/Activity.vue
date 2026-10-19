@@ -42,7 +42,7 @@
       <p role="alert" v-text="audit.error" />
       <oc-button size="small" :disabled="audit.loading" @click="audit.refresh()" v-text="$gettext('Try again')" />
     </div>
-    <oc-spinner v-if="!audit.loaded && audit.loading" :aria-label="$gettext('Loading the activity')" />
+    <oc-spinner v-if="!audit.loaded && !audit.error" :aria-label="$gettext('Loading the activity')" />
 
     <template v-if="audit.loaded">
       <p

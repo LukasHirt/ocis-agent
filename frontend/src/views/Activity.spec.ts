@@ -152,3 +152,11 @@ describe('Activity', () => {
     expect(w.find('.agent-activity-export-error').exists()).toBe(false)
   })
 })
+
+describe('Activity without a session', () => {
+  it('shows a spinner instead of a blank screen', async () => {
+    wrapper = mount(Activity, { global: { mocks: { $router: { push: vi.fn() } } } })
+    await flushPromises()
+    expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})

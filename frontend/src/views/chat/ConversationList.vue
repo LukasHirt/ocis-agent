@@ -11,7 +11,7 @@
     </div>
     <p v-if="chat.actionError" class="agent-convs-action-error" role="alert" v-text="chat.actionError" />
     <oc-spinner
-      v-if="!chat.conversationsLoaded && chat.conversationsLoading"
+      v-if="!chat.conversationsLoaded && !chat.conversationsError"
       :aria-label="$gettext('Loading the conversations')"
     />
     <p

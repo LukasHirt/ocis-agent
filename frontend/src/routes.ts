@@ -1,14 +1,23 @@
 import type { Component } from 'vue'
-import type { RouteRecordRaw } from 'vue-router'
+import type { RouteLocationRaw, RouteRecordRaw } from 'vue-router'
 import type { AppNavigationItem } from '@ownclouders/web-pkg'
+import type { Status } from './api/types'
 import { APPID } from './appid'
+
+// homeRoute is the first screen: the approvals inbox while approvals are
+// pending (v1 has no nav badge, so they must be the first thing a user
+// sees), otherwise the chat. Null until the status is loaded.
+export const homeRoute = (status: Status | null): RouteLocationRaw | null => {
+  if (!status) return null
+  return { name: status.pending_approvals > 0 ? `${APPID}-approvals` : `${APPID}-chat` }
+}
 
 // The layout is the root route component: it provides the platform and
 // the agent's frame to every route below it. The host prefixes the route
 // names with the app id (approvals becomes agent-approvals).
 //
-// The inbox is the first screen: v1 has no nav badge, so pending
-// approvals must be the first thing a user sees.
+// The app root shows the home view, which replaces itself with homeRoute
+// once the layout has the status (a static redirect cannot see it).
 export const buildRoutes = (
   gettext: (s: string) => string,
   layout: Component
@@ -17,9 +26,14 @@ export const buildRoutes = (
     path: '/',
     name: 'root',
     component: layout,
-    redirect: { name: `${APPID}-approvals` },
     meta: { authContext: 'user' },
     children: [
+      {
+        path: '',
+        name: 'home',
+        component: () => import('./views/Home.vue'),
+        meta: { authContext: 'user', title: gettext('Agent') }
+      },
       {
         path: 'approvals',
         name: 'approvals',
@@ -88,22 +102,23 @@ export const buildRoutes = (
 ]
 
 // buildNavItems returns the app's sidebar entries, visible once the user is
-// loaded.
+// loaded, in priority order. The icon names exist in the design system
+// (both fill and line variants).
 export const buildNavItems = (
   gettext: (s: string) => string,
   isVisible: () => boolean
 ): AppNavigationItem[] => [
   {
-    name: gettext('Approvals'),
-    icon: 'checkbox-circle',
-    route: { path: `/${APPID}/approvals` },
+    name: gettext('Chat'),
+    icon: 'chat-3',
+    route: { path: `/${APPID}/chat` },
     isVisible,
     priority: 10
   },
   {
-    name: gettext('Chat'),
-    icon: 'chat-3',
-    route: { path: `/${APPID}/chat` },
+    name: gettext('Approvals'),
+    icon: 'checkbox-circle',
+    route: { path: `/${APPID}/approvals` },
     isVisible,
     priority: 15
   },

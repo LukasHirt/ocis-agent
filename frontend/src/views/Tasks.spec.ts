@@ -106,3 +106,15 @@ describe('Tasks', () => {
     )
   })
 })
+
+describe('Tasks without a session', () => {
+  it('shows a spinner instead of a blank screen, for the list and for a task', async () => {
+    wrapper = mount(Tasks, { global: { mocks: { $router: { push: vi.fn() } } } })
+    await flushPromises()
+    expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+    wrapper.unmount()
+    wrapper = mount(Tasks, { props: { id: 'j1' }, global: { mocks: { $router: { push: vi.fn() } } } })
+    await flushPromises()
+    expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})

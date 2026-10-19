@@ -31,7 +31,7 @@
           <oc-button size="small" :disabled="chat.messagesLoading" @click="chat.refreshOpen()" v-text="$gettext('Try again')" />
         </div>
         <oc-spinner
-          v-if="!chat.messagesLoaded && chat.messagesLoading"
+          v-if="!chat.messagesLoaded && !chat.messagesError"
           :aria-label="$gettext('Loading the messages')"
         />
         <Thread

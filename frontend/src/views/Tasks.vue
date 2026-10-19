@@ -27,7 +27,7 @@
         <p role="alert" v-text="jobs.error" />
         <oc-button size="small" :disabled="jobs.loading" @click="jobs.refresh()" v-text="$gettext('Try again')" />
       </div>
-      <oc-spinner v-if="!jobs.loaded && jobs.loading" :aria-label="$gettext('Loading the tasks')" />
+      <oc-spinner v-if="!jobs.loaded && !jobs.error" :aria-label="$gettext('Loading the tasks')" />
 
       <template v-if="jobs.loaded">
         <ul class="agent-tasks-list">

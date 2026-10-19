@@ -224,3 +224,12 @@ describe('Chat', () => {
     expect(w.find('.agent-msg-approvals').text()).toContain('files.write')
   })
 })
+
+describe('Chat without a session', () => {
+  it('shows spinners for the conversations and the messages instead of blank space', async () => {
+    wrapper = mount(Chat, { props: { id: 'c1' }, global: { mocks: { $router: { push: vi.fn() } } } })
+    await flushPromises()
+    expect(wrapper.find('.agent-convs [data-stub=OcSpinner]').exists()).toBe(true)
+    expect(wrapper.find('.agent-chat-main [data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})
