@@ -18,9 +18,11 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
-// TokenValidator checks a bearer token with oCIS (auth.Validator).
+// TokenValidator checks a bearer token with oCIS (auth.Validator). Cached
+// is a lookup in its cache of accepted tokens without any network call.
 type TokenValidator interface {
 	Validate(ctx context.Context, token ocisclient.Secret) (auth.Identity, error)
+	Cached(token ocisclient.Secret) (auth.Identity, bool)
 }
 
 // Credentials is the part of auth.Service the API uses.
@@ -92,10 +94,11 @@ const defaultTimeout = 30 * time.Second
 
 // Server is the sidecar's REST API.
 type Server struct {
-	d      Deps
-	mux    *http.ServeMux
-	ipLim  *limiter
-	userLm *limiter
+	d        Deps
+	mux      *http.ServeMux
+	authFail *limiter // failed authentications per client IP (/64 for IPv6)
+	userLm   *limiter
+	seen     *seenThrottle
 }
 
 // NewServer checks the dependencies and registers the routes.
@@ -125,10 +128,11 @@ func NewServer(d Deps) (*Server, error) {
 		d.Now = time.Now
 	}
 	s := &Server{
-		d:      d,
-		mux:    http.NewServeMux(),
-		ipLim:  newLimiter(d.Cfg.RatePerSecond*ipRateFactor, d.Cfg.Burst*ipBurstFactor, maxLimiterKeys, d.Now),
-		userLm: newLimiter(d.Cfg.RatePerSecond, d.Cfg.Burst, maxLimiterKeys, d.Now),
+		d:        d,
+		mux:      http.NewServeMux(),
+		authFail: newLimiter(d.Cfg.RatePerSecond*ipRateFactor, d.Cfg.Burst*ipBurstFactor, maxLimiterKeys, d.Now),
+		userLm:   newLimiter(d.Cfg.RatePerSecond, d.Cfg.Burst, maxLimiterKeys, d.Now),
+		seen:     newSeenThrottle(seenEvery, maxLimiterKeys, d.Now),
 	}
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)

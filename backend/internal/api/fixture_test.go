@@ -40,6 +40,7 @@ type fakeValidator struct {
 	calls  int
 	tokens map[string]auth.Identity
 	err    error
+	cached map[string]auth.Identity // what Validate accepted, like the real cache
 }
 
 func (v *fakeValidator) Validate(_ context.Context, tok ocisclient.Secret) (auth.Identity, error) {
@@ -53,7 +54,19 @@ func (v *fakeValidator) Validate(_ context.Context, tok ocisclient.Secret) (auth
 	if !ok {
 		return auth.Identity{}, auth.ErrUnauthenticated
 	}
+	if v.cached == nil {
+		v.cached = map[string]auth.Identity{}
+	}
+	v.cached[tok.Reveal()] = id
 	return id, nil
+}
+
+// Cached never counts as a validator call: it makes no network request.
+func (v *fakeValidator) Cached(tok ocisclient.Secret) (auth.Identity, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	id, ok := v.cached[tok.Reveal()]
+	return id, ok
 }
 
 func (v *fakeValidator) count() int {

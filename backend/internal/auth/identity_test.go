@@ -205,3 +205,42 @@ func TestValidateKeepsTwoUsersApart(t *testing.T) {
 		t.Fatalf("cache entries = %d", v.size())
 	}
 }
+
+func TestCachedIsACacheOnlyLookup(t *testing.T) {
+	s, c := fakeClient(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	v := NewValidator(c, WithCacheTTL(time.Minute), WithValidatorClock(func() time.Time { return now }))
+	tok := ocisclient.Secret(fakeocis.OIDCToken("einstein"))
+
+	s.ResetRequests()
+	if _, ok := v.Cached(tok); ok {
+		t.Fatal("an unvalidated token is cached")
+	}
+	if _, ok := v.Cached(""); ok {
+		t.Fatal("the empty token is cached")
+	}
+	if len(s.Requests()) != 0 {
+		t.Fatal("Cached called oCIS")
+	}
+	want, err := v.Validate(bg, tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ResetRequests()
+	if id, ok := v.Cached(tok); !ok || id != want {
+		t.Fatalf("Cached = %+v %v", id, ok)
+	}
+	if len(s.Requests()) != 0 {
+		t.Fatal("Cached called oCIS")
+	}
+	// a rejected token is never cached
+	_, _ = v.Validate(bg, "nonsense")
+	if _, ok := v.Cached("nonsense"); ok {
+		t.Fatal("a rejected token is cached")
+	}
+	// an expired entry is not returned
+	now = now.Add(time.Minute)
+	if _, ok := v.Cached(tok); ok {
+		t.Fatal("an expired entry is returned")
+	}
+}

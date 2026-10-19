@@ -1,14 +1,18 @@
 package api
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,7 +169,9 @@ func TestOriginChecksForStateChangingMethods(t *testing.T) {
 	cases := []c{
 		{"post ok", http.MethodPost, func(*http.Request) {}, 200},
 		{"post no sec-fetch-site", http.MethodPost, func(r *http.Request) { r.Header.Del("Sec-Fetch-Site") }, 200},
-		{"post same-site", http.MethodPost, func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }, 200},
+		{"post same-site", http.MethodPost, func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }, 403},
+		{"post origin upper case", http.MethodPost, func(r *http.Request) { r.Header.Set("Origin", "https://Cloud.Example.com") }, 403},
+		{"post origin default port", http.MethodPost, func(r *http.Request) { r.Header.Set("Origin", testOrigin+":443") }, 403},
 		{"post no origin", http.MethodPost, func(r *http.Request) { r.Header.Del("Origin") }, 403},
 		{"post wrong origin", http.MethodPost, func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.com") }, 403},
 		{"post origin trailing slash", http.MethodPost, func(r *http.Request) { r.Header.Set("Origin", testOrigin+"/") }, 403},
@@ -264,6 +270,8 @@ func TestValidatorFailures(t *testing.T) {
 		{auth.ErrNoLoginName, 422, "no_login_name"},
 		{errors.New("ocisclient: GET /graph/v1.0/me: dial tcp: connection refused"), 502, "upstream_unavailable"},
 		{fmt.Errorf("x: %w", store.ErrNotFound), 502, "upstream_unavailable"},
+		{fmt.Errorf("ocisclient: GET /me: %w", context.DeadlineExceeded), 503, "unavailable"},
+		{context.Canceled, 503, "unavailable"},
 	} {
 		f := newFixture(t)
 		f.v.err = c.err
@@ -311,7 +319,7 @@ func TestIdentityComesOnlyFromTheValidator(t *testing.T) {
 	}
 }
 
-func TestSeenOncePerRequestAndItsFailureDoesNotFail(t *testing.T) {
+func TestSeenIsThrottledAndItsFailureDoesNotFail(t *testing.T) {
 	f := newFixture(t)
 	if rec := f.do(http.MethodGet, "/agent-api/v1/test/whoami", ""); rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
@@ -319,12 +327,27 @@ func TestSeenOncePerRequestAndItsFailureDoesNotFail(t *testing.T) {
 	if got := f.cr.seenCalls(); len(got) != 1 || got[0] != aliceID.UserID {
 		t.Fatalf("Seen calls = %v", got)
 	}
+	// within a minute: not again
+	f.clock.Advance(59 * time.Second)
+	f.do(http.MethodGet, "/agent-api/v1/test/whoami", "")
+	if n := len(f.cr.seenCalls()); n != 1 {
+		t.Fatalf("Seen calls within the minute = %d", n)
+	}
+	// another user has their own window
+	r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+	r.Header.Set("Authorization", "Bearer "+otherToken)
+	f.serve(r)
+	if got := f.cr.seenCalls(); len(got) != 2 || got[1] != bobID.UserID {
+		t.Fatalf("Seen calls = %v", got)
+	}
+	// after the window: again, and a failure does not fail the request
+	f.clock.Advance(2 * time.Second)
 	f.cr.seenErr = errors.New("sqlite: SECRET-seen: disk I/O error")
 	if rec := f.do(http.MethodPost, "/agent-api/v1/test/echo", `{"value":"v"}`); rec.Code != 200 {
 		t.Fatalf("status %d after a failing Seen", rec.Code)
 	}
-	if len(f.cr.seenCalls()) != 2 {
-		t.Errorf("Seen calls = %d", len(f.cr.seenCalls()))
+	if n := len(f.cr.seenCalls()); n != 3 {
+		t.Errorf("Seen calls = %d, want 3", n)
 	}
 	logs := f.logs.String()
 	if !strings.Contains(logs, `"category":"seen"`) {
@@ -333,12 +356,48 @@ func TestSeenOncePerRequestAndItsFailureDoesNotFail(t *testing.T) {
 	if strings.Contains(logs, "SECRET") {
 		t.Errorf("logs carry the error text: %s", logs)
 	}
+	// a failure does not advance the throttle: the next request tries again
+	f.cr.seenErr = nil
+	f.do(http.MethodGet, "/agent-api/v1/test/whoami", "")
+	if n := len(f.cr.seenCalls()); n != 4 {
+		t.Errorf("Seen calls after a failure = %d, want 4", n)
+	}
+	f.do(http.MethodGet, "/agent-api/v1/test/whoami", "")
+	if n := len(f.cr.seenCalls()); n != 4 {
+		t.Errorf("Seen calls after a success = %d, want 4", n)
+	}
 	// a user who has not enrolled yet is not an error worth logging
+	f.clock.Advance(61 * time.Second)
 	f.cr.seenErr = fmt.Errorf("x: %w", store.ErrNotFound)
 	before := strings.Count(f.logs.String(), `"category":"seen"`)
 	f.do(http.MethodGet, "/agent-api/v1/test/whoami", "")
 	if strings.Count(f.logs.String(), `"category":"seen"`) != before {
 		t.Error("a not-enrolled Seen is logged as a failure")
+	}
+}
+
+func TestSeenThrottleIsBounded(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	st := newSeenThrottle(time.Minute, 3, c.Now)
+	for i := range 10 {
+		u := fmt.Sprintf("u%d", i)
+		if !st.due(u) {
+			t.Fatalf("%s not due", u)
+		}
+		st.done(u)
+		if n := st.size(); n > 3 {
+			t.Fatalf("size = %d", n)
+		}
+	}
+	// a user that could not be recorded (the map was full of fresh entries)
+	// is simply due again: Seen is called more often, never less
+	if !st.due("u9") {
+		t.Error("an unrecorded user is not due")
+	}
+	c.Advance(time.Minute + time.Second)
+	st.done("u10") // stale entries are swept to make room
+	if st.due("u10") {
+		t.Error("u10 not recorded after the sweep")
 	}
 }
 
@@ -485,41 +544,77 @@ func TestRequestLogLine(t *testing.T) {
 	}
 }
 
-func TestPreAuthRateLimitByIP(t *testing.T) {
+// The pre-auth IP bucket counts failed authentications only. When it is
+// empty, a request with a token the validator has cached still proceeds (a
+// flood from the shared proxy IP does not lock out real users), anything
+// else is refused before any validator call.
+func TestAuthFailureLimitByIP(t *testing.T) {
 	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
-	ipBurst := ipBurstFactor * 1
-	bad := func(ip string) *httptest.ResponseRecorder {
+	failBurst := ipBurstFactor * 1
+	send := func(ip, authz string) *httptest.ResponseRecorder {
 		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
-		r.Header.Set("Authorization", "Bearer wrong")
+		r.Header.Set("Authorization", authz)
 		r.Header.Set("X-Forwarded-For", "10.9.9.9") // never trusted
-		r.RemoteAddr = ip + ":1234"
+		r.RemoteAddr = ip
 		return f.serve(r)
 	}
-	for i := range ipBurst {
-		if rec := bad("10.0.0.1"); rec.Code != 401 {
-			t.Fatalf("request %d: %d", i, rec.Code)
+	// alice validated once: her token is in the validator's cache
+	if rec := send("10.0.0.1:1", "Bearer "+goodToken); rec.Code != 200 {
+		t.Fatalf("alice: %d", rec.Code)
+	}
+	// successful requests (even user-limited ones) never drain the bucket
+	for range 3 * failBurst {
+		send("10.0.0.1:1", "Bearer "+goodToken)
+	}
+	// the attacker: garbage and validator-rejected tokens alike
+	for i := range failBurst {
+		authz := "Basic Z2FyYmFnZQ=="
+		if i%2 == 0 {
+			authz = "Bearer wrong"
+		}
+		if rec := send("10.0.0.1:2", authz); rec.Code != 401 {
+			t.Fatalf("attempt %d: %d", i, rec.Code)
 		}
 	}
 	calls := f.v.count()
-	rec := bad("10.0.0.1")
+	rec := send("10.0.0.1:3", "Bearer wrong")
 	wantError(t, rec, 429, "rate_limited")
 	if ra := rec.Header().Get("Retry-After"); ra != "1" {
 		t.Errorf("Retry-After = %q", ra)
 	}
+	wantError(t, send("10.0.0.1:3", "Basic Z2FyYmFnZQ=="), 429, "rate_limited")
+	// bob's token is valid but not cached: refused without a validator call
+	wantError(t, send("10.0.0.1:4", "Bearer "+otherToken), 429, "rate_limited")
 	if f.v.count() != calls {
-		t.Error("a rate-limited request reached the validator")
+		t.Error("a blocked request reached the validator")
 	}
-	// the IP limit comes before the Origin check too
+	// alice (cached) still gets through from the same IP, without a validator call
+	f.clock.Advance(time.Second) // her own per-user bucket refills; the IP bucket gets 10 tokens back...
+	for range failBurst {
+		send("10.0.0.1:2", "Bearer wrong") // ...which the attacker drains again
+	}
+	if rec := send("10.0.0.1:5", "Bearer "+goodToken); rec.Code != 200 {
+		t.Errorf("cached user during the flood: %d", rec.Code)
+	}
+	calls = f.v.count()
+	wantError(t, send("10.0.0.1:5", "Bearer "+otherToken), 429, "rate_limited")
+	if f.v.count() != calls {
+		t.Error("a blocked request reached the validator")
+	}
+	// the gate comes before the Origin check
 	r := f.req(http.MethodPost, "/agent-api/v1/test/nobody", "")
+	r.Header.Set("Authorization", "Bearer wrong")
 	r.Header.Del("Origin")
 	r.RemoteAddr = "10.0.0.1:1"
 	wantError(t, f.serve(r), 429, "rate_limited")
+	// IPv4-mapped IPv6 is the same client
+	wantError(t, send("[::ffff:10.0.0.1]:1", "Bearer wrong"), 429, "rate_limited")
 	// another IP has its own bucket
-	if rec := bad("10.0.0.2"); rec.Code != 401 {
+	if rec := send("10.0.0.2:1", "Bearer wrong"); rec.Code != 401 {
 		t.Errorf("other IP: %d", rec.Code)
 	}
 	// healthz is never limited
-	for range 3 * ipBurst {
+	for range 3 * failBurst {
 		r := httptest.NewRequest(http.MethodGet, "/agent-api/healthz", nil)
 		r.RemoteAddr = "10.0.0.1:1"
 		if f.serve(r).Code != 200 {
@@ -527,8 +622,61 @@ func TestPreAuthRateLimitByIP(t *testing.T) {
 		}
 	}
 	f.clock.Advance(time.Second / ipRateFactor)
-	if rec := bad("10.0.0.1"); rec.Code != 401 {
+	if rec := send("10.0.0.1:1", "Bearer wrong"); rec.Code != 401 {
 		t.Errorf("after refill: %d", rec.Code)
+	}
+}
+
+func TestAuthFailureLimitKeysIPv6By64(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	send := func(ip string) int {
+		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+		r.Header.Set("Authorization", "Bearer wrong")
+		r.RemoteAddr = ip
+		return f.serve(r).Code
+	}
+	for i := range ipBurstFactor {
+		if c := send(fmt.Sprintf("[2001:db8:0:0::%x]:1", i+1)); c != 401 {
+			t.Fatalf("attempt %d: %d", i, c)
+		}
+	}
+	if c := send("[2001:db8::ffff:1]:1"); c != 429 {
+		t.Errorf("same /64: %d", c)
+	}
+	if c := send("[2001:db8::1%eth0]:1"); c != 429 {
+		t.Errorf("same /64 with a zone: %d", c)
+	}
+	if c := send("[2001:db8:0:1::1]:1"); c != 401 {
+		t.Errorf("other /64: %d", c)
+	}
+}
+
+func TestClientKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"10.0.0.1:1234":          "10.0.0.1",
+		"[::ffff:10.0.0.1]:1":    "10.0.0.1",
+		"[2001:db8::1]:1":        "2001:db8::/64",
+		"[2001:db8::abcd:1]:443": "2001:db8::/64",
+		"[fe80::1%eth0]:1":       "fe80::/64",
+		"garbage":                "garbage",
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = in
+		if got := clientKey(r); got != want {
+			t.Errorf("clientKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestValidatorOutageDoesNotChargeTheIP(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 1, 1 })
+	f.v.err = errors.New("ocisclient: GET /me: connection refused")
+	for i := range 3 * ipBurstFactor {
+		r := f.req(http.MethodGet, "/agent-api/v1/test/whoami", "")
+		r.Header.Set("Authorization", "Bearer some-token")
+		if c := f.serve(r).Code; c != 502 {
+			t.Fatalf("request %d: %d", i, c)
+		}
 	}
 }
 
@@ -548,10 +696,6 @@ func TestPostAuthRateLimitByUser(t *testing.T) {
 	wantError(t, rec, 429, "rate_limited")
 	if rec.Header().Get("Retry-After") != "1" {
 		t.Errorf("Retry-After = %q", rec.Header().Get("Retry-After"))
-	}
-	// Seen comes before the user limit: it ran for the limited request too
-	if n := len(f.cr.seenCalls()); n != 3 {
-		t.Errorf("Seen calls = %d, want 3", n)
 	}
 	// the user limit comes before the body checks
 	r := f.req(http.MethodPost, "/agent-api/v1/test/echo", `{"value":"v"}`)
@@ -618,4 +762,190 @@ func TestResponseControllerOverARealServer(t *testing.T) {
 		t.Fatalf("second request: %v", err)
 	}
 	_ = res2.Body.Close()
+}
+
+func TestSeenRunsBeforeTheUserLimit(t *testing.T) {
+	f := newFixture(t, func(d *Deps) { d.Cfg.RatePerSecond, d.Cfg.Burst = 0.001, 1 })
+	if rec := f.do(http.MethodGet, "/agent-api/v1/test/whoami", ""); rec.Code != 200 {
+		t.Fatalf("first: %d", rec.Code)
+	}
+	f.clock.Advance(61 * time.Second) // Seen is due again, the user bucket is still empty
+	wantError(t, f.do(http.MethodGet, "/agent-api/v1/test/whoami", ""), 429, "rate_limited")
+	if n := len(f.cr.seenCalls()); n != 2 {
+		t.Errorf("Seen calls = %d, want 2 (the limited request is a visit too)", n)
+	}
+}
+
+// A panic before anything was written is a 500; after the response started
+// the connection is aborted, so the client never sees a clean, truncated 200.
+func TestPanicAfterTheResponseStartedAbortsTheConnection(t *testing.T) {
+	f := newFixture(t)
+	f.srv.handle("GET /agent-api/v1/test/partial", func(w http.ResponseWriter, r *http.Request) error {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"partial":`))
+		_ = http.NewResponseController(w).Flush()
+		panic("SECRET-late-panic")
+	})
+	ts := httptest.NewServer(f.h)
+	defer ts.Close()
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte("GET /agent-api/v1/test/partial HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + goodToken + "\r\n\r\n"))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err == nil {
+		t.Fatalf("the truncated response ended cleanly: %d %q", res.StatusCode, body)
+	}
+	if !strings.Contains(f.logs.String(), `"category":"panic"`) || strings.Contains(f.logs.String(), "SECRET") {
+		t.Errorf("logs: %s", f.logs.String())
+	}
+
+	// in-process: the pipeline re-panics with http.ErrAbortHandler
+	for _, path := range []string{"/agent-api/v1/test/partial", "/agent-api/v1/test/abort"} {
+		if path == "/agent-api/v1/test/abort" {
+			f.srv.handle("GET "+path, func(http.ResponseWriter, *http.Request) error { panic(http.ErrAbortHandler) })
+		}
+		func() {
+			defer func() {
+				if v := recover(); v != http.ErrAbortHandler {
+					t.Errorf("%s: recovered %v, want http.ErrAbortHandler", path, v)
+				}
+			}()
+			f.serve(f.req(http.MethodGet, path, ""))
+		}()
+	}
+}
+
+func TestHandlersCanFlushThroughTheWrapper(t *testing.T) {
+	f := newFixture(t)
+	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	// without a working flush the client would wait for the handler, which
+	// waits for the client: a watchdog breaks that tie
+	watchdog := time.AfterFunc(5*time.Second, free)
+	defer watchdog.Stop()
+	f.srv.handle("GET /agent-api/v1/test/stream", func(w http.ResponseWriter, r *http.Request) error {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			return errors.New("no flusher")
+		}
+		_, _ = w.Write([]byte("first\n"))
+		fl.Flush()
+		<-release // the handler is still running while the client reads
+		_, _ = w.Write([]byte("second\n"))
+		return nil
+	})
+	ts := httptest.NewServer(f.h)
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/agent-api/v1/test/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+goodToken)
+	res, err := ts.Client().Do(req)
+	if err != nil {
+		free()
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	br := bufio.NewReader(res.Body)
+	line, err := br.ReadString('\n')
+	select {
+	case <-release:
+		t.Fatal("the flushed bytes did not arrive while the handler was running")
+	default:
+	}
+	free()
+	if err != nil || line != "first\n" {
+		t.Fatalf("first line: %q %v", line, err)
+	}
+	if rest, _ := io.ReadAll(br); string(rest) != "second\n" {
+		t.Errorf("rest = %q", rest)
+	}
+}
+
+func TestWriteDeadlineFiresOverARealServer(t *testing.T) {
+	old := writeGrace
+	writeGrace = 0
+	t.Cleanup(func() { writeGrace = old })
+	f := newFixture(t)
+	f.srv.handle("GET /agent-api/v1/test/late", func(w http.ResponseWriter, r *http.Request) error {
+		time.Sleep(300 * time.Millisecond) // ignores its context on purpose
+		_, _ = w.Write([]byte(strings.Repeat("x", 1<<20)))
+		return nil
+	}, withTimeout(100*time.Millisecond))
+	ts := httptest.NewServer(f.h)
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/agent-api/v1/test/late", nil)
+	req.Header.Set("Authorization", "Bearer "+goodToken)
+	res, err := ts.Client().Do(req)
+	if err == nil {
+		body, rerr := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if rerr == nil {
+			t.Fatalf("a write after the deadline arrived: %d, %d bytes", res.StatusCode, len(body))
+		}
+	}
+}
+
+type caseDst struct {
+	DailyTokens int                `json:"daily_tokens"`
+	AutoApprove bool               `json:"auto_approve_write"`
+	Nested      *caseInner         `json:"nested"`
+	List        []caseInner        `json:"list"`
+	Models      map[string]*string `json:"models"`
+	Raw         json.RawMessage    `json:"raw"`
+	Untagged    string
+	skipped     string               // unexported: not a JSON field
+	Ignored     string               `json:"-"`
+	Free        map[string]any       `json:"free"`
+	Deep        map[string]caseInner `json:"deep"`
+}
+
+type caseInner struct {
+	Name string `json:"name"`
+}
+
+func TestDecodeBodyRequiresExactKeyCase(t *testing.T) {
+	ok := []string{
+		`{"daily_tokens":1}`,
+		`{"auto_approve_write":true,"nested":{"name":"a"},"list":[{"name":"b"}]}`,
+		`{"models":{"CHAT":"x"}}`, // map keys are the handler's to validate
+		`{"raw":{"ANY":1}}`,
+		`{"Untagged":"x"}`,
+		`{"free":{"Name":1}}`,
+		`{"nested":null,"list":null}`,
+	}
+	bad := []string{
+		`{"Daily_Tokens":1}`,
+		`{"AUTO_APPROVE_WRITE":true}`,
+		`{"nested":{"Name":"a"}}`,
+		`{"list":[{"name":"a"},{"NAME":"b"}]}`,
+		`{"untagged":"x"}`,
+		`{"Ignored":"x"}`,
+		`{"skipped":"x"}`,
+	}
+	run := func(body string) error {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		var dst caseDst
+		return decodeBody(httptest.NewRecorder(), r, &dst)
+	}
+	for _, b := range ok {
+		if err := run(b); err != nil {
+			t.Errorf("%s: %v", b, err)
+		}
+	}
+	for _, b := range bad {
+		if err := run(b); !errors.Is(err, errBadJSON) {
+			t.Errorf("%s: err = %v, want errBadJSON", b, err)
+		}
+	}
+	// over HTTP it is a 400
+	f := newFixture(t)
+	wantError(t, f.do(http.MethodPost, "/agent-api/v1/test/echo", `{"Value":"v"}`), 400, "invalid_request")
 }

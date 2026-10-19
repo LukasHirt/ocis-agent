@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
@@ -59,10 +60,8 @@ func requireJSON(r *http.Request) error {
 // most maxBodyBytes. Errors are errBadJSON or errTooLarge; they never carry
 // the decoder's text, which can echo parts of the body.
 //
-// Known limit: a single key that differs from the field name only in case
-// (for example "Value" for "value") is still accepted by encoding/json; it
-// cannot be confused with another key, since duplicates under case folding
-// are refused.
+// Keys must match the struct fields' JSON names exactly (checkKeyCase):
+// encoding/json would accept "Daily_Tokens" for "daily_tokens".
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	if r.Body == nil {
 		return errBadJSON
@@ -78,6 +77,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	if _, err := tools.Canonicalize(data); err != nil {
 		return errBadJSON
 	}
+	if err := checkKeyCase(data, reflect.TypeOf(dst)); err != nil {
+		return err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -87,4 +89,101 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 		return errBadJSON
 	}
 	return nil
+}
+
+// checkKeyCase refuses any object key that matches a field of the
+// destination struct only case-insensitively (encoding/json matches field
+// names case-insensitively), at any depth of nested structs, pointers,
+// slices and arrays. Keys that match no field at all are left to
+// DisallowUnknownFields. Map-typed fields (and json.RawMessage, interfaces)
+// are not checked: their keys are data, which the handler validates itself.
+func checkKeyCase(data []byte, t reflect.Type) error {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if dec.Decode(&v) != nil {
+		return errBadJSON
+	}
+	if !keyCaseOK(v, t) {
+		return errBadJSON
+	}
+	return nil
+}
+
+func keyCaseOK(v any, t reflect.Type) bool {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return true
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return true // a type mismatch is the decoder's error
+		}
+		fields := jsonFields(t)
+		for k, val := range obj {
+			if ft, ok := fields[k]; ok {
+				if !keyCaseOK(val, ft) {
+					return false
+				}
+				continue
+			}
+			for name := range fields {
+				if strings.EqualFold(name, k) {
+					return false
+				}
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		arr, ok := v.([]any)
+		if !ok {
+			return true
+		}
+		for _, e := range arr {
+			if !keyCaseOK(e, t.Elem()) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// jsonFields maps the JSON names of t's fields (as encoding/json sees them,
+// including the promoted fields of embedded structs without a tag) to their
+// types.
+func jsonFields(t reflect.Type) map[string]reflect.Type {
+	out := map[string]reflect.Type{}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if f.Anonymous && name == "" {
+			et := f.Type
+			if et.Kind() == reflect.Pointer {
+				et = et.Elem()
+			}
+			if et.Kind() == reflect.Struct {
+				for k, v := range jsonFields(et) {
+					if _, dup := out[k]; !dup {
+						out[k] = v
+					}
+				}
+				continue
+			}
+		}
+		if !f.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		out[name] = f.Type
+	}
+	return out
 }

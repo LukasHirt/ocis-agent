@@ -100,3 +100,66 @@ func TestDefaultLimiterBound(t *testing.T) {
 		t.Errorf("maxLimiterKeys = %d", maxLimiterKeys)
 	}
 }
+
+func TestLimiterEvictsFullBucketsEvenWhenRecentlyUsed(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	l := newLimiter(1, 2, 3, c.Now)
+	l.allow("a")
+	l.allow("a") // 0 tokens, least recently used
+	l.allow("b")
+	l.allow("b") // 0 tokens
+	c.Advance(500 * time.Millisecond)
+	l.allow("full") // 1 token, most recently used
+	c.Advance(time.Second)
+	// now: a and b have 1.5 tokens, full has 2 (full) although used last
+	l.allow("new")
+	if l.has("full") {
+		t.Error("the full bucket was kept")
+	}
+	if !l.has("a") || !l.has("b") || !l.has("new") {
+		t.Error("a non-full bucket was evicted while a full one existed")
+	}
+}
+
+func TestLimiterSweepsAtMostOncePerSecond(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	l := newLimiter(0.001, 1, 100, c.Now)
+	for i := range 100 {
+		l.allow(fmt.Sprintf("k%d", i)) // 100 empty buckets: nothing is full
+	}
+	for i := range 1000 {
+		l.allow(fmt.Sprintf("flood%d", i))
+		if l.size() > 100 {
+			t.Fatalf("size = %d", l.size())
+		}
+	}
+	if l.sweeps != 1 {
+		t.Errorf("sweeps = %d within one second, want 1", l.sweeps)
+	}
+	c.Advance(time.Second)
+	l.allow("later")
+	if l.sweeps != 2 {
+		t.Errorf("sweeps = %d after a second, want 2", l.sweeps)
+	}
+}
+
+func TestLimiterBlockedAndCharge(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	l := newLimiter(1, 2, 10, c.Now)
+	if b, _ := l.blocked("k"); b {
+		t.Error("an unknown key is blocked")
+	}
+	if l.has("k") {
+		t.Error("blocked created a bucket")
+	}
+	l.charge("k")
+	l.charge("k")
+	if b, wait := l.blocked("k"); !b || wait != time.Second {
+		t.Errorf("after two failures: blocked=%v wait=%v", b, wait)
+	}
+	l.charge("k") // never below zero
+	c.Advance(time.Second)
+	if b, _ := l.blocked("k"); b {
+		t.Error("still blocked after the refill")
+	}
+}

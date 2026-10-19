@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
-	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -21,17 +20,23 @@ import (
 // The request pipeline, in this order (the tests pin it):
 //
 //  1. recover: a panic is a 500 internal and a log line with category
-//     "panic", never the panic value
+//     "panic", never the panic value; if the response had already started,
+//     the connection is aborted (re-panic with http.ErrAbortHandler) so the
+//     client never sees a clean, truncated response
 //  2. request id: 16 random hex digits, X-Request-Id, in every log line and
 //     error body; a client-supplied id is ignored
 //  3. security headers on every response
-//  4. pre-auth rate limit per client IP (RemoteAddr; X-Forwarded-For is
-//     never trusted)
-//  5. for state-changing methods: Origin must equal the allowed origin and
-//     Sec-Fetch-Site, if sent, must be same-origin or same-site; checked
+//  4. pre-auth gate per client IP (RemoteAddr, IPv6 by /64; X-Forwarded-For
+//     is never trusted): its bucket counts failed authentications only;
+//     while it is empty only a token the validator has cached gets through
+//     (see ratelimit.go)
+//  5. for state-changing methods: Origin must equal the allowed origin
+//     exactly and Sec-Fetch-Site, if sent, must be same-origin; checked
 //     before auth, so a cross-site request never reaches token validation
-//  6. Authorization: Bearer <token>, validated by oCIS (TokenValidator)
-//  7. Seen(userID) once per request; a failure is logged and ignored
+//  6. Authorization: Bearer <token>, validated by oCIS (TokenValidator); a
+//     missing, malformed or rejected token charges the IP's bucket
+//  7. Seen(userID), at most once a minute per user (seen.go); a failure is
+//     logged and ignored, and retried by the next request
 //  8. per-user rate limit
 //  9. body rules (requireJSON) and the body limit
 //  10. the handler, under the route's deadline
@@ -44,7 +49,7 @@ import (
 // writeGrace is how much longer the connection's write deadline is than the
 // route's context deadline, so a handler that stops at its deadline can
 // still write its error response.
-const writeGrace = 5 * time.Second
+var writeGrace = 5 * time.Second // a variable for tests
 
 // maxBearerLen caps the bearer token.
 const maxBearerLen = 8 << 10
@@ -108,6 +113,14 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush lets handlers use w.(http.Flusher) too.
+func (w *statusWriter) Flush() {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func newRequestID() string {
@@ -144,13 +157,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	sw.Header().Set("X-Request-Id", ri.id)
 	r = r.WithContext(context.WithValue(r.Context(), infoKey, ri))
 	defer func() {
-		if v := recover(); v != nil {
+		v := recover()
+		abort := false
+		if v != nil {
 			if v == http.ErrAbortHandler {
-				panic(v)
-			}
-			s.d.Log.Error("api: panic", "category", "panic", "request_id", ri.id, "route", ri.route)
-			if !sw.wrote {
-				writeCode(sw, r, http.StatusInternalServerError, "internal")
+				abort = true
+				ri.category = "aborted"
+			} else {
+				s.d.Log.Error("api: panic", "category", "panic", "request_id", ri.id, "route", ri.route)
+				if sw.wrote {
+					abort = true
+					ri.category = "panic"
+				} else {
+					writeCode(sw, r, http.StatusInternalServerError, "internal")
+				}
 			}
 		}
 		status := sw.status
@@ -159,6 +179,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		s.d.Log.Info("api: request", "request_id", ri.id, "method", logMethod(r.Method), "route", ri.route,
 			"status", status, "duration_ms", time.Since(start).Milliseconds(), "user", ri.user, "category", ri.category)
+		if abort {
+			// net/http closes the connection without logging a stack
+			panic(http.ErrAbortHandler)
+		}
 	}()
 	s.dispatch(sw, r)
 }
@@ -221,10 +245,21 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		_ = ctl.SetWriteDeadline(time.Now().Add(rc.timeout + writeGrace))
 		r = r.WithContext(ctx)
 
-		// 4
-		if ok, wait := s.ipLim.allow(clientIP(r)); !ok {
-			rateLimited(w, r, wait)
-			return
+		// 4 (parsing and the cache lookup make no network call)
+		ipKey := clientKey(r)
+		tok, tokOK := parseBearer(r.Header.Values("Authorization"))
+		var cached *auth.Identity
+		if blocked, wait := s.authFail.blocked(ipKey); blocked {
+			var id auth.Identity
+			hit := false
+			if tokOK {
+				id, hit = s.d.Validator.Cached(tok)
+			}
+			if !hit {
+				rateLimited(w, r, wait)
+				return
+			}
+			cached = &id
 		}
 		// 5
 		if !safeMethod(r.Method) && !s.originOK(r) {
@@ -232,16 +267,24 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 			return
 		}
 		// 6
-		tok, ok := parseBearer(r.Header.Values("Authorization"))
-		if !ok {
+		if !tokOK {
+			s.authFail.charge(ipKey)
 			writeCode(w, r, http.StatusUnauthorized, "unauthenticated")
 			return
 		}
-		id, err := s.d.Validator.Validate(ctx, tok)
-		if err != nil {
-			st, code := validatorError(err)
-			writeCode(w, r, st, code)
-			return
+		var id auth.Identity
+		if cached != nil {
+			id = *cached
+		} else {
+			var err error
+			if id, err = s.d.Validator.Validate(ctx, tok); err != nil {
+				st, code := validatorError(err)
+				if st == http.StatusUnauthorized {
+					s.authFail.charge(ipKey) // an outage (502/503) is not the client's failure
+				}
+				writeCode(w, r, st, code)
+				return
+			}
 		}
 		if id.UserID == "" {
 			writeCode(w, r, http.StatusBadGateway, "upstream_unavailable")
@@ -252,8 +295,12 @@ func (s *Server) chain(pattern string, rc routeConfig, h handlerFunc) http.Handl
 		ctx = context.WithValue(context.WithValue(ctx, principalKey, p), bearerKey, tok)
 		r = r.WithContext(ctx)
 		// 7: a user who has not enrolled has no row yet (ErrNotFound)
-		if err := s.d.Auth.Seen(ctx, p.UserID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.d.Log.Warn("api: recording the visit failed", "category", "seen", "request_id", ri.id, "user", p.UserID)
+		if s.seen.due(p.UserID) {
+			if err := s.d.Auth.Seen(ctx, p.UserID); err == nil {
+				s.seen.done(p.UserID)
+			} else if !errors.Is(err, store.ErrNotFound) {
+				s.d.Log.Warn("api: recording the visit failed", "category", "seen", "request_id", ri.id, "user", p.UserID)
+			}
 		}
 		// 8
 		if ok, wait := s.userLm.allow(p.UserID); !ok {
@@ -310,18 +357,11 @@ func rateLimited(w http.ResponseWriter, r *http.Request, wait time.Duration) {
 	writeCode(w, r, http.StatusTooManyRequests, "rate_limited")
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 func safeMethod(m string) bool { return m == http.MethodGet || m == http.MethodHead }
 
-// originOK is step 5: exactly one Origin, equal to the allowed origin, and
-// no Sec-Fetch-Site other than same-origin or same-site.
+// originOK is step 5: exactly one Origin, byte-equal to the allowed origin
+// (config normalises it to lower case without a default port, which is how
+// browsers send it), and no Sec-Fetch-Site other than same-origin.
 func (s *Server) originOK(r *http.Request) bool {
 	o := r.Header.Values("Origin")
 	if len(o) != 1 || o[0] != s.d.Cfg.AllowedOrigin {
@@ -331,7 +371,7 @@ func (s *Server) originOK(r *http.Request) bool {
 	case 0:
 		return true
 	case 1:
-		return sfs[0] == "same-origin" || sfs[0] == "same-site"
+		return sfs[0] == "same-origin"
 	}
 	return false
 }

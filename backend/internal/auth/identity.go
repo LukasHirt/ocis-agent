@@ -113,6 +113,23 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 	return id, nil
 }
 
+// Cached returns the identity of a token that Validate accepted and that is
+// still cached. It never calls oCIS, so it is cheap enough for a caller that
+// must decide without a network call (the API's pre-auth rate limit).
+func (v *Validator) Cached(token ocisclient.Secret) (Identity, bool) {
+	if token == "" {
+		return Identity{}, false
+	}
+	key := sha256.Sum256([]byte(token.Reveal()))
+	now := v.now()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if e, ok := v.cache[key]; ok && now.Before(e.until) {
+		return e.id, true
+	}
+	return Identity{}, false
+}
+
 // store caches id until the given time, keeping the cache bounded.
 func (v *Validator) store(key [32]byte, id Identity, until time.Time) {
 	v.mu.Lock()
