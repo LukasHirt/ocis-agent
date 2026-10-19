@@ -4,16 +4,37 @@ import {
   AppMenuItemExtension,
   defineWebApplication,
   Extension,
+  useAuthStore,
+  useMessages,
+  useModals,
   useUserStore
 } from '@ownclouders/web-pkg'
 import { urlJoin } from '@ownclouders/web-client'
 import { APPID } from './appid'
-import { buildRoutes } from './routes'
+import { buildNavItems, buildRoutes } from './routes'
+import { createLayout } from './layout'
+import { createPlatform } from './platform'
 
 export default defineWebApplication({
-  setup() {
+  setup({ applicationConfig }) {
     const { $gettext } = useGettext()
     const userStore = useUserStore()
+    const authStore = useAuthStore()
+    const messages = useMessages()
+    const modals = useModals()
+
+    // The only place that touches the oCIS Web runtime: everything else
+    // gets it through the platform the layout provides.
+    const platform = createPlatform({
+      accessToken: () => authStore.accessToken,
+      backendUrl: applicationConfig?.backendUrl,
+      fetch: window.fetch.bind(window),
+      showMessage: (m) => messages.showMessage(m),
+      showErrorMessage: (m) => messages.showErrorMessage(m),
+      dispatchModal: (m) => modals.dispatchModal(m),
+      isModalOpen: (id) => modals.modals.some((m) => m.id === id),
+      onModalsChange: (cb) => modals.$subscribe(cb, { detached: true, flush: 'sync' })
+    })
 
     const appInfo = {
       name: $gettext('Agent'),
@@ -42,7 +63,8 @@ export default defineWebApplication({
 
     return {
       appInfo,
-      routes: buildRoutes($gettext),
+      routes: buildRoutes($gettext, createLayout(platform)),
+      navItems: buildNavItems($gettext, () => !!userStore.user),
       extensions
     }
   }

@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/check-dist.mjs",
+    "build:w": "vite build --watch --mode development",
     "test:unit": "vitest run",
     "check:types": "vue-tsc --noEmit"
   },
@@ -28,6 +29,6 @@
     "vue": "3.5.43",
     "vue-router": "^5.0.6",
     "vue-tsc": "3.1.4",
-    "vue3-gettext": "^4.0.1"
+    "vue3-gettext": "^2.4.0"
   }
 }

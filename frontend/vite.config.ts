@@ -9,5 +9,8 @@ export default defineConfig({
         entryFileNames: 'js/[name].js'
       }
     }
+  },
+  test: {
+    setupFiles: ['./vitest.setup.ts']
   }
 })
