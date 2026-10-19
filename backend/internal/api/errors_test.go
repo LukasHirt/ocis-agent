@@ -57,6 +57,8 @@ func TestErrorMappingTable(t *testing.T) {
 		{errTooLarge, 413, "too_large"},
 		{errBadJSON, 400, "invalid_request"},
 		{errMediaType, 415, "unsupported_media_type"},
+		{errStaleArguments, 409, "stale_arguments"},
+		{errAlreadyDecided, 409, "already_decided"},
 		{&apiError{status: 418, code: "rate_limited"}, 418, "rate_limited"},
 		{errors.New("SECRET"), 500, "internal"},
 		{store.ErrFenceLost, 500, "internal"},

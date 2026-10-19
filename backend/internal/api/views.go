@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Response shapes. Times are RFC 3339 in UTC; a time that does not apply is
 // null. No view ever carries a token value, a token hash or (outside the
@@ -93,6 +96,14 @@ func timeView(t time.Time) *string {
 	return &s
 }
 
+// timePtrView is timeView of an optional time.
+func timePtrView(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	return timeView(*t)
+}
+
 // settingsView is the body of GET and PUT /settings: the user's editable
 // policy fields plus the read-only operator cap and dormancy window.
 type settingsView struct {
@@ -111,4 +122,100 @@ type settingsView struct {
 type settingsModels struct {
 	Chat      *string `json:"chat"`
 	Proactive *string `json:"proactive"`
+}
+
+// jobView is a job in GET /jobs and the body of a cancel. Goal is the
+// user's own text for chat jobs and a server-made instruction for proactive
+// ones (which must never embed file names); it is shown as untrusted text
+// either way and capped at maxGoalView. Error is the runner's fixed reason
+// text (agent.Reason*), safe to show.
+type jobView struct {
+	ID          string  `json:"id"`
+	TriggerKind string  `json:"trigger_kind"`
+	Goal        string  `json:"goal"` // untrusted, capped
+	State       string  `json:"state"`
+	Attempt     int     `json:"attempt"`
+	Runs        int     `json:"runs"`
+	CreatedAt   *string `json:"created_at"`
+	UpdatedAt   *string `json:"updated_at"`
+	Error       string  `json:"error"`
+	StepsCount  int     `json:"steps_count"`
+}
+
+// jobDetailView is GET /jobs/{id}: the job, its timeline and the final
+// answer (model text: untrusted, capped at maxAnswerView; empty while there
+// is none or the checkpoint cannot be read).
+type jobDetailView struct {
+	jobView
+	Steps  []stepView `json:"steps"`
+	Answer string     `json:"answer"`
+}
+
+// stepView is one timeline entry. Summary is tool-made text that can echo
+// file data or model-supplied paths: untrusted, capped at maxSummaryView.
+type stepView struct {
+	N          int     `json:"n"`
+	Kind       string  `json:"kind"`
+	Tool       string  `json:"tool"`
+	CallID     string  `json:"call_id"`
+	Status     string  `json:"status"`
+	TokensIn   int64   `json:"tokens_in"`
+	TokensOut  int64   `json:"tokens_out"`
+	Summary    string  `json:"summary"` // untrusted, capped
+	ApprovalID string  `json:"approval_id"`
+	CreatedAt  *string `json:"created_at"`
+}
+
+type jobPageView struct {
+	Jobs       []jobView `json:"jobs"`
+	NextCursor *string   `json:"next_cursor"`
+}
+
+// approvalView is one approval. Args and Preview are the stored JSON,
+// exactly what executes if approved (untrusted data, show it fenced);
+// Rationale is the model's explanation (untrusted, unverified, capped).
+// JobEnded marks a pending approval whose job has already ended: it can no
+// longer be decided and the scheduler settles it soon. NeedsVerification
+// marks an action whose outcome is unknown: the user should check it.
+type approvalView struct {
+	ID                string          `json:"id"`
+	JobID             string          `json:"job_id"`
+	CallID            string          `json:"call_id"`
+	Tool              string          `json:"tool"`
+	Risk              string          `json:"risk"`
+	Args              json.RawMessage `json:"args"` // untrusted
+	ArgsHash          string          `json:"args_hash"`
+	TargetETag        string          `json:"target_etag"`
+	Rationale         string          `json:"rationale"` // untrusted, capped
+	Preview           json.RawMessage `json:"preview"`   // untrusted
+	State             string          `json:"state"`
+	RequestedAt       *string         `json:"requested_at"`
+	ExpiresAt         *string         `json:"expires_at"`
+	DecidedBy         string          `json:"decided_by"`
+	DecidedAt         *string         `json:"decided_at"`
+	ExecutedAt        *string         `json:"executed_at"`
+	Outcome           *outcomeView    `json:"outcome"` // null while undecided or not yet run
+	JobEnded          bool            `json:"job_ended"`
+	NeedsVerification bool            `json:"needs_verification"`
+}
+
+// outcomeView is how a decided approval ended. State is done, failed,
+// unknown or expired (from the executor's record) or rejected/expired for
+// settled approvals without one. Summary and Diff are tool output that can
+// carry file data: untrusted, capped. Reason is the executor's or a fixed
+// text, model-safe (it may echo a path the model supplied).
+type outcomeView struct {
+	State   string `json:"state"`
+	Summary string `json:"summary"` // untrusted, capped
+	Reason  string `json:"reason"`
+	Diff    string `json:"diff"` // untrusted, capped
+}
+
+type approvalPageView struct {
+	Approvals  []approvalView `json:"approvals"`
+	NextCursor *string        `json:"next_cursor"`
+}
+
+type approvalsView struct {
+	Approvals []approvalView `json:"approvals"`
 }

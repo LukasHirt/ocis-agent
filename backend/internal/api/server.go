@@ -155,6 +155,13 @@ func (s *Server) routes() {
 	s.handle("POST /agent-api/v1/resume", s.resume)
 	s.handle("GET /agent-api/v1/settings", s.getSettings)
 	s.handle("PUT /agent-api/v1/settings", s.putSettings)
+	s.handle("GET /agent-api/v1/jobs", s.listJobs)
+	s.handle("GET /agent-api/v1/jobs/{id}", s.getJob)
+	s.handle("POST /agent-api/v1/jobs/{id}/cancel", s.cancelJob)
+	s.handle("GET /agent-api/v1/approvals", s.listApprovals)
+	s.handle("GET /agent-api/v1/approvals/{id}", s.getApproval)
+	s.handle("POST /agent-api/v1/approvals/{id}/decision", s.decideApproval)
+	s.handle("POST /agent-api/v1/approvals/bulk-decision", s.bulkDecision)
 }
 
 func validOrigin(o string) bool {

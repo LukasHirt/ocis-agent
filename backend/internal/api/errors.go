@@ -25,6 +25,8 @@ var errorMessages = map[string]string{
 	"method_not_allowed":     "Method not allowed.",
 	"conflict":               "The request conflicts with the current state.",
 	"job_ended":              "The job has already ended.",
+	"stale_arguments":        "The action is not the one you were shown; reload it.",
+	"already_decided":        "This approval has already been decided.",
 	"limit_reached":          "The job has reached its limit of actions.",
 	"credentials_invalid":    "The agent has no valid credentials for you; enrol again.",
 	"expired":                "This has expired.",
@@ -56,6 +58,16 @@ var (
 	errBadJSON   = newAPIError(http.StatusBadRequest, "invalid_request")
 	errMediaType = newAPIError(http.StatusUnsupportedMediaType, "unsupported_media_type")
 	errNotFound  = newAPIError(http.StatusNotFound, "not_found")
+)
+
+// Errors of approval decisions.
+var (
+	// errStaleArguments: the arguments hash the client echoed is not the
+	// stored one (the client shows an outdated approval).
+	errStaleArguments = newAPIError(http.StatusConflict, "stale_arguments")
+	// errAlreadyDecided: the approval is no longer pending.
+	errAlreadyDecided = newAPIError(http.StatusConflict, "already_decided")
+	errExpired        = newAPIError(http.StatusGone, "expired")
 )
 
 var ocisSentinels = []error{
