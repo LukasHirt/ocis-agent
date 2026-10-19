@@ -927,3 +927,112 @@ func TestMessagesJoinTheirJobsInOneQuery(t *testing.T) {
 		t.Errorf("calls = %d, ids = %d", spy.calls, spy.ids)
 	}
 }
+
+// seedChatJobs adds n ended chat jobs (or jobs of kind) of the user, created
+// now.
+func (s *stack) seedJobs(t *testing.T, user, kind string, n int) {
+	t.Helper()
+	s.mustTx(t, func(tx store.Tx) error {
+		for range n {
+			j, err := tx.InsertJob(store.Job{UserID: user, TriggerKind: kind, Goal: "g"})
+			if err != nil {
+				return err
+			}
+			if err := tx.CancelJob(user, j.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func TestSendMessageDailyCap(t *testing.T) {
+	s := newChatStack(t)
+	c := s.newConv(t, "einstein", "{}")
+	s.seedJobs(t, einsteinID, store.TriggerChat, maxChatJobsPerDay-1)
+	s.seedJobs(t, einsteinID, "sweep", 5) // other kinds do not count
+	s.send(t, "einstein", c.ID, "the last one today")
+	wakes := s.wk.n
+	s.fake.Advance(2 * time.Second)
+	rec := s.as("einstein", http.MethodPost, convPath+"/"+c.ID+"/messages", msgBody("one too many"))
+	wantError(t, rec, http.StatusTooManyRequests, "limit_reached")
+	now := s.fake.Now().UTC()
+	midnight := startOfUTCDay(now).AddDate(0, 0, 1)
+	want := int(midnight.Sub(now).Seconds())
+	if ra, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || ra < want || ra > want+1 {
+		t.Errorf("Retry-After = %q, want ~%d", rec.Header().Get("Retry-After"), want)
+	}
+	if s.wk.n != wakes {
+		t.Error("a refused message woke the queue")
+	}
+	// marie is not affected
+	mc := s.newConv(t, "marie", "{}")
+	s.send(t, "marie", mc.ID, "hi")
+	// the next UTC day counts afresh
+	s.fake.Advance(midnight.Sub(now) + time.Second)
+	s.send(t, "einstein", c.ID, "next day")
+}
+
+func TestSendMessageLiveCapCountsEveryLiveState(t *testing.T) {
+	s := newChatStack(t)
+	c := s.newConv(t, "einstein", "{}")
+	w := s.startJob(t, einsteinID, store.TriggerChat, "waits")
+	s.mustTx(t, func(tx store.Tx) error {
+		_, err := tx.ReleaseJob(w, store.JobWaitingApproval, nil, "")
+		return err
+	})
+	s.startJob(t, einsteinID, store.TriggerChat, "runs")
+	for range 3 {
+		s.queuedJob(t, einsteinID, store.TriggerChat, "queued")
+	}
+	wantError(t, s.as("einstein", http.MethodPost, convPath+"/"+c.ID+"/messages", msgBody("sixth")),
+		http.StatusTooManyRequests, "too_many_pending")
+}
+
+func TestSendMessageLiveCapWinsOverTheBudget(t *testing.T) {
+	s := newChatStack(t)
+	s.mustTx(t, func(tx store.Tx) error {
+		pol, err := tx.GetPolicy(einsteinID)
+		if err != nil {
+			return err
+		}
+		pol.DailyTokens = 1000
+		return tx.PutPolicy(pol)
+	})
+	s.appendStep(t, einsteinID, 600, 400) // budget used up
+	c := s.newConv(t, "einstein", "{}")
+	for range maxLiveChatJobs {
+		s.queuedJob(t, einsteinID, store.TriggerChat, "queued")
+	}
+	wantError(t, s.as("einstein", http.MethodPost, convPath+"/"+c.ID+"/messages", msgBody("x")),
+		http.StatusTooManyRequests, "too_many_pending")
+}
+
+// commitWaker records whether the sent message's job was committed when the
+// queue was woken.
+type commitWaker struct {
+	st        store.Store
+	committed []bool
+}
+
+func (w *commitWaker) Wake() {
+	n := 0
+	_ = w.st.View(bg, func(tx store.Tx) error {
+		var err error
+		n, err = tx.CountJobsInStates(einsteinID, []store.JobState{store.JobQueued}, store.TriggerChat)
+		return err
+	})
+	w.committed = append(w.committed, n == 1)
+}
+
+func TestSendMessageWakesTheQueueAfterTheCommit(t *testing.T) {
+	w := &commitWaker{}
+	s := newStack(t, func(d *Deps) { d.Queue = w })
+	w.st = s.st
+	s.enroll(t, "einstein")
+	c := s.newConv(t, "einstein", "{}")
+	s.send(t, "einstein", c.ID, "hi")
+	if len(w.committed) != 1 || !w.committed[0] {
+		t.Errorf("wakes = %v, want one after the commit", w.committed)
+	}
+}

@@ -31,6 +31,7 @@ const (
 	maxChatMessageBytes = 8192     // the content of a user's message
 	chatMessageMaxBody  = 32 << 10 // POST /conversations/{id}/messages (control characters escape to 6 bytes)
 	maxLiveChatJobs     = 5        // queued, running or waiting_approval chat jobs per user
+	maxChatJobsPerDay   = 1000     // chat jobs a user may start per UTC day (429 limit_reached)
 	maxChatPageLimit    = 100
 	titleFromMessage    = 60 // runes of the first message that name an untitled conversation
 	// pendingRetryAfter is the Retry-After of too_many_pending: a chat job
@@ -40,6 +41,9 @@ const (
 
 // messageCooldown is the per-user pause between two sent messages.
 const messageCooldown = time.Second
+
+// errDailyChatJobs refuses a message over maxChatJobsPerDay.
+var errDailyChatJobs = newAPIError(http.StatusTooManyRequests, "limit_reached")
 
 var liveJobStates = []store.JobState{store.JobQueued, store.JobRunning, store.JobWaitingApproval}
 
@@ -383,10 +387,14 @@ func titleOf(content string) string {
 // sendMessage is POST /agent-api/v1/conversations/{id}/messages with
 // {"content": "..."}. Checks in this order: the user is enrolled (409
 // not_enrolled), the conversation is theirs (404), fewer than
-// maxLiveChatJobs live chat jobs (429 too_many_pending) and today's token
-// budget not used up (429 budget_exhausted until the next UTC midnight).
-// They run in the same transaction that inserts the job and the message, so
-// concurrent sends never exceed the cap. Then the queue is woken once: 202.
+// maxLiveChatJobs live chat jobs (429 too_many_pending), fewer than
+// maxChatJobsPerDay chat jobs started this UTC day (429 limit_reached until
+// the next UTC midnight) and today's token budget not used up (429
+// budget_exhausted until the next UTC midnight). They run in the same
+// transaction that inserts the job and the message, so concurrent sends
+// never exceed the caps. Then, after the commit, the queue is woken once:
+// 202. The per-user cooldown is taken before these checks, so a refused send
+// uses it up too (the next try waits a second).
 // A paused agent or a kill switch does not refuse the message (the job
 // waits; the store does not claim it); the response's agent object says so.
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
@@ -430,6 +438,14 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
 		}
 		if live >= maxLiveChatJobs {
 			return &retryAfter{apiError: errTooManyPending, wait: pendingRetryAfter}
+		}
+		// fast-failing jobs never use up the token budget: cap the jobs too
+		today, err := tx.CountJobsSince(p.UserID, store.TriggerChat, dayStart)
+		if err != nil {
+			return err
+		}
+		if today >= maxChatJobsPerDay {
+			return &retryAfter{apiError: errDailyChatJobs, wait: dayStart.AddDate(0, 0, 1).Sub(now)}
 		}
 		pol, err := tx.GetPolicy(p.UserID)
 		if err != nil {
