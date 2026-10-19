@@ -190,7 +190,8 @@ func runPages2(t *testing.T, f Factory) {
 			if err != nil {
 				return err
 			}
-			if js.State != store.JobCancelled || !js.UpdatedAt.Equal(full.UpdatedAt) {
+			if js.State != store.JobCancelled || !js.UpdatedAt.Equal(full.UpdatedAt) || !js.CreatedAt.Equal(full.CreatedAt) ||
+				js.CreatedAt.Equal(js.UpdatedAt) {
 				return fmt.Errorf("status = %+v, job = %+v", js, full)
 			}
 			if _, err := tx.GetJobStatus("u2", j.ID); !errors.Is(err, store.ErrNotFound) {

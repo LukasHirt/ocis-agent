@@ -87,10 +87,12 @@ type JobSummary struct {
 	StepCount   int
 }
 
-// JobStatus is the light lookup of a job (GetJobStatus): its state and last
-// change, without the checkpoint.
+// JobStatus is the light lookup of a job (GetJobStatus): its state, its
+// creation (the list's page key) and its last change, without the
+// checkpoint.
 type JobStatus struct {
 	State     JobState
+	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 

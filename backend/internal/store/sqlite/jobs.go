@@ -90,16 +90,16 @@ func (t *tx) GetJob(userID, jobID string) (store.Job, error) {
 // GetJobStatus implements store.Tx.
 func (t *tx) GetJobStatus(userID, jobID string) (store.JobStatus, error) {
 	var state string
-	var updated int64
-	err := t.q.QueryRowContext(t.ctx, `SELECT state, updated_at FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
-		Scan(&state, &updated)
+	var created, updated int64
+	err := t.q.QueryRowContext(t.ctx, `SELECT state, created_at, updated_at FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
+		Scan(&state, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.JobStatus{}, store.ErrNotFound
 	}
 	if err != nil {
 		return store.JobStatus{}, err
 	}
-	return store.JobStatus{State: store.JobState(state), UpdatedAt: fromMS(updated)}, nil
+	return store.JobStatus{State: store.JobState(state), CreatedAt: fromMS(created), UpdatedAt: fromMS(updated)}, nil
 }
 
 // keysetBefore returns the condition and arguments of a PageKey over the
