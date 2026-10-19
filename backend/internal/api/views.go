@@ -19,7 +19,7 @@ import (
 // enrolled gets enrolled=false, token.status "none", the global kill_switch
 // flags and the operator's models, and zero values for everything else.
 // pending_approvals counts the pending approvals of LIVE jobs only (they can
-// be decided; at most 500 are counted), while GET /approvals?state=pending
+// be decided; an exact count), while GET /approvals?state=pending
 // also lists those of ended jobs, marked job_ended=true, until the
 // scheduler settles them.
 type statusView struct {

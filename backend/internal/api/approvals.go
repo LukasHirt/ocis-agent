@@ -185,14 +185,14 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	out := approvalPageView{}
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
 		if cursor != "" {
-			a, err := tx.GetApproval(p.UserID, cursor)
+			k, err := tx.GetApprovalKey(p.UserID, cursor) // not GetApproval: no args
 			if errors.Is(err, store.ErrNotFound) {
 				return errBadQuery
 			}
 			if err != nil {
 				return err
 			}
-			f.Before = &store.PageKey{At: a.RequestedAt, ID: a.ID}
+			f.Before = &k
 		}
 		list, err := tx.ListApprovals(p.UserID, f)
 		if err != nil {

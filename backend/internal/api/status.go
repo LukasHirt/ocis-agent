@@ -9,10 +9,6 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
-// maxPendingScan bounds the pending approvals status counts (the store's
-// ListApprovals maximum); a count at this value means "at least".
-const maxPendingScan = 500
-
 // getStatus is GET /agent-api/v1/status.
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
@@ -85,7 +81,8 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 
 		v.Models = s.modelsView(pol)
 
-		v.PendingApprovals, err = pendingOfLiveJobs(tx, p.UserID)
+		// the decidable ones: pending approvals of jobs that have not ended
+		v.PendingApprovals, err = tx.CountPendingOfLiveJobs(p.UserID)
 		return err
 	})
 	if err != nil {
@@ -114,36 +111,6 @@ func (s *Server) modelsView(pol store.Policy) modelsView {
 	}
 	mv.Preferences = preferencesView{Chat: pref(store.ModelTaskChat), Proactive: pref(store.ModelTaskProactive)}
 	return mv
-}
-
-// pendingOfLiveJobs counts the user's pending approvals whose job has not
-// ended (queued, running or waiting_approval). Approvals of an ended job
-// stay pending until the scheduler settles them; they cannot be decided.
-func pendingOfLiveJobs(tx store.Tx, userID string) (int, error) {
-	list, err := tx.ListApprovals(userID, store.ApprovalFilter{States: []store.ApprovalState{store.ApprovalPending}, Limit: maxPendingScan})
-	if err != nil {
-		return 0, err
-	}
-	live := map[string]bool{}
-	n := 0
-	for _, a := range list {
-		ok, seen := live[a.JobID]
-		if !seen {
-			j, err := tx.GetJobStatus(userID, a.JobID)
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-			case err != nil:
-				return 0, err
-			default:
-				ok = !j.State.Terminal()
-			}
-			live[a.JobID] = ok
-		}
-		if ok {
-			n++
-		}
-	}
-	return n, nil
 }
 
 // startOfUTCDay is the UTC midnight at or before t (the budget day, as the

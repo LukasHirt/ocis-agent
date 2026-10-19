@@ -564,6 +564,10 @@ func (spyTx) GetJob(string, string) (store.Job, error) {
 	return store.Job{}, errors.New("spy: GetJob reads the checkpoint")
 }
 
+func (spyTx) GetApproval(string, string) (store.Approval, error) {
+	return store.Approval{}, errors.New("spy: GetApproval loads the args")
+}
+
 func (spyTx) ListSteps(string, string) ([]store.JobStep, error) {
 	return nil, errors.New("spy: ListSteps per job")
 }
@@ -599,19 +603,20 @@ func TestListsLoadNoCheckpointsAndFetchBounded(t *testing.T) {
 	}
 	s.listJobs(t, "einstein", "?limit=200&cursor="+*p.NextCursor)
 	s.listJobs(t, "einstein", "")
-	s.listApprovals(t, "einstein", "?limit=100&state=all")
+	ap := s.listApprovals(t, "einstein", "?limit=1&state=all")
+	s.listApprovals(t, "einstein", "?limit=100&state=all&cursor="+*ap.NextCursor)
 	s.listApprovals(t, "einstein", "")
-	// the status counts pending approvals of live jobs without GetJob too
+	// the status counts pending approvals of live jobs with one COUNT
 	if rec := s.as("einstein", http.MethodGet, "/agent-api/v1/status", ""); rec.Code != 200 {
 		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
 	}
 	spy.mu.Lock()
 	defer spy.mu.Unlock()
-	if fmt.Sprint(spy.jobLimits) != "[3 201 51]" || fmt.Sprint(spy.apLimits) != "[101 51 500]" {
+	if fmt.Sprint(spy.jobLimits) != "[3 201 51]" || fmt.Sprint(spy.apLimits) != "[2 101 51]" {
 		t.Errorf("fetch limits: jobs %v approvals %v", spy.jobLimits, spy.apLimits)
 	}
 	// approval pages fetch within the response's byte budget
-	if fmt.Sprint(spy.apBudgets[:2]) != fmt.Sprint([]int64{maxListBytes, maxListBytes}) {
+	if fmt.Sprint(spy.apBudgets) != fmt.Sprint([]int64{maxListBytes, maxListBytes, maxListBytes}) {
 		t.Errorf("approval byte budgets = %v", spy.apBudgets)
 	}
 }
