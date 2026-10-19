@@ -254,13 +254,13 @@ func runPages2(t *testing.T, f Factory) {
 	t.Run("a multi-page walk sees every row once while rows change", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u1")
+		// all rows on ONE created_at: the order is the id alone, so a cursor
+		// that compared only the time (col < ?) would end the walk early
 		var want []string // newest first
 		for i := range 10 {
 			want = append([]string{addJob(t, st, "u1", fmt.Sprint(i)).ID}, want...)
-			if i%3 == 0 {
-				clk.Advance(time.Second) // some share a created_at
-			}
 		}
+		want = jobIDs(listJobs(t, st, "u1", store.JobFilter{})) // the store's order (id DESC)
 		var seen []string
 		var before *store.PageKey
 		for page := 0; ; page++ {
@@ -297,19 +297,48 @@ func runPages2(t *testing.T, f Factory) {
 			t.Errorf("walk = %v, want %v", seen, want)
 		}
 
-		st, clk = open(t, f) // a fresh store: claiming must find u2's job
-		c := runningFor(t, st, "u2")
-		var wantA []string
-		for i := range 7 {
-			wantA = append([]string{putApproval(t, st, c, approvalFor(c, clk, fmt.Sprint(i))).ID}, wantA...)
-			if i%2 == 0 {
-				clk.Advance(time.Second)
+		// a state filter whose cursor row leaves the filter between pages:
+		// queued jobs, the last of every page is cancelled before the next
+		st, clk = open(t, f)
+		mustUser(t, st, "u1")
+		for i := range 9 {
+			addJob(t, st, "u1", fmt.Sprint(i))
+		}
+		queued := []store.JobState{store.JobQueued}
+		wantQ := jobIDs(listJobs(t, st, "u1", store.JobFilter{States: queued}))
+		var seenQ []string
+		var beforeQ *store.PageKey
+		for page := 0; ; page++ {
+			list := listSummaries(t, st, "u1", store.JobFilter{States: queued, Limit: 2, Before: beforeQ})
+			if len(list) == 0 {
+				break
+			}
+			for _, j := range list {
+				seenQ = append(seenQ, j.ID)
+			}
+			last := list[len(list)-1]
+			beforeQ = &store.PageKey{At: last.CreatedAt, ID: last.ID}
+			mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", last.ID) })
+			if page > 10 {
+				t.Fatal("the filtered walk does not end")
 			}
 		}
+		if !equal(seenQ, wantQ) {
+			t.Errorf("filtered walk = %v, want %v", seenQ, wantQ)
+		}
+
+		st, clk = open(t, f) // a fresh store: claiming must find u2's job
+		c := runningFor(t, st, "u2")
+		for i := range 7 { // one requested_at for all
+			putApproval(t, st, c, approvalFor(c, clk, fmt.Sprint(i)))
+		}
+		pending := []store.ApprovalState{store.ApprovalPending}
+		wantA := approvalIDs(listApprovalsF(t, st, "u2", store.ApprovalFilter{States: pending}))
 		var seenA []string
 		var beforeA *store.PageKey
 		for page := 0; ; page++ {
-			list := listApprovalsF(t, st, "u2", store.ApprovalFilter{Limit: 2, Before: beforeA})
+			// pending only: the cursor row is decided (leaves the filter) before the next page
+			list := listApprovalsF(t, st, "u2", store.ApprovalFilter{States: pending, Limit: 2, Before: beforeA})
 			if len(list) == 0 {
 				break
 			}
