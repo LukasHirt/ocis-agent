@@ -16,6 +16,10 @@
 
     <section class="agent-pending" aria-labelledby="agent-pending-h">
       <h2 id="agent-pending-h" v-text="$gettext('Waiting for your decision')" />
+      <p v-if="job" class="agent-approvals-filter">
+        <span v-text="$gettext('Showing the approvals of one task.')" />
+        <router-link :to="{ name: `${APPID}-approvals` }" v-text="$gettext('Show all approvals')" />
+      </p>
       <div v-if="store.errors.approvals" class="agent-approvals-error">
         <p role="alert" v-text="store.errors.approvals" />
         <oc-button
@@ -24,20 +28,26 @@
           v-text="$gettext('Try again')"
         />
       </div>
-      <oc-spinner v-if="!loaded" :aria-label="$gettext('Loading the approvals')" />
+      <div v-if="job && jobError" class="agent-approvals-job-error">
+        <p role="alert" v-text="jobError" />
+        <oc-button :disabled="jobLoading" @click="loadJob" v-text="$gettext('Try again')" />
+      </div>
+      <oc-spinner v-if="!shownLoaded" :aria-label="$gettext('Loading the approvals')" />
       <template v-else>
         <p
-          v-if="groups.length === 0 && !store.errors.approvals"
+          v-if="groups.length === 0 && !store.errors.approvals && !(job && (jobError || !jobComplete))"
           class="agent-approvals-empty"
           v-text="
-            verify.length > 0
-              ? $gettext('No other actions are waiting for your decision')
-              : $gettext('Nothing needs your approval')
+            job
+              ? $gettext('Nothing of this task needs your approval')
+              : verify.length > 0
+                ? $gettext('No other actions are waiting for your decision')
+                : $gettext('Nothing needs your approval')
           "
         />
         <JobGroup v-for="g in groups" :key="g.jobId" :job-id="g.jobId" :items="g.items" :goal="goals[g.jobId]" />
         <p
-          v-if="!store.approvals.complete"
+          v-if="job ? !jobComplete : !store.approvals.complete"
           class="agent-approvals-more"
           v-text="$gettext('More approvals are waiting than are shown here. Decide these to see the rest.')"
         />
@@ -88,6 +98,10 @@ import type { Approval, ApprovalState } from '../api/types'
 import ApprovalCard from './approvals/ApprovalCard.vue'
 import JobGroup from './approvals/JobGroup.vue'
 import { provideDecisions } from './approvals/decisions'
+import { APPID } from '../appid'
+
+// job (the route's ?job=) shows only that job's pending approvals.
+const props = defineProps<{ job?: string }>()
 
 // HISTORY_PAGE is the page size of the history and of the scan for
 // settled actions that need verification.
@@ -132,9 +146,76 @@ watch(
   }
 )
 
+// With a job filter the job's approvals are read with the API's job_id
+// filter (the inbox list may be cut off), again whenever the inbox list
+// changes; null until the first read answered.
+const JOB_PAGE = 100
+const JOB_MAX_PAGES = 10
+const jobList = ref<Approval[] | null>(null)
+const jobComplete = ref(false)
+const jobError = ref<string | null>(null)
+const jobLoading = ref(false)
+let jobAgain = false
+
+const loadJob = async () => {
+  const job = props.job
+  if (!job) return
+  if (jobLoading.value) {
+    jobAgain = true
+    return
+  }
+  jobLoading.value = true
+  try {
+    const out: Approval[] = []
+    let cursor: string | undefined
+    let complete = false
+    for (let i = 0; i < JOB_MAX_PAGES; i++) {
+      const page = await client.listApprovals({ jobId: job, limit: JOB_PAGE, cursor }, abort.signal)
+      out.push(...(Array.isArray(page?.approvals) ? page.approvals : []))
+      if (typeof page?.next_cursor !== 'string' || page.next_cursor === '') {
+        complete = true
+        break
+      }
+      cursor = page.next_cursor
+    }
+    if (props.job === job) {
+      jobList.value = out.filter((a) => a.job_id === job)
+      jobComplete.value = complete
+      jobError.value = null
+    }
+  } catch (e) {
+    if (!isAbortError(e) && props.job === job) jobError.value = describeError(e, $gettext)
+  } finally {
+    jobLoading.value = false
+  }
+  if (jobAgain) {
+    jobAgain = false
+    void loadJob()
+  }
+}
+
+watch(
+  () => props.job,
+  () => {
+    jobList.value = null
+    jobComplete.value = false
+    jobError.value = null
+    void loadJob()
+  },
+  { immediate: true }
+)
+watch(
+  () => store.approvals,
+  () => {
+    if (props.job) void loadJob()
+  }
+)
+
+const shownLoaded = computed(() => (props.job ? jobList.value !== null || jobError.value !== null : loaded.value))
+
 const groups = computed(() => {
   const byJob = new Map<string, Approval[]>()
-  for (const a of store.approvals.pending) {
+  for (const a of props.job ? (jobList.value ?? []) : store.approvals.pending) {
     const list = byJob.get(a.job_id)
     if (list) list.push(a)
     else byJob.set(a.job_id, [a])

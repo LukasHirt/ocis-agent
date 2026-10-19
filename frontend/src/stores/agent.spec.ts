@@ -690,6 +690,60 @@ describe('useAgentStore', () => {
     expect(s.server.count('GET /status')).toBe(1)
   })
 
+  it('tells subscribers about changes, full refreshes and session ends', async () => {
+    const s = (current = setup())
+    const seen: unknown[] = []
+    const off = s.store.subscribe((e) => {
+      seen.push(e)
+    })
+    s.start()
+    await flush()
+    const first = s.store.session()
+    expect(first).not.toBeNull()
+    expect(first!.client).toBeDefined()
+    expect(first!.gettext('x')).toBe('x')
+    expect(first!.platform).toBe(s.platform)
+    await s.events.made.opts!.onChanged(['messages', 'jobs'])
+    // full refreshes are deferred by the fake timers: do not wait for them
+    void s.events.made.opts!.onReady()
+    void s.events.made.opts!.onPoll()
+    await flush()
+    expect(seen).toEqual([
+      { type: 'changed', kinds: ['messages', 'jobs'] },
+      { type: 'refresh', fresh: true },
+      { type: 'refresh', fresh: false }
+    ])
+    s.store.stop()
+    expect(seen.at(-1)).toEqual({ type: 'reset' })
+    expect(s.store.session()).toBeNull()
+    s.start()
+    expect(s.store.session()).not.toBe(first)
+    off()
+    seen.length = 0
+    await s.events.made.opts!.onChanged(['messages'])
+    expect(seen).toEqual([])
+  })
+
+  it('a failing subscriber does not stop the others or the store', async () => {
+    const s = (current = setup())
+    const seen: string[] = []
+    s.store.subscribe(() => {
+      throw new Error('boom')
+    })
+    s.store.subscribe(async () => {
+      throw new Error('async boom')
+    })
+    s.store.subscribe((e) => {
+      seen.push(e.type)
+    })
+    s.start()
+    await flush()
+    await s.events.made.opts!.onChanged(['jobs'])
+    await flush()
+    expect(seen).toEqual(['changed'])
+    expect(s.store.error).toBeNull()
+  })
+
   it('refreshes do nothing before start', async () => {
     const s = (current = setup())
     await s.store.refreshAll()

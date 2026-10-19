@@ -8,6 +8,7 @@ declare module 'vue' {
     OcIcon: any
     OcSpinner: any
     OcTextInput: any
+    OcTextarea: any
     OcSelect: any
     OcCheckbox: any
     OcSwitch: any

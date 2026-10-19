@@ -582,3 +582,119 @@ describe('createClient: responses and errors', () => {
     }
   })
 })
+
+describe('createClient: audit export', () => {
+  const ndjson = (body: BodyInit | null, headers: Record<string, string> = {}) =>
+    new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+        'Content-Disposition': 'attachment; filename="audit-0a1b2c3d.jsonl"',
+        ...headers
+      }
+    })
+
+  // a body delivered in the given chunks, then optionally failing
+  const chunked = (chunks: string[], fail = false) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        for (const s of chunks) c.enqueue(new TextEncoder().encode(s))
+        if (fail) c.error(new Error('connection reset SECRET-DETAIL'))
+        else c.close()
+      }
+    })
+
+  it('downloads with the bearer in the Authorization header and never in the URL', async () => {
+    const { client, calls, headersOf } = setup([ndjson('{"seq":1}\n{"seq":2}\n')])
+    const got = await client.exportAudit()
+    const [url, init] = calls()[0]
+    expect(url).toBe('/agent-api/v1/audit/export')
+    expect(String(url)).not.toContain('test-token')
+    expect(String(url)).not.toContain('?')
+    expect(init?.method).toBe('GET')
+    expect(headersOf().Authorization).toBe('Bearer test-token')
+    expect(headersOf().Accept).toBe('application/x-ndjson')
+    expect(got.filename).toBe('audit-0a1b2c3d.jsonl')
+    expect(got.bytes).toBe(20)
+    expect(got.blob.type).toBe('application/x-ndjson')
+    expect(await got.blob.text()).toBe('{"seq":1}\n{"seq":2}\n')
+  })
+
+  it('reports the bytes received so far', async () => {
+    const { client } = setup([ndjson(chunked(['{"seq":1}\n', '{"seq":2}\n']))])
+    const seen: number[] = []
+    await client.exportAudit((n) => seen.push(n))
+    expect(seen).toEqual([10, 20])
+  })
+
+  it.each([
+    ['missing', undefined],
+    ['a path', 'attachment; filename="../../etc/passwd"'],
+    ['another name', 'attachment; filename="evil.html"']
+  ])('falls back to a fixed file name when the header is %s', async (_n, cd) => {
+    const res = new Response('', { status: 200, headers: cd ? { 'Content-Disposition': cd } : {} })
+    const { client } = setup([res])
+    expect((await client.exportAudit()).filename).toBe('audit.jsonl')
+  })
+
+  it('accepts an empty log', async () => {
+    const { client } = setup([ndjson('')])
+    const got = await client.exportAudit()
+    expect(got.bytes).toBe(0)
+  })
+
+  it('treats a transfer that breaks off as unavailable, never as a short file', async () => {
+    const { client } = setup([ndjson(chunked(['{"seq":1}\n'], true))])
+    const e = (await caught(client.exportAudit())) as ApiError
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.code).toBe('unavailable')
+    expect(JSON.stringify({ m: e.message, e })).not.toContain('SECRET-DETAIL')
+  })
+
+  it('accepts empty chunks after the last line', async () => {
+    const { client } = setup([ndjson(chunked(['{"seq":1}\n', '', '']))])
+    const got = await client.exportAudit()
+    expect(got.bytes).toBe(10)
+    expect(await got.blob.text()).toBe('{"seq":1}\n')
+  })
+
+  it('treats a body that does not end with a whole line as unavailable', async () => {
+    const { client } = setup([ndjson('{"seq":1}\n{"se')])
+    const e = (await caught(client.exportAudit())) as ApiError
+    expect(e.code).toBe('unavailable')
+  })
+
+  it('passes 429 with its Retry-After on', async () => {
+    const { client } = setup([json(429, errorBody('rate_limited'), { 'Retry-After': '5' })])
+    const e = (await caught(client.exportAudit())) as ApiError
+    expect(e.status).toBe(429)
+    expect(e.retryAfter).toBe(5)
+  })
+
+  it('stops with an AbortError when the caller aborts during the transfer', async () => {
+    const c = new AbortController()
+    let push!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(ctl) {
+        push = ctl
+      }
+    })
+    const { client } = setup([ndjson(body)])
+    const p = client.exportAudit(() => c.abort(), c.signal)
+    await Promise.resolve()
+    push.enqueue(new TextEncoder().encode('{"seq":1}\n'))
+    const e = await caught(p)
+    expect((e as DOMException).name).toBe('AbortError')
+  })
+
+  it('is not cut off by the short request deadline', async () => {
+    const platform = makePlatform()
+    platform.fetch.mockImplementation(async (_u, init) => {
+      await new Promise((r) => setTimeout(r, 60))
+      if (init?.signal?.aborted) throw init.signal.reason
+      return ndjson('{"seq":1}\n')
+    })
+    const client = createClient(platform, { timeoutMs: 20 })
+    expect((await client.exportAudit()).bytes).toBe(10)
+  })
+})
