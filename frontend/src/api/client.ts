@@ -32,6 +32,11 @@ export const REQUEST_TIMEOUT_MS = 30_000
 // checking every TOKEN_POLL_MS, and retries once with the new one.
 export const TOKEN_WAIT_MS = 3_000
 export const TOKEN_POLL_MS = 200
+// The deadline of the audit export: the server streams it for up to five
+// minutes.
+export const EXPORT_TIMEOUT_MS = 6 * 60_000
+// The file name of an export whose response names none the client accepts.
+export const EXPORT_FALLBACK_NAME = 'audit.jsonl'
 
 export interface ClientOptions {
   timeoutMs?: number // the per-request deadline, default REQUEST_TIMEOUT_MS
@@ -58,6 +63,13 @@ export interface AuditListParams extends PageParams {
 }
 
 export type ResumeReason = 'user' | 'token_anomaly'
+
+// AuditExport is the downloaded audit log: NDJSON, one record per line.
+export interface AuditExport {
+  blob: Blob
+  filename: string
+  bytes: number
+}
 
 export interface ApiClient {
   getStatus(signal?: AbortSignal): Promise<Status>
@@ -91,6 +103,11 @@ export interface ApiClient {
   createMemory(name: string, content: string, signal?: AbortSignal): Promise<MemoryEdit>
   listAudit(params?: AuditListParams, signal?: AbortSignal): Promise<AuditPage>
   verifyAudit(signal?: AbortSignal): Promise<AuditVerify>
+  // exportAudit downloads the whole audit log (with the bearer in the
+  // Authorization header, never in the URL). onProgress gets the bytes
+  // received so far; a transfer that breaks off is an error, never a
+  // short file.
+  exportAudit(onProgress?: (bytes: number) => void, signal?: AbortSignal): Promise<AuditExport>
   // openEvents opens GET /events and returns the response with its body
   // unread (the event-stream client parses it). No default timeout.
   openEvents(signal: AbortSignal): Promise<Response>
@@ -327,12 +344,12 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
 
   // send makes the request (and the one 401 retry) and returns a 2xx
   // response; anything else is thrown as an ApiError.
-  const send = async (req: Req, accept: string, timeout: boolean): Promise<Response> => {
+  const send = async (req: Req, accept: string, timeout: number | false): Promise<Response> => {
     throwIfAborted(req.signal)
     const token = platform.getToken()
     if (!token) throw new ApiError(401, 'unauthenticated')
     const body = req.body === undefined ? undefined : JSON.stringify(req.body)
-    const signalOf = () => (timeout ? withTimeout(req.signal, timeoutMs) : req.signal)
+    const signalOf = () => (timeout === false ? req.signal : withTimeout(req.signal, timeout))
 
     let res = await fetchOnce(req, body, token, accept, signalOf())
     if (res.status === 401) {
@@ -350,7 +367,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
   }
 
   const call = async <T>(req: Req): Promise<T> => {
-    const res = await send(req, 'application/json', true)
+    const res = await send(req, 'application/json', timeoutMs)
     if (res.status === 204) {
       discard(res)
       return undefined as T
@@ -364,6 +381,56 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
     }
     if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new ApiError(502, 'internal')
     return v as T
+  }
+
+  // readExport reads the export body in chunks, reporting progress. The
+  // server aborts the connection on a failure, so a body that breaks off or
+  // does not end with a whole line is an error.
+  const readExport = async (
+    res: Response,
+    onProgress: ((bytes: number) => void) | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<{ parts: Uint8Array[]; bytes: number }> => {
+    const parts: Uint8Array[] = []
+    let bytes = 0
+    try {
+      if (res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader()
+        const onAbort = () => {
+          reader.cancel().catch(() => {})
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+        try {
+          for (;;) {
+            throwIfAborted(signal)
+            const { done, value } = await reader.read()
+            if (done) break
+            parts.push(value)
+            bytes += value.byteLength
+            onProgress?.(bytes)
+          }
+        } finally {
+          signal?.removeEventListener('abort', onAbort)
+        }
+      } else {
+        const buf = new Uint8Array(await res.arrayBuffer())
+        parts.push(buf)
+        bytes = buf.byteLength
+        onProgress?.(bytes)
+      }
+    } catch {
+      throwIfAborted(signal)
+      throw new ApiError(0, 'unavailable')
+    }
+    throwIfAborted(signal)
+    const last = parts.length > 0 ? parts[parts.length - 1] : undefined
+    if (bytes > 0 && (last === undefined || last[last.length - 1] !== 0x0a)) throw new ApiError(0, 'unavailable')
+    return { parts, bytes }
+  }
+
+  const exportName = (res: Response): string => {
+    const m = /^attachment; filename="(audit-[0-9a-f]{8}\.jsonl)"$/.exec(res.headers.get('Content-Disposition') ?? '')
+    return m ? m[1] : EXPORT_FALLBACK_NAME
   }
 
   const get = <T>(path: string, signal?: AbortSignal) => call<T>({ method: 'GET', path, signal })
@@ -476,6 +543,12 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
         signal
       ),
     verifyAudit: (signal) => get('/audit/verify', signal),
+    exportAudit: async (onProgress, signal) => {
+      const req: Req = { method: 'GET', path: '/audit/export', signal }
+      const res = await send(req, 'application/x-ndjson', EXPORT_TIMEOUT_MS)
+      const { parts, bytes } = await readExport(res, onProgress, signal)
+      return { blob: new Blob(parts as BlobPart[], { type: 'application/x-ndjson' }), filename: exportName(res), bytes }
+    },
     openEvents: (signal) => send({ method: 'GET', path: '/events', signal }, 'text/event-stream', false)
   }
 }

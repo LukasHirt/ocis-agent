@@ -21,7 +21,7 @@ describe('buildRoutes', () => {
     }
   })
 
-  it('has the approvals inbox, the chat, the tasks and the settings as children of the layout', () => {
+  it('has the approvals inbox, the chat, the tasks, the activity and the settings as children of the layout', () => {
     const [root] = buildRoutes(gettext, layout)
     const children = (root.children ?? []).map((c) => [c.path, c.name, c.meta?.title])
     // the host prefixes the names with the app id (agent-approvals, agent-settings)
@@ -31,6 +31,7 @@ describe('buildRoutes', () => {
       ['chat/:id', 'chat-conversation', 'Chat'],
       ['tasks', 'tasks', 'Tasks'],
       ['tasks/:id', 'tasks-job', 'Tasks'],
+      ['activity', 'activity', 'Activity'],
       ['settings', 'settings', 'Settings']
     ])
     for (const child of root.children ?? []) {
@@ -56,13 +57,14 @@ describe('buildRoutes', () => {
 })
 
 describe('buildNavItems', () => {
-  it('links the approvals, the chat, the tasks and the settings, without a badge', () => {
+  it('links the approvals, the chat, the tasks, the activity and the settings, without a badge', () => {
     let user = false
     const items = buildNavItems(gettext, () => user)
     expect(items.map((i) => [i.name, i.icon, i.route])).toEqual([
       ['Approvals', 'checkbox-circle', { path: `/${APPID}/approvals` }],
       ['Chat', 'chat-3', { path: `/${APPID}/chat` }],
       ['Tasks', 'task', { path: `/${APPID}/tasks` }],
+      ['Activity', 'history', { path: `/${APPID}/activity` }],
       ['Settings', 'settings-4', { path: `/${APPID}/settings` }]
     ])
     expect(items.every((i) => i.isVisible?.() === false)).toBe(true)

@@ -55,6 +55,12 @@ export const buildRoutes = (
         meta: { authContext: 'user', title: gettext('Tasks') }
       },
       {
+        path: 'activity',
+        name: 'activity',
+        component: () => import('./views/Activity.vue'),
+        meta: { authContext: 'user', title: gettext('Activity') }
+      },
+      {
         path: 'settings',
         name: 'settings',
         component: () => import('./views/Settings.vue'),
@@ -90,6 +96,13 @@ export const buildNavItems = (
     route: { path: `/${APPID}/tasks` },
     isVisible,
     priority: 17
+  },
+  {
+    name: gettext('Activity'),
+    icon: 'history',
+    route: { path: `/${APPID}/activity` },
+    isVisible,
+    priority: 18
   },
   {
     name: gettext('Settings'),
