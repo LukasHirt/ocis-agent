@@ -8,8 +8,21 @@
       </template>
       <oc-spinner v-else :aria-label="$gettext('Loading the agent')" />
     </div>
-    <Enrol v-else-if="!store.status.enrolled" />
-    <router-view v-else />
+    <template v-else>
+      <div v-if="store.errors.status" class="agent-layout-stale" role="alert">
+        <oc-icon name="error-warning" size="small" />
+        <span v-text="store.errors.status" />
+        <span v-text="$gettext('What is shown may be out of date.')" />
+        <oc-button
+          size="small"
+          :disabled="store.loading.status"
+          @click="store.refreshStatus()"
+          v-text="$gettext('Try again')"
+        />
+      </div>
+      <Enrol v-if="!store.status.enrolled" />
+      <router-view v-else />
+    </template>
   </div>
 </template>
 
@@ -34,6 +47,15 @@ onBeforeUnmount(() => store.stop())
 </script>
 
 <style>
+.agent-layout-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  font-size: 0.85em;
+  margin: 0 0 0.5rem;
+  color: var(--oc-color-swatch-danger-default, #b00020);
+}
 .agent-layout-loading {
   display: flex;
   flex-direction: column;

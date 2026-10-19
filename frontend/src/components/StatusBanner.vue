@@ -42,6 +42,7 @@ import { useAgentStore } from '../stores/agent'
 import { usePlatform } from '../platform'
 import { describeError } from '../api/errors'
 import { bannerOf, connectionNoteOf, utcTime, type BannerKind } from '../util/banner'
+import { formatTime } from '../util/format'
 
 // StatusBanner shows the single most severe state of the agent (text and
 // icon, never colour alone) and a small note while live updates are down.
@@ -79,12 +80,17 @@ const views: Record<BannerKind, () => { severity: Severity; icon: string; text: 
     text: $gettext('Paused because you were away; it resumes when you visit')
   }),
   budget: () => {
-    const time = utcTime(store.status?.budget?.resets_at ?? null)
+    // resets_at is always the next UTC midnight
+    const at = store.status?.budget?.resets_at ?? null
+    const time = utcTime(at)
     return {
       severity: 'warning',
       icon: 'hourglass',
       text: time
-        ? interpolate($gettext('Daily token budget used up; the agent continues after %{time} UTC'), { time })
+        ? interpolate(
+            $gettext('Daily token budget used up; the agent continues tomorrow at %{time} UTC (%{local} your time)'),
+            { time, local: formatTime(at as string) }
+          )
         : $gettext('Daily token budget used up; the agent continues tomorrow')
     }
   }

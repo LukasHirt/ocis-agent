@@ -7,6 +7,7 @@ import { makePlatform } from '../test/platform'
 import { statusOf } from '../test/fixtures'
 import { ApiError } from '../api/errors'
 import type { Status } from '../api/types'
+import { formatTime } from '../util/format'
 
 const mountWith = (status: Status | null, connection: 'streaming' | 'polling' | 'offline' = 'streaming') => {
   const store = useAgentStore()
@@ -100,7 +101,14 @@ describe('StatusBanner', () => {
     const { w } = mountWith(
       statusOf({ budget: { used_tokens: 5, daily_tokens: 5, resets_at: '2026-01-02T00:00:00Z' } })
     )
-    expect(banner(w).text()).toContain('Daily token budget used up; the agent continues after 00:00 UTC')
+    const text = banner(w).text()
+    expect(text).toContain('Daily token budget used up; the agent continues tomorrow at 00:00 UTC')
+    expect(text).toContain(`(${formatTime('2026-01-02T00:00:00Z')} your time)`)
+  })
+
+  it('shows the budget without a reset time', () => {
+    const { w } = mountWith(statusOf({ budget: { used_tokens: 5, daily_tokens: 5, resets_at: null } }))
+    expect(banner(w).text()).toContain('Daily token budget used up; the agent continues tomorrow')
   })
 
   it('adds a small connection note next to a banner', () => {

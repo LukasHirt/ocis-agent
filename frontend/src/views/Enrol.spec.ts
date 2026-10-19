@@ -14,8 +14,13 @@ describe('Enrol', () => {
     const w = mount(Enrol)
     const text = w.text()
     expect(text).toContain('app token')
+    expect(text).toContain('whatever you can')
     expect(text).toContain('personal space')
     expect(text).toContain('approve')
+    expect(text).toContain('revoke')
+    // the token is not limited to one space; only the agent is
+    expect(text).not.toContain('full access to your own space')
+    expect(text).not.toMatch(/never in other spaces/)
     expect(enableButton(w).exists()).toBe(true)
   })
 

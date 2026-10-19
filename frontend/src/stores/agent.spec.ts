@@ -456,6 +456,80 @@ describe('useAgentStore', () => {
     expect(s.store.status).toBeNull()
   })
 
+  it('a ready during a full refresh queues one more full refresh', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let statusCalls = 0
+    const s = (current = setup(
+      defaultHandlers({
+        'GET /status': async (): Promise<Response> => {
+          const n = ++statusCalls
+          if (n === 1) await gate
+          return json(statusOf({ pending_approvals: n }))
+        }
+      })
+    ))
+    s.start() // the start refresh, held at the status
+    await flush()
+    const r1 = s.events.made.opts!.onReady()
+    const r2 = s.events.made.opts!.onReady()
+    s.advance(FULL_REFRESH_MIN_MS)
+    release()
+    await flush()
+    s.timers.fire() // in case the follow-up was deferred
+    await Promise.all([r1, r2])
+    await flush()
+    expect(s.server.count('GET /status')).toBe(2) // one coalesced follow-up
+    expect(s.store.status?.pending_approvals).toBe(2)
+  })
+
+  it('a poll during a full refresh reuses it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const s = (current = setup(
+      defaultHandlers({
+        'GET /status': async () => {
+          await gate
+          return json(statusOf())
+        }
+      })
+    ))
+    s.start()
+    await flush()
+    const p = s.events.made.opts!.onPoll()
+    release()
+    await p
+    await flush()
+    expect(s.server.count('GET /status')).toBe(1)
+  })
+
+  it('stop clears the data, and a new start begins from scratch', async () => {
+    let fail = true
+    const s = (current = setup(
+      defaultHandlers({ 'GET /settings': () => (fail ? apiErr(500, 'internal') : json(settingsOf())) })
+    ))
+    s.start()
+    await flush()
+    expect(s.store.status).not.toBeNull()
+    expect(s.store.errors.settings).not.toBeNull()
+    s.store.stop()
+    expect(s.store.status).toBeNull()
+    expect(s.store.settings).toBeNull()
+    expect(s.store.approvals.pending).toEqual([])
+    expect(s.store.approvals.counts).toEqual({ pending: 0, live: 0, verify: 0 })
+    expect(s.store.errors).toEqual({ status: null, approvals: null, settings: null })
+    expect(s.store.lastRefreshed).toBeNull()
+    fail = false
+    s.start()
+    expect(s.store.status).toBeNull() // nothing of the previous session shows
+    await flush()
+    expect(s.store.status?.enrolled).toBe(true)
+    expect(s.store.settings).not.toBeNull()
+    expect(s.store.error).toBeNull()
+    // the rate limit of the old session does not delay the new one
+    expect(s.server.count('GET /status')).toBe(2)
+  })
+
   it('stop cancels a deferred full refresh', async () => {
     const s = (current = setup())
     s.start()

@@ -86,6 +86,54 @@ describe('Layout', () => {
     wrapper = undefined
     expect(stop).toHaveBeenCalledTimes(1)
     const status: Status | null = store.status
-    expect(status?.enrolled).toBe(true)
+    expect(status).toBeNull() // nothing stale for the next mount
+  })
+})
+
+describe('Layout after the first load', () => {
+  it('shows a non-blocking error with a retry when a status refresh fails', async () => {
+    let fail = false
+    const w = mountLayout(serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf()))))
+    await flushPromises()
+    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    fail = true
+    const store = useAgentStore()
+    await store.refreshStatus()
+    await flushPromises()
+    const line = w.find('.agent-layout-stale')
+    expect(line.attributes('role')).toBe('alert')
+    expect(line.text()).toContain('The agent service is not reachable right now. Try again later.')
+    expect(line.text()).toContain('may be out of date')
+    expect(w.find('.host-rv').exists()).toBe(true) // the page stays
+    fail = false
+    await line.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
+    await flushPromises()
+    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+  })
+
+  it('Reconnect enrols again and clears the credential pause', async () => {
+    let paused = true
+    const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const path = new URL(String(input), 'https://ocis.test').pathname.replace('/agent-api/v1', '')
+      if (path === '/enroll' && init.method === 'POST') {
+        paused = false
+        return json(statusOf())
+      }
+      if (path === '/status')
+        return json(paused ? statusOf({ paused: true, pause_reason: 'credential_revoked' }) : statusOf())
+      if (path === '/settings') return json(settingsOf())
+      if (path === '/approvals') return json({ approvals: [], next_cursor: null })
+      return apiErr(503, 'unavailable')
+    })
+    const w = mountLayout(fetch)
+    await flushPromises()
+    expect(w.find('.agent-banner').text()).toContain('Reconnect needed')
+    await w.find('.agent-banner button').trigger('click')
+    await flushPromises()
+    expect(fetch.mock.calls.some(([u, i]) => String(u).endsWith('/enroll') && i?.method === 'POST')).toBe(true)
+    expect(w.find('.agent-banner').exists()).toBe(false)
+    await useAgentStore().refreshStatus()
+    await flushPromises()
+    expect(w.find('.agent-banner').exists()).toBe(false)
   })
 })

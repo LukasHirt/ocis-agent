@@ -107,6 +107,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   // newer than a refresh that began before it)
   const writes: Record<Resource, number> = { status: 0, approvals: 0, settings: 0 }
   let fullInflight: Promise<void> | null = null
+  let fullQueued: Promise<void> | null = null
   let lastFull = -Infinity
   let deferred: { handle: unknown; promise: Promise<void>; resolve: () => void } | null = null
 
@@ -211,10 +212,23 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     return p
   }
 
-  const refreshAll = (): Promise<void> => {
+  // refreshAll reuses a full refresh in flight; with fresh (a stream
+  // reconnected, so changes may have been missed) it waits for that one and
+  // then makes one more, shared by every fresh caller meanwhile.
+  const refreshAll = (opts: { fresh?: boolean } = {}): Promise<void> => {
     const s = session
     if (!s) return Promise.resolve()
-    if (fullInflight) return fullInflight
+    if (fullInflight) {
+      if (!opts.fresh) return fullInflight
+      if (!fullQueued) {
+        const q: Promise<void> = fullInflight.then(() => {
+          if (fullQueued === q) fullQueued = null
+          return session === s ? refreshAll() : undefined
+        })
+        fullQueued = q
+      }
+      return fullQueued
+    }
     if (deferred) return deferred.promise
     const wait = lastFull + FULL_REFRESH_MIN_MS - s.platform.now()
     if (wait <= 0) return runFull(s)
@@ -242,8 +256,29 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     await Promise.all([...keys].map((k) => refresh(k, true)))
   }
 
+  // reset forgets everything of a session, so a new one (maybe of another
+  // user in the same page) never shows old data or errors.
+  const reset = () => {
+    status.value = null
+    approvals.value = emptyApprovals()
+    settings.value = null
+    for (const k of RESOURCES) {
+      loading[k] = false
+      errors[k] = null
+      writes[k] = 0
+    }
+    inflight.clear()
+    queued.clear()
+    fullInflight = null
+    fullQueued = null
+    lastFull = -Infinity
+    lastRefreshed.value = null
+    connection.value = 'streaming'
+  }
+
   const start = (opts: StartOptions) => {
     if (session) return
+    reset()
     const client = createClient(opts.platform)
     const make = opts.createEvents ?? createEventClient
     const abort = new AbortController()
@@ -255,7 +290,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     const events = make({
       platform: opts.platform,
       client,
-      onReady: guard(() => refreshAll()),
+      onReady: guard(() => refreshAll({ fresh: true })),
       onPoll: guard(() => refreshAll()),
       onChanged: guard((kinds: ChangeKind[]) => onChanged(kinds)),
       onState: guard((st: StreamState) => {
@@ -289,11 +324,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       deferred.resolve()
       deferred = null
     }
-    inflight.clear()
-    queued.clear()
-    fullInflight = null
-    lastFull = -Infinity
-    for (const k of RESOURCES) loading[k] = false
+    reset()
   }
 
   const active = (): Session => {

@@ -13,11 +13,11 @@
       <li
         v-text="
           $gettext(
-            'It gets its own app token with full access to your own space. You can renew or revoke that token in Settings at any time.'
+            'It gets its own app token, which can technically do whatever you can do in ownCloud. You can renew or revoke that token in Settings at any time.'
           )
         "
       />
-      <li v-text="$gettext('It works only in your personal space, never in other spaces or shares.')" />
+      <li v-text="$gettext('The agent is built to work only in your personal space.')" />
       <li
         v-text="
           $gettext(
