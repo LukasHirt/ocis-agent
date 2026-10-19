@@ -24,6 +24,10 @@ var errorMessages = map[string]string{
 	"not_found":              "Not found.",
 	"method_not_allowed":     "Method not allowed.",
 	"conflict":               "The request conflicts with the current state.",
+	"already_exists":         "That file already exists.",
+	"precondition_required":  "The If-Match header with the file's ETag is required.",
+	"precondition_failed":    "The file changed since you loaded it; reload it.",
+	"not_text":               "The file is not UTF-8 text.",
 	"job_ended":              "The job has already ended.",
 	"stale_arguments":        "The action is not the one you were shown; reload it.",
 	"already_decided":        "This approval has already been decided.",
@@ -58,6 +62,14 @@ var (
 	errBadJSON   = newAPIError(http.StatusBadRequest, "invalid_request")
 	errMediaType = newAPIError(http.StatusUnsupportedMediaType, "unsupported_media_type")
 	errNotFound  = newAPIError(http.StatusNotFound, "not_found")
+)
+
+// Errors of memory edits.
+var (
+	errPreconditionRequired = newAPIError(http.StatusPreconditionRequired, "precondition_required")
+	errPreconditionFailed   = newAPIError(http.StatusPreconditionFailed, "precondition_failed")
+	errAlreadyExists        = newAPIError(http.StatusConflict, "already_exists")
+	errNotText              = newAPIError(http.StatusUnprocessableEntity, "not_text")
 )
 
 // Errors of approval decisions.

@@ -16,6 +16,7 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
+	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/queue"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -50,7 +51,18 @@ type Decider interface {
 // (queue.Queue).
 type Waker interface{ Wake() }
 
+// MemoryService is the part of memory.Service the API uses. It lists and
+// peeks (no ETag caching) and edits with an explicit ETag; the API never
+// calls Read, Write, Append or Forget, which belong to the job runner.
+type MemoryService interface {
+	List(ctx context.Context, sess memory.Session) ([]memory.Info, error)
+	Peek(ctx context.Context, sess memory.Session, name string) (memory.File, error)
+	Replace(ctx context.Context, sess memory.Session, name, content, ifMatch string) (memory.Change, error)
+	Create(ctx context.Context, sess memory.Session, name, content string) (memory.Change, error)
+}
+
 var (
+	_ MemoryService  = (*memory.Service)(nil)
 	_ TokenValidator = (*auth.Validator)(nil)
 	_ Credentials    = (*auth.Service)(nil)
 	_ Decider        = (*approvals.Gate)(nil)
@@ -73,7 +85,8 @@ type Deps struct {
 	Auth      Credentials
 	Gate      Decider
 	Queue     Waker
-	Catalog   llm.Catalog // may be empty when no LLM is configured
+	Memory    MemoryService // the memory routes answer 503 unavailable without it
+	Catalog   llm.Catalog   // may be empty when no LLM is configured
 	Cfg       Settings
 	Log       *slog.Logger     // default: discard
 	Now       func() time.Time // default: time.Now; the rate limiter's clock
@@ -179,6 +192,14 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/approvals/{id}", s.getApproval)
 	s.handle("POST /agent-api/v1/approvals/{id}/decision", s.decideApproval)
 	s.handle("POST /agent-api/v1/approvals/bulk-decision", s.bulkDecision)
+	s.handle("GET /agent-api/v1/memory", s.listMemory)
+	// no {name...} subtree pattern (the mux would redirect /memory): the
+	// notes folder has its own single-segment pattern
+	s.handle("GET /agent-api/v1/memory/{name}", s.getMemory)
+	s.handle("GET /agent-api/v1/memory/notes/{slug}", s.getMemory)
+	s.handle("PUT /agent-api/v1/memory/{name}", s.putMemory, withMaxBody(memoryMaxBody))
+	s.handle("PUT /agent-api/v1/memory/notes/{slug}", s.putMemory, withMaxBody(memoryMaxBody))
+	s.handle("POST /agent-api/v1/memory", s.createMemory, withMaxBody(memoryMaxBody))
 	s.handle("GET /agent-api/v1/audit", s.listAudit)
 	s.handle("GET /agent-api/v1/audit/verify", s.verifyAudit)
 	s.handle("GET /agent-api/v1/audit/export", s.exportAudit, withTimeout(auditExportDeadline))
