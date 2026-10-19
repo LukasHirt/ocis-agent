@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
 	"strings"
@@ -434,6 +435,14 @@ func TestTheBearerNeverLeaks(t *testing.T) {
 	call(http.MethodPost, "/agent-api/v1/token/renew", "", 502)
 	s.fake.Fail(http.MethodGet, "/auth-app/tokens", http.StatusInternalServerError, 1)
 	call(http.MethodDelete, "/agent-api/v1/token", "", 502)
+	// enrolment failures: oCIS refuses, fails, or the bearer is no longer
+	// accepted when the token is created
+	s.fake.Fail(http.MethodPost, "/auth-app/tokens", http.StatusForbidden, 1)
+	call(http.MethodPost, "/agent-api/v1/enroll", "{}", 502)
+	s.fake.Fail(http.MethodPost, "/auth-app/tokens", http.StatusInternalServerError, 1)
+	call(http.MethodPost, "/agent-api/v1/enroll", "{}", 502)
+	s.fake.Fail(http.MethodPost, "/auth-app/tokens", http.StatusUnauthorized, 1)
+	call(http.MethodPost, "/agent-api/v1/enroll", "{}", 502)
 	call(http.MethodPost, "/agent-api/v1/unenroll", `{"delete_memory":true}`, 204)
 	logs := s.logs.String()
 	if logs == "" {
@@ -515,5 +524,45 @@ func TestCooldownIsBounded(t *testing.T) {
 		if ok, _ := off.take("u"); !ok {
 			t.Error("a zero cooldown refused")
 		}
+	}
+}
+
+// Renew, revoke and unenroll act on the caller only: a query parameter, a
+// header or a body field naming another user changes nothing for them.
+func TestTokenActionsAreScopedToTheCaller(t *testing.T) {
+	s := newStack(t)
+	s.enroll(t, "einstein")
+	s.enroll(t, "marie")
+	marieLabel := s.appToken(t, marieID).Label
+	other := func(method, path, body string) *httptest.ResponseRecorder {
+		r := s.req(method, path+"?user_id="+marieID, body)
+		r.Header.Set("X-User-Id", marieID)
+		r.Header.Set("X-User", "marie")
+		return s.serve(r) // einstein's bearer
+	}
+	if rec := other(http.MethodPost, "/agent-api/v1/token/renew", ""); rec.Code != 200 {
+		t.Fatalf("renew = %d %s", rec.Code, rec.Body.String())
+	}
+	if s.appToken(t, marieID).Label != marieLabel || s.ours("marie") != 1 {
+		t.Fatal("einstein's renew changed marie's token")
+	}
+	if rec := other(http.MethodDelete, "/agent-api/v1/token", ""); rec.Code != 200 {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	if s.appToken(t, marieID).Status != store.TokenValid || s.ours("marie") != 1 {
+		t.Fatal("einstein's revoke touched marie")
+	}
+	if s.ours("einstein") != 0 {
+		t.Fatal("einstein's revoke did not revoke his own token")
+	}
+	wantError(t, other(http.MethodPost, "/agent-api/v1/unenroll", `{"user_id":"`+marieID+`"}`), 400, "invalid_request")
+	if rec := other(http.MethodPost, "/agent-api/v1/unenroll", ""); rec.Code != 204 {
+		t.Fatalf("unenroll = %d", rec.Code)
+	}
+	if _, found := s.user(t, marieID); !found {
+		t.Fatal("einstein's unenroll removed marie")
+	}
+	if _, found := s.user(t, einsteinID); found {
+		t.Fatal("einstein is still enrolled")
 	}
 }
