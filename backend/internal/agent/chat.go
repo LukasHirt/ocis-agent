@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/textcap"
 )
 
 // Limits of a chat job's conversation prefix.
@@ -18,28 +17,9 @@ const (
 	maxHistoryBytes        = 24 << 10
 )
 
-// truncMarker ends a text cut to a cap. It and capText duplicate the API
-// views' marker and helper on purpose (agent must not import api); they are
-// to be shared in one place later.
-const truncMarker = "…[truncated]"
-
 // isChat reports a chat job: its TriggerRef names its conversation.
 func isChat(j store.Job) bool {
 	return j.TriggerKind == store.TriggerChat && j.TriggerRef != ""
-}
-
-// capText makes s valid UTF-8 and caps it at limit bytes including
-// truncMarker, cut at a rune boundary.
-func capText(s string, limit int) string {
-	s = strings.ToValidUTF8(s, "�")
-	if len(s) <= limit {
-		return s
-	}
-	cut := limit - len(truncMarker)
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + truncMarker
 }
 
 // history returns the conversation before a fresh chat job's goal, oldest
@@ -105,7 +85,7 @@ func (r *Runner) history(ctx context.Context, j store.Job) []llm.Message {
 		es = es[len(es)-historyMessages:]
 	}
 	for i := range es {
-		es[i].content = capText(es[i].content, maxHistoryMessageBytes)
+		es[i].content = textcap.Cap(es[i].content, maxHistoryMessageBytes)
 	}
 	es = dropOrphans(es)
 	for len(es) > 0 && mergedSize(es) > maxHistoryBytes {
@@ -205,7 +185,7 @@ func recordEnd(tx store.Tx, j store.Job, e ending) error {
 	m := store.Message{ConversationID: j.TriggerRef, UserID: j.UserID, JobID: j.ID}
 	switch {
 	case e.state == store.JobSucceeded:
-		m.Role, m.Content = store.RoleAssistant, capText(e.answer, store.MaxAnswerMessageBytes)
+		m.Role, m.Content = store.RoleAssistant, textcap.Cap(e.answer, store.MaxAnswerMessageBytes)
 		if m.Content == "" {
 			m.Content = noAnswer
 		}

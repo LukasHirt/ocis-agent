@@ -6,6 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/owncloud/ocis-agent/backend/internal/textcap"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
@@ -119,26 +120,16 @@ func Fence(source, path, sha, content string) string {
 		"\n" + escapeContent(content) + "\n</data>"
 }
 
-func cutRunes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
 // RenderResult renders a tool message of at most maxResultBytes in total.
 // truncated lists the Source:Path of every block that was not rendered.
 func RenderResult(tool string, state string, res tools.Result, reason string) (text string, truncated []string) {
 	var sb strings.Builder
-	sb.WriteString("Tool result (" + cutRunes(tool, 64) + "): " + cutRunes(state, 64))
+	sb.WriteString("Tool result (" + textcap.Cut(tool, 64) + "): " + textcap.Cut(state, 64))
 	if res.Summary != "" {
-		sb.WriteString("\n" + cutRunes(res.Summary, maxSummaryBytes))
+		sb.WriteString("\n" + textcap.Cut(res.Summary, maxSummaryBytes))
 	}
 	if reason != "" {
-		sb.WriteString("\n" + cutRunes(reason, maxSummaryBytes))
+		sb.WriteString("\n" + textcap.Cut(reason, maxSummaryBytes))
 	}
 	// Room kept for the fixed tail: the unknown sentence and the final
 	// "more blocks omitted" line.

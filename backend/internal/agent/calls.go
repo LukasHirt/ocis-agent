@@ -14,6 +14,7 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/textcap"
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
@@ -223,7 +224,7 @@ func (r *Runner) applyOutcome(ctx context.Context, claim store.Claim, env tools.
 	var events []audit.Event
 	if auditDiff && out.Result.Diff != "" {
 		events = append(events, audit.Event{
-			Kind: "memory_changed", Tool: tool, Outcome: out.State.String(), Detail: cutRunes(out.Result.Diff, maxDiffDetail),
+			Kind: "memory_changed", Tool: tool, Outcome: out.State.String(), Detail: textcap.Cut(out.Result.Diff, maxDiffDetail),
 		})
 	}
 	if stop, err := r.record(ctx, claim, cp, callID, text, nil, events); stop || err != nil {
@@ -264,7 +265,7 @@ func (r *Runner) runError(ctx context.Context, claim store.Claim, tool string, e
 // deny answers a refused call and audits the refusal.
 func (r *Runner) deny(ctx context.Context, claim store.Claim, cp *Checkpoint, c llm.ToolCall, reason string) (bool, error) {
 	text, _ := RenderResult(c.Name, "denied", tools.Result{}, reason)
-	detail := cutRunes(reason, maxDeniedDetail)
+	detail := textcap.Cut(reason, maxDeniedDetail)
 	step := store.JobStep{JobID: claim.Job.ID, Kind: "tool", Tool: c.Name, CallID: c.ID, Status: "denied", Summary: detail}
 	ev := audit.Event{Kind: "policy_denied", Tool: c.Name, Outcome: "denied", Detail: detail}
 	return r.record(ctx, claim, cp, c.ID, text, &step, []audit.Event{ev})
