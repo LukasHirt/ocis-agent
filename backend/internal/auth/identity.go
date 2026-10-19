@@ -49,16 +49,35 @@ type Validator struct {
 	// cache (knownTTL or the token's exp), least recently used first out.
 	// Only a successful validation adds an entry and a rejection removes it,
 	// so a client cannot put a token into it.
-	maxKnown int
-	known    map[[32]byte]*list.Element // of *knownEntry
-	knownLRU *list.List
+	// At most maxKnownPerUser entries per user id, the newest, so one user
+	// minting many valid tokens cannot push the other users out.
+	maxKnown     int
+	known        map[[32]byte]*list.Element // of *knownEntry
+	knownLRU     *list.List
+	knownPerUser map[string]int
+
+	// flights coalesces concurrent validations of one token: one round trip
+	// to oCIS, the others wait for its result.
+	flights map[[32]byte]*flight
+}
+
+// flight is a validation in progress.
+type flight struct {
+	done chan struct{} // closed when id and err are set
+	id   Identity
+	err  error
 }
 
 // knownTTL is the longest a token stays known without a new validation.
 const knownTTL = 12 * time.Hour
 
+// maxKnownPerUser caps the known tokens of one user (several browsers and
+// devices, each with its own token).
+const maxKnownPerUser = 6
+
 type knownEntry struct {
 	key   [32]byte
+	user  string
 	until time.Time
 }
 
@@ -81,7 +100,8 @@ func WithValidatorClock(now func() time.Time) ValidatorOption {
 // NewValidator returns a validator over c.
 func NewValidator(c *ocisclient.Client, opts ...ValidatorOption) *Validator {
 	v := &Validator{c: c, ttl: time.Minute, now: time.Now, maxEntries: 4096, cache: map[[32]byte]cacheEntry{},
-		maxKnown: 4096, known: map[[32]byte]*list.Element{}, knownLRU: list.New()}
+		maxKnown: 4096, known: map[[32]byte]*list.Element{}, knownLRU: list.New(), knownPerUser: map[string]int{},
+		flights: map[[32]byte]*flight{}}
 	for _, o := range opts {
 		o(v)
 	}
@@ -90,20 +110,53 @@ func NewValidator(c *ocisclient.Client, opts ...ValidatorOption) *Validator {
 
 // Validate returns the identity of the bearer token. Failures of oCIS itself
 // (network, 5xx) are returned as they are and never cached; only a rejected
-// token is ErrUnauthenticated.
+// token is ErrUnauthenticated. Concurrent calls for one uncached token share
+// one validation; a caller whose context ends stops waiting, and a waiter is
+// not failed by the cancellation of the caller that ran the validation (it
+// tries again).
 func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Identity, error) {
 	if token == "" {
 		return Identity{}, ErrUnauthenticated
 	}
 	key := sha256.Sum256([]byte(token.Reveal()))
-	now := v.now()
-	v.mu.Lock()
-	if e, ok := v.cache[key]; ok && now.Before(e.until) {
+	for {
+		now := v.now()
+		v.mu.Lock()
+		if e, ok := v.cache[key]; ok && now.Before(e.until) {
+			v.mu.Unlock()
+			return e.id, nil
+		}
+		if f, ok := v.flights[key]; ok {
+			v.mu.Unlock()
+			select {
+			case <-f.done:
+			case <-ctx.Done():
+				return Identity{}, ctx.Err()
+			}
+			if isContextErr(f.err) && ctx.Err() == nil {
+				continue // the leader's own context ended, not ours
+			}
+			return f.id, f.err
+		}
+		f := &flight{done: make(chan struct{})}
+		v.flights[key] = f
 		v.mu.Unlock()
-		return e.id, nil
+		f.id, f.err = v.validate(ctx, token, key, now)
+		v.mu.Lock()
+		delete(v.flights, key)
+		v.mu.Unlock()
+		close(f.done)
+		return f.id, f.err
 	}
-	v.mu.Unlock()
+}
 
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// validate asks oCIS (Graph /me and the personal drive) and records the
+// result in the cache and the known set.
+func (v *Validator) validate(ctx context.Context, token ocisclient.Secret, key [32]byte, now time.Time) (Identity, error) {
 	cr := ocisclient.Bearer(token)
 	me, err := v.c.Me(ctx, cr)
 	if err != nil {
@@ -118,6 +171,12 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 	}
 	drive, err := v.c.PersonalDriveID(ctx, cr)
 	if err != nil {
+		// oCIS refusing the drive lookup of the token it just accepted for
+		// /me is a rejection of the token (revoked in between), not an outage
+		if errors.Is(err, ocisclient.ErrUnauthorized) || errors.Is(err, ocisclient.ErrForbidden) {
+			v.forget(key)
+			return Identity{}, ErrUnauthenticated
+		}
 		return Identity{}, err
 	}
 	id := Identity{UserID: me.ID, Username: me.Username, DisplayName: me.DisplayName, DriveID: drive}
@@ -135,7 +194,7 @@ func (v *Validator) Validate(ctx context.Context, token ocisclient.Secret) (Iden
 		knownUntil = exp
 	}
 	if knownUntil.After(now) {
-		v.remember(key, knownUntil)
+		v.remember(key, id.UserID, knownUntil)
 	}
 	return id, nil
 }
@@ -157,29 +216,53 @@ func (v *Validator) Known(token ocisclient.Secret) bool {
 		return false
 	}
 	if !now.Before(e.Value.(*knownEntry).until) {
-		v.knownLRU.Remove(e)
-		delete(v.known, key)
+		v.dropKnown(e)
 		return false
 	}
 	v.knownLRU.MoveToFront(e)
 	return true
 }
 
-// remember marks a validated token as known until the given time.
-func (v *Validator) remember(key [32]byte, until time.Time) {
+// remember marks a validated token of user as known until the given time.
+// A user over maxKnownPerUser loses their oldest entry, the whole set over
+// maxKnown its least recently used one.
+func (v *Validator) remember(key [32]byte, user string, until time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if e, ok := v.known[key]; ok {
-		e.Value.(*knownEntry).until = until
+		ke := e.Value.(*knownEntry)
+		if ke.user != user {
+			v.knownPerUser[ke.user]--
+			v.knownPerUser[user]++
+			ke.user = user
+		}
+		ke.until = until
 		v.knownLRU.MoveToFront(e)
 		return
 	}
-	for len(v.known) >= v.maxKnown {
-		back := v.knownLRU.Back()
-		v.knownLRU.Remove(back)
-		delete(v.known, back.Value.(*knownEntry).key)
+	if v.knownPerUser[user] >= maxKnownPerUser {
+		for e := v.knownLRU.Back(); e != nil; e = e.Prev() {
+			if e.Value.(*knownEntry).user == user {
+				v.dropKnown(e)
+				break
+			}
+		}
 	}
-	v.known[key] = v.knownLRU.PushFront(&knownEntry{key: key, until: until})
+	for len(v.known) >= v.maxKnown {
+		v.dropKnown(v.knownLRU.Back())
+	}
+	v.known[key] = v.knownLRU.PushFront(&knownEntry{key: key, user: user, until: until})
+	v.knownPerUser[user]++
+}
+
+// dropKnown removes an entry; the caller holds v.mu.
+func (v *Validator) dropKnown(e *list.Element) {
+	ke := e.Value.(*knownEntry)
+	v.knownLRU.Remove(e)
+	delete(v.known, ke.key)
+	if v.knownPerUser[ke.user]--; v.knownPerUser[ke.user] <= 0 {
+		delete(v.knownPerUser, ke.user)
+	}
 }
 
 // forget drops a token oCIS rejected.
@@ -187,8 +270,7 @@ func (v *Validator) forget(key [32]byte) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if e, ok := v.known[key]; ok {
-		v.knownLRU.Remove(e)
-		delete(v.known, key)
+		v.dropKnown(e)
 	}
 }
 
