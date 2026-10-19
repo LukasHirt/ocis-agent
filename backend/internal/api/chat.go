@@ -1,10 +1,8 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -331,29 +329,6 @@ type messageBody struct {
 	Content json.RawMessage `json:"content"`
 }
 
-// decodeTextBody is decodeBody for bodies that carry the user's text: it
-// also refuses a body that is not valid UTF-8, which encoding/json would
-// silently turn into U+FFFD. A \uD800-style escape of a lone surrogate
-// still decodes to U+FFFD (known limit).
-func decodeTextBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	if r.Body == nil {
-		return errBadJSON
-	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r)))
-	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			return errTooLarge
-		}
-		return errBadJSON
-	}
-	if !utf8.Valid(data) {
-		return errBadJSON
-	}
-	r.Body = io.NopCloser(bytes.NewReader(data))
-	return decodeBody(w, r, dst)
-}
-
 // validMessage checks a user's message: 1..maxChatMessageBytes bytes of
 // valid UTF-8 without control characters other than \n, \t and \r.
 func validMessage(s string) bool {
@@ -399,7 +374,7 @@ func titleOf(content string) string {
 // waits; the store does not claim it); the response's agent object says so.
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
 	var body messageBody
-	if err := decodeTextBody(w, r, &body); err != nil {
+	if err := decodeBody(w, r, &body); err != nil {
 		return err
 	}
 	content, err := jsonString(body.Content)

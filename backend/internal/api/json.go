@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
@@ -87,6 +88,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 		if errors.As(err, &mbe) {
 			return errTooLarge
 		}
+		return errBadJSON
+	}
+	if !utf8.Valid(data) || hasLoneSurrogate(data) {
 		return errBadJSON
 	}
 	if countValues(data) > maxBodyValues {
@@ -276,4 +280,72 @@ func countValues(b []byte) int {
 		}
 	}
 	return n
+}
+
+// hasLoneSurrogate reports whether a string of b holds a \uD800-\uDFFF escape
+// that is not part of a valid high+low pair (encoding/json would silently
+// turn it into U+FFFD). Backslash escapes are consumed in pairs, so an
+// escaped backslash followed by "ud800" is plain text. Together with
+// utf8.Valid on the raw body, every string of a body is valid Unicode.
+func hasLoneSurrogate(b []byte) bool {
+	inStr := false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if !inStr {
+			inStr = c == '"'
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = false
+		case '\\':
+			if i+1 >= len(b) {
+				return false // the parse refuses it
+			}
+			i++
+			if b[i] != 'u' {
+				continue
+			}
+			u, ok := hex4(b, i+1)
+			if !ok {
+				return false // the parse refuses it
+			}
+			i += 4
+			switch {
+			case u >= 0xDC00 && u <= 0xDFFF:
+				return true
+			case u >= 0xD800 && u <= 0xDBFF:
+				if i+6 >= len(b) || b[i+1] != '\\' || b[i+2] != 'u' {
+					return true
+				}
+				lo, ok := hex4(b, i+3)
+				if !ok || lo < 0xDC00 || lo > 0xDFFF {
+					return true
+				}
+				i += 6
+			}
+		}
+	}
+	return false
+}
+
+// hex4 parses the four hex digits at b[i:].
+func hex4(b []byte, i int) (rune, bool) {
+	if i+4 > len(b) {
+		return 0, false
+	}
+	var v rune
+	for _, c := range b[i : i+4] {
+		switch {
+		case c >= '0' && c <= '9':
+			v = v<<4 | rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v<<4 | rune(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			v = v<<4 | rune(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }
