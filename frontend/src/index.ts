@@ -11,7 +11,7 @@ import {
 } from '@ownclouders/web-pkg'
 import { urlJoin } from '@ownclouders/web-client'
 import { APPID } from './appid'
-import { buildRoutes } from './routes'
+import { buildNavItems, buildRoutes } from './routes'
 import { createLayout } from './layout'
 import { createPlatform } from './platform'
 
@@ -64,6 +64,7 @@ export default defineWebApplication({
     return {
       appInfo,
       routes: buildRoutes($gettext, createLayout(platform)),
+      navItems: buildNavItems($gettext, () => !!userStore.user),
       extensions
     }
   }

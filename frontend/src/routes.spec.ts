@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent } from 'vue'
-import { buildRoutes } from './routes'
+import { buildNavItems, buildRoutes } from './routes'
 import { APPID } from './appid'
 
 const gettext = (s: string) => s
 const layout = defineComponent({ render: () => null })
 
 describe('buildRoutes', () => {
-  it('redirects the app root to the approvals inbox', () => {
+  it('redirects the app root to the approvals inbox by its host name', () => {
     const [root] = buildRoutes(gettext, layout)
     expect(root.path).toBe('/')
-    expect(root.redirect).toBe(`${APPID}/approvals`)
+    expect(root.redirect).toEqual({ name: `${APPID}-approvals` })
   })
 
   it('requires an authenticated user on the root and every child route', () => {
@@ -21,16 +21,36 @@ describe('buildRoutes', () => {
     }
   })
 
-  it('exposes the approvals inbox as a child route', () => {
+  it('has the approvals inbox and the settings as children of the layout', () => {
     const [root] = buildRoutes(gettext, layout)
-    const paths = (root.children ?? []).map((c) => c.path)
-    expect(paths).toContain('approvals')
+    const children = (root.children ?? []).map((c) => [c.path, c.name, c.meta?.title])
+    // the host prefixes the names with the app id (agent-approvals, agent-settings)
+    expect(children).toEqual([
+      ['approvals', 'approvals', 'Approvals'],
+      ['settings', 'settings', 'Settings']
+    ])
+    for (const child of root.children ?? []) {
+      expect(typeof child.component).toBe('function') // lazily loaded views
+    }
   })
-})
 
-describe('buildRoutes layout', () => {
   it('uses the given layout as the root component', () => {
     const [root] = buildRoutes(gettext, layout)
     expect(root.component).toBe(layout)
+  })
+})
+
+describe('buildNavItems', () => {
+  it('links the approvals and the settings, without a badge', () => {
+    let user = false
+    const items = buildNavItems(gettext, () => user)
+    expect(items.map((i) => [i.name, i.icon, i.route])).toEqual([
+      ['Approvals', 'checkbox-circle', { path: `/${APPID}/approvals` }],
+      ['Settings', 'settings-4', { path: `/${APPID}/settings` }]
+    ])
+    expect(items.every((i) => i.isVisible?.() === false)).toBe(true)
+    user = true
+    expect(items.every((i) => i.isVisible?.() === true)).toBe(true)
+    for (const i of items) expect(i.name).not.toMatch(/\d/)
   })
 })
