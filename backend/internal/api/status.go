@@ -68,7 +68,7 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 		}
 		v.Budget = budgetView{
 			UsedTokens:  in + out,
-			DailyTokens: s.dailyBudget(pol.DailyTokens),
+			DailyTokens: s.dailyBudget(pol.DailyTokens), // what the runner enforces
 			ResetsAt:    timeView(dayStart.AddDate(0, 0, 1)),
 		}
 
@@ -92,14 +92,10 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 	return v, nil
 }
 
-// dailyBudget is the user's budget under the operator's cap: a stored value
-// of 0 (unlimited in the store) or above the cap is the cap.
+// dailyBudget is the user's budget under the operator's cap
+// (store.DailyBudget, the function the runner's budget check uses).
 func (s *Server) dailyBudget(stored int64) int64 {
-	limit := s.d.Cfg.UserDailyTokens
-	if stored <= 0 || stored > limit {
-		return limit
-	}
-	return stored
+	return store.DailyBudget(stored, s.d.Cfg.UserDailyTokens)
 }
 
 func (s *Server) modelsView(pol store.Policy) modelsView {

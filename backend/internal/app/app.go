@@ -220,7 +220,8 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	rcfg := agent.Config{
 		MaxSteps: cfg.Agent.MaxSteps, MaxRuns: cfg.Agent.MaxRuns, MaxTokens: cfg.Agent.MaxTokens,
-		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay, Now: a.now,
+		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
+		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
 	var err error
 	if a.runner, err = agent.NewRunner(agent.Deps{

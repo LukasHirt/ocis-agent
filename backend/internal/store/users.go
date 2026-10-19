@@ -74,6 +74,19 @@ type Policy struct {
 	UpdatedAt time.Time
 }
 
+// DailyBudget is a user's daily token budget under the operator's cap
+// (AGENT_USER_DAILY_TOKENS): a stored value of 0 (or below) or above the cap
+// is the cap. Without a cap (limit 0, which the configuration never allows)
+// the stored value applies and 0 means unlimited. The status endpoint and
+// the runner's budget check both use it, so the limit shown is the one
+// enforced.
+func DailyBudget(stored, limit int64) int64 {
+	if limit > 0 && (stored <= 0 || stored > limit) {
+		return limit
+	}
+	return stored
+}
+
 // DefaultPolicy returns the policy a newly enrolled user starts with.
 func DefaultPolicy(userID string, now time.Time) Policy {
 	return Policy{

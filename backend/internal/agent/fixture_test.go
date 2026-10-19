@@ -266,7 +266,7 @@ func newFixture(t *testing.T) *fixture {
 	if f.catalog, err = llm.NewCatalog(modelDefault, []llm.ModelInfo{{ID: modelChat}, {ID: modelPro}}); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg = Config{Now: clk.Now}
+	f.cfg = Config{Now: clk.Now, UserDailyTokens: 1000000}
 	return f
 }
 
