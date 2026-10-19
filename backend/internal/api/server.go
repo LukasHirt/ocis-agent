@@ -60,8 +60,8 @@ type MemoryService interface {
 	Peek(ctx context.Context, sess memory.Session, name string) (memory.File, error)
 	Replace(ctx context.Context, sess memory.Session, name, content, ifMatch string) (memory.Change, error)
 	Create(ctx context.Context, sess memory.Session, name, content string) (memory.Change, error)
-}
 	Limits() memory.Limits
+}
 
 var (
 	_ MemoryService  = (*memory.Service)(nil)
