@@ -73,7 +73,21 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 		return r.fail(ctx, claim, ReasonInternal)
 	}
 	if len(cp.Messages) == 0 {
-		cp.Messages = []llm.Message{{Role: llm.RoleUser, Content: claim.Job.Goal}}
+		// a fresh job: a chat job's conversation, then its goal as the
+		// last user message
+		cp.Messages = append(r.history(ctx, claim.Job), llm.Message{Role: llm.RoleUser, Content: claim.Job.Goal})
+		if len(cp.Messages) > 1 {
+			// stored at once, so a requeued run sees the same context
+			raw, err := cp.Marshal()
+			if err != nil {
+				return r.fail(ctx, claim, ReasonTooLarge)
+			}
+			if err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
+				return tx.SaveCheckpoint(claim.Job.UserID, claim.Job.ID, raw, claim.Fence)
+			}); err != nil {
+				return fmt.Errorf("agent: save checkpoint: %w", err)
+			}
+		}
 	}
 	env, err := r.d.Env.Env(ctx, claim.Job.UserID)
 	if errors.Is(err, auth.ErrCredentialInvalid) {

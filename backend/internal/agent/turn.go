@@ -68,7 +68,7 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 	}
 	if len(calls) == 0 {
 		// the step, the answer and the release in one transaction
-		return true, r.end(ctx, claim, ending{state: store.JobSucceeded, checkpoint: raw, step: &step})
+		return true, r.end(ctx, claim, ending{state: store.JobSucceeded, checkpoint: raw, step: &step, answer: cp.Answer})
 	}
 	if err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
 		if _, err := tx.AppendStep(step, claim.Fence); err != nil {

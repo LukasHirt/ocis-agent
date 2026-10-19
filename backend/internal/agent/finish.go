@@ -31,6 +31,7 @@ type ending struct {
 	checkpoint json.RawMessage // nil keeps the stored one
 	step       *store.JobStep  // recorded in the same transaction, if set
 	events     []audit.Event   // appended in the same transaction
+	answer     string          // the final answer of a succeeded job
 }
 
 // lost reports an error that means the job is no longer ours.
@@ -38,8 +39,8 @@ func lost(err error) bool {
 	return errors.Is(err, store.ErrFenceLost) || errors.Is(err, store.ErrConflict)
 }
 
-// end releases the job into a terminal state with a job_finished event in one
-// transaction. A job that is no longer running (for example cancelled by the
+// end releases the job into a terminal state with a job_finished event and,
+// for a chat job, its conversation message (recordEnd) in one transaction. A job that is no longer running (for example cancelled by the
 // user) is left alone and is not an error; a lost fence is returned wrapped.
 func (r *Runner) end(ctx context.Context, claim store.Claim, e ending) error {
 	j := claim.Job
@@ -63,7 +64,7 @@ func (r *Runner) end(ctx context.Context, claim store.Claim, e ending) error {
 				return err
 			}
 		}
-		return nil
+		return recordEnd(tx, j, e)
 	})
 	if errors.Is(err, errNotRunning) || errors.Is(err, store.ErrConflict) {
 		return nil // already terminal: someone else ended it
