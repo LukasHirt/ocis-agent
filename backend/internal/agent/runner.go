@@ -75,9 +75,11 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 	if len(cp.Messages) == 0 {
 		// a fresh job: a chat job's conversation, then its goal as the
 		// last user message
-		cp.Messages = append(r.history(ctx, claim.Job), llm.Message{Role: llm.RoleUser, Content: claim.Job.Goal})
-		if len(cp.Messages) > 1 {
-			// stored at once, so a requeued run sees the same context
+		goal := llm.Message{Role: llm.RoleUser, Content: claim.Job.Goal}
+		cp.Messages = append(r.history(ctx, claim.Job), goal)
+		if isChat(claim.Job) {
+			// stored at once, even without history, so a requeued run is
+			// never rebuilt and sees the same context
 			raw, err := cp.Marshal()
 			if err != nil {
 				return r.fail(ctx, claim, ReasonTooLarge)

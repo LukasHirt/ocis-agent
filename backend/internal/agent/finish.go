@@ -40,8 +40,9 @@ func lost(err error) bool {
 }
 
 // end releases the job into a terminal state with a job_finished event and,
-// for a chat job, its conversation message (recordEnd) in one transaction. A job that is no longer running (for example cancelled by the
-// user) is left alone and is not an error; a lost fence is returned wrapped.
+// for a chat job, its conversation message (recordEnd) in one transaction.
+// A job that is no longer running (for example cancelled by the user) is
+// left alone and is not an error; a lost fence is returned wrapped.
 func (r *Runner) end(ctx context.Context, claim store.Claim, e ending) error {
 	j := claim.Job
 	err := r.d.Store.InTx(ctx, func(tx store.Tx) error {

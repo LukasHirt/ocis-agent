@@ -31,11 +31,31 @@ func (f *fixture) newConversation() string {
 }
 
 // addMessage adds a message one second after the previous one, so the
-// conversation's order is unambiguous.
+// conversation's order is unambiguous. Without a jobID a user message gets
+// a new ended chat job of its own and any other message the job of the
+// last user message, like an earlier question and its answer.
 func (f *fixture) addMessage(conv, role, content, jobID string) {
 	f.t.Helper()
 	f.clk.Advance(time.Second)
+	f.insertMessage(conv, role, content, jobID)
+}
+
+func (f *fixture) insertMessage(conv, role, content, jobID string) {
+	f.t.Helper()
 	if err := f.st.InTx(bg, func(tx store.Tx) error {
+		if jobID == "" && role == store.RoleUser {
+			j, err := tx.InsertJob(store.Job{UserID: userID, TriggerKind: store.TriggerChat, TriggerRef: conv, Goal: content})
+			if err != nil {
+				return err
+			}
+			if err := tx.CancelJob(userID, j.ID); err != nil {
+				return err
+			}
+			f.pastJob = j.ID
+		}
+		if jobID == "" {
+			jobID = f.pastJob
+		}
 		_, err := tx.InsertMessage(store.Message{ConversationID: conv, UserID: userID, Role: role, Content: content, JobID: jobID})
 		return err
 	}); err != nil {
@@ -198,16 +218,54 @@ func TestTheConversationPrefixIsCappedPerMessageAndInTotal(t *testing.T) {
 	t.Run("at most 20 messages", func(t *testing.T) {
 		f := newFixture(t)
 		conv := f.newConversation()
-		for i := range 25 {
-			f.addMessage(conv, store.RoleUser, fmt.Sprintf("m%d", i), "")
+		for i := range 13 {
+			f.addMessage(conv, store.RoleUser, fmt.Sprintf("q%d", i), "")
+			f.addMessage(conv, store.RoleAssistant, fmt.Sprintf("a%d", i), "")
 		}
 		p := llmtest.New(llmtest.Say("ok", 1, 1))
 		f.provider = p
 		f.postChat(conv, "g")
 		f.runOnce()
 		ms := sent(t, p, 0)
-		if len(ms) != 21 || ms[0].Content != "m5" || ms[19].Content != "m24" {
+		if len(ms) != 21 || ms[0].Content != "q3" || ms[19].Content != "a12" {
 			t.Errorf("sent %d messages: %s", len(ms), roles(ms))
+		}
+	})
+	t.Run("a window cut never leaves an orphan answer", func(t *testing.T) {
+		f := newFixture(t)
+		conv := f.newConversation()
+		for i := range 13 {
+			f.addMessage(conv, store.RoleUser, fmt.Sprintf("q%d", i), "")
+			f.addMessage(conv, store.RoleAssistant, fmt.Sprintf("a%d", i), "")
+		}
+		f.addMessage(conv, store.RoleUser, "unanswered", "")
+		p := llmtest.New(llmtest.Say("ok", 1, 1))
+		f.provider = p
+		f.postChat(conv, "g")
+		f.runOnce()
+		// the last 20 start with a3, whose question is outside the window
+		ms := sent(t, p, 0)
+		if len(ms) != 20 || ms[0].Role != llm.RoleUser || ms[0].Content != "q4" || ms[18].Content != "unanswered" {
+			t.Errorf("sent %d messages: %s", len(ms), roles(ms))
+		}
+	})
+	t.Run("a byte cut never leaves an orphan answer", func(t *testing.T) {
+		f := newFixture(t)
+		conv := f.newConversation()
+		for i := range 3 {
+			f.addMessage(conv, store.RoleUser, fmt.Sprintf("q%d:", i)+strings.Repeat("x", 5000), "")
+			f.addMessage(conv, store.RoleAssistant, fmt.Sprintf("a%d:", i)+strings.Repeat("x", 5000), "")
+		}
+		f.addMessage(conv, store.RoleUser, "q3:"+strings.Repeat("x", 5000), "")
+		p := llmtest.New(llmtest.Say("ok", 1, 1))
+		f.provider = p
+		f.postChat(conv, "g")
+		f.runOnce()
+		// 7 capped messages are over 24 KiB: q0 goes, and a0 with it
+		ms := sent(t, p, 0)
+		if len(ms) != 6 || ms[0].Role != llm.RoleUser || !strings.HasPrefix(ms[0].Content, "q1:") ||
+			!strings.HasPrefix(ms[4].Content, "q3:") {
+			t.Errorf("sent %d messages: %.80s", len(ms), roles(ms))
 		}
 	})
 }
@@ -545,5 +603,143 @@ func TestAJobCancelledByTheUserMeanwhileGetsNoMessageFromTheRunner(t *testing.T)
 	}
 	if ms := f.jobMessages(conv, id); len(ms) != 0 {
 		t.Errorf("messages = %+v", ms)
+	}
+}
+
+func TestAnAnswerWithoutItsQuestionIsNeverContext(t *testing.T) {
+	// J1 fails retryably, J2 is asked and answered meanwhile; J1's rerun
+	// must not see A2 (its question is newer than J1)
+	f := newFixture(t)
+	conv := f.newConversation()
+	p := llmtest.New(llmtest.Fail(llm.ErrRateLimited), llmtest.Say("A2", 1, 1), llmtest.Say("A1", 1, 1))
+	f.provider = p
+	j1 := f.postChat(conv, "Q1")
+	f.runOnce()
+	if f.job().State != store.JobQueued {
+		t.Fatalf("J1 = %s", f.job().State)
+	}
+	if cp := f.checkpoint(); roles(cp.Messages) != "user:Q1" {
+		t.Errorf("J1's checkpoint after the first run: %s", roles(cp.Messages))
+	}
+	j2 := f.postChat(conv, "Q2")
+	f.runOnce()
+	if f.job().State != store.JobSucceeded {
+		t.Fatalf("J2 = %s", f.job().State)
+	}
+	f.lastJob = j1
+	f.clk.Advance(time.Hour)
+	f.runOnce()
+	if got := roles(sent(t, p, 2)); got != "user:Q1" {
+		t.Errorf("J1's rerun sent %s", got)
+	}
+	if ms := f.jobMessages(conv, j1); len(ms) != 1 || ms[0].Content != "A1" {
+		t.Errorf("J1 messages %+v", ms)
+	}
+	_ = j2
+
+	t.Run("an answer without a job", func(t *testing.T) {
+		f := newFixture(t)
+		conv := f.newConversation()
+		f.addMessage(conv, store.RoleUser, "q", "")
+		f.clk.Advance(time.Second)
+		if err := f.st.InTx(bg, func(tx store.Tx) error {
+			_, err := tx.InsertMessage(store.Message{ConversationID: conv, UserID: userID, Role: store.RoleAssistant, Content: "stray"})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		p := llmtest.New(llmtest.Say("ok", 1, 1))
+		f.provider = p
+		f.postChat(conv, "g")
+		f.runOnce()
+		if got := roles(sent(t, p, 0)); got != "user:q|user:g" {
+			t.Errorf("sent %s", got)
+		}
+	})
+}
+
+func TestAnEmptyPrefixChatJobSavesItsCheckpointAtOnce(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	f.provider = llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (llm.CompletionResponse, error) {
+		if got := roles(f.checkpoint().Messages); got != "user:g" {
+			t.Errorf("checkpoint before the first model call: %q", got)
+		}
+		return llmtest.Say("ok", 1, 1).Resp, nil
+	})
+	f.postChat(conv, "g")
+	f.runOnce()
+}
+
+func TestConsecutiveUserMessagesAreMergedInThePrefix(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	f.addMessage(conv, store.RoleUser, "q0", "")
+	f.addMessage(conv, store.RoleSystem, ReasonModelBad, "")
+	f.addMessage(conv, store.RoleUser, "q1", "")
+	f.addMessage(conv, store.RoleAssistant, "a1", "")
+	p := llmtest.New(llmtest.Say("ok", 1, 1))
+	f.provider = p
+	f.postChat(conv, "g")
+	f.runOnce()
+	if got := roles(sent(t, p, 0)); got != "user:q0\n\nq1|assistant:a1|user:g" {
+		t.Errorf("sent %q", got)
+	}
+}
+
+func TestLaterQuestionsDoNotUseUpTheWindow(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	for i := range 20 {
+		f.addMessage(conv, store.RoleUser, fmt.Sprintf("q%d", i), "")
+		f.addMessage(conv, store.RoleAssistant, fmt.Sprintf("a%d", i), "")
+	}
+	p := llmtest.New(llmtest.Say("ok", 1, 1))
+	f.provider = p
+	id := f.postChat(conv, "g")
+	for i := range 10 {
+		f.addMessage(conv, store.RoleUser, fmt.Sprintf("later%d", i), "")
+	}
+	f.lastJob = id
+	f.runOnce()
+	ms := sent(t, p, 0)
+	if len(ms) != 21 || ms[0].Content != "q10" || ms[19].Content != "a19" {
+		t.Errorf("sent %d messages: %s", len(ms), roles(ms))
+	}
+}
+
+func TestAQuestionInTheSameMillisecondAsTheJobIsContext(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	p := llmtest.New(llmtest.Say("ok", 1, 1))
+	f.provider = p
+	id := f.postChat(conv, "g")
+	f.insertMessage(conv, store.RoleUser, "same ms", "") // no clock advance
+	f.lastJob = id
+	f.runOnce()
+	if got := roles(sent(t, p, 0)); got != "user:same ms|user:g" {
+		t.Errorf("sent %s", got)
+	}
+}
+
+func TestTheByteCapCountsTheJoinOfMergedMessages(t *testing.T) {
+	f := newFixture(t)
+	conv := f.newConversation()
+	big := func(p string) string { return p + strings.Repeat("x", 5000) }
+	f.addMessage(conv, store.RoleUser, big("u0:"), "") // unanswered: merged with q1
+	for i := 1; i <= 2; i++ {
+		f.addMessage(conv, store.RoleUser, big(fmt.Sprintf("q%d:", i)), "")
+		f.addMessage(conv, store.RoleAssistant, big(fmt.Sprintf("a%d:", i)), "")
+	}
+	f.addMessage(conv, store.RoleUser, big("q3:"), "")
+	p := llmtest.New(llmtest.Say("ok", 1, 1))
+	f.provider = p
+	f.postChat(conv, "g")
+	f.runOnce()
+	// 6 x 4096 bytes are exactly 24 KiB, the blank line of the merge is
+	// over it: u0 goes
+	ms := sent(t, p, 0)
+	if len(ms) != 6 || !strings.HasPrefix(ms[0].Content, "q1:") || strings.Contains(ms[0].Content, "u0:") {
+		t.Errorf("sent %d messages: %.60s", len(ms), roles(ms))
 	}
 }

@@ -18,7 +18,9 @@ const (
 	maxHistoryBytes        = 24 << 10
 )
 
-// truncMarker ends a text cut to a cap (the same marker as the API views).
+// truncMarker ends a text cut to a cap. It and capText duplicate the API
+// views' marker and helper on purpose (agent must not import api); they are
+// to be shared in one place later.
 const truncMarker = "…[truncated]"
 
 // isChat reports a chat job: its TriggerRef names its conversation.
@@ -40,14 +42,23 @@ func capText(s string, limit int) string {
 	return s[:cut] + truncMarker
 }
 
-// history returns the conversation before a fresh chat job's goal: the last
-// historyMessages user and assistant messages (not the job's own), oldest
-// first, each capped at maxHistoryMessageBytes and together at most
-// maxHistoryBytes (the oldest go first). User messages newer than the job
-// are later instructions, not its context. Assistant messages keep their
-// role: they are earlier model output, never part of the system prompt. Any
-// failure (a deleted conversation, a store error) means no history: the job
-// runs without it.
+// history returns the conversation before a fresh chat job's goal, oldest
+// first, built from the user and assistant messages of other jobs:
+//   - user messages created after the job are later questions, not its
+//     context (dropped before the window is cut, so they use no slot);
+//   - then the last historyMessages messages, each capped at
+//     maxHistoryMessageBytes;
+//   - an assistant message stays only together with the user message of the
+//     same job (an answer whose question was cut off, newer than the job or
+//     without a job is never context), so the prefix never starts with one;
+//   - consecutive user messages (a question whose job failed) are merged into
+//     one, joined by a blank line;
+//   - the oldest messages go first until the merged prefix holds at most
+//     maxHistoryBytes.
+//
+// Assistant messages keep their role: they are earlier model output, never
+// part of the system prompt. Any failure (a deleted conversation, a store
+// error) means no history: the job runs without it.
 func (r *Runner) history(ctx context.Context, j store.Job) []llm.Message {
 	if !isChat(j) {
 		return nil
@@ -55,13 +66,12 @@ func (r *Runner) history(ctx context.Context, j store.Job) []llm.Message {
 	var ms []store.Message
 	if err := r.d.Store.View(ctx, func(tx store.Tx) error {
 		var err error
-		ms, err = tx.ListRecentMessages(j.UserID, j.TriggerRef, historyMessages, j.ID)
+		ms, err = tx.ListRecentMessages(j.UserID, j.TriggerRef, store.MaxRecentMessages, j.ID)
 		return err
 	}); err != nil {
 		return nil
 	}
-	var out []llm.Message
-	total := 0
+	var es []histEntry
 	for _, m := range ms {
 		var role llm.Role
 		switch m.Role {
@@ -75,16 +85,69 @@ func (r *Runner) history(ctx context.Context, j store.Job) []llm.Message {
 		default:
 			continue
 		}
-		c := capText(m.Content, maxHistoryMessageBytes)
-		if c == "" {
+		es = append(es, histEntry{role: role, content: m.Content, jobID: m.JobID})
+	}
+	if len(es) > historyMessages {
+		es = es[len(es)-historyMessages:]
+	}
+	for i := range es {
+		es[i].content = capText(es[i].content, maxHistoryMessageBytes)
+	}
+	es = dropOrphans(es)
+	for len(es) > 0 && mergedSize(es) > maxHistoryBytes {
+		es = dropOrphans(es[1:])
+	}
+	return merge(es)
+}
+
+type histEntry struct {
+	role    llm.Role
+	content string
+	jobID   string
+}
+
+// dropOrphans drops empty messages and the assistant messages whose job has
+// no user message in es.
+func dropOrphans(es []histEntry) []histEntry {
+	asked := map[string]bool{}
+	for _, e := range es {
+		if e.role == llm.RoleUser && e.jobID != "" && e.content != "" {
+			asked[e.jobID] = true
+		}
+	}
+	var out []histEntry
+	for _, e := range es {
+		if e.content == "" || (e.role == llm.RoleAssistant && !asked[e.jobID]) {
 			continue
 		}
-		out = append(out, llm.Message{Role: role, Content: c})
-		total += len(c)
+		out = append(out, e)
 	}
-	for len(out) > 0 && total > maxHistoryBytes {
-		total -= len(out[0].Content)
-		out = out[1:]
+	return out
+}
+
+const userJoin = "\n\n"
+
+// mergedSize is the byte size of merge(es).
+func mergedSize(es []histEntry) int {
+	n := 0
+	for i, e := range es {
+		n += len(e.content)
+		if i > 0 && e.role == llm.RoleUser && es[i-1].role == llm.RoleUser {
+			n += len(userJoin)
+		}
+	}
+	return n
+}
+
+// merge turns es into messages, joining consecutive user messages.
+func merge(es []histEntry) []llm.Message {
+	var out []llm.Message
+	for _, e := range es {
+		if n := len(out); n > 0 && e.role == llm.RoleUser && out[n-1].Role == llm.RoleUser {
+			out[n-1].Content += userJoin + e.content
+			continue
+		}
+		out = append(out, llm.Message{Role: e.role, Content: e.content})
 	}
 	return out
 }

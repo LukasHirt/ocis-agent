@@ -251,6 +251,7 @@ type fixture struct {
 	lastJob  string
 	dbPath   string
 	calls    *toolCounter
+	pastJob  string // the job of the last user message added by addMessage
 }
 
 // newFixture builds a runner's world: a SQLite store and the gate on the
