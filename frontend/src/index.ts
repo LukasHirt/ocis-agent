@@ -31,7 +31,9 @@ export default defineWebApplication({
       fetch: window.fetch.bind(window),
       showMessage: (m) => messages.showMessage(m),
       showErrorMessage: (m) => messages.showErrorMessage(m),
-      dispatchModal: (m) => modals.dispatchModal(m)
+      dispatchModal: (m) => modals.dispatchModal(m),
+      isModalOpen: (id) => modals.modals.some((m) => m.id === id),
+      onModalsChange: (cb) => modals.$subscribe(cb, { detached: true, flush: 'sync' })
     })
 
     const appInfo = {

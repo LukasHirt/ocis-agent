@@ -31,9 +31,56 @@ describe('visibleText', () => {
     expect(visibleText('\u0085\u009B').text).toBe('\\u{0085}\\u{009B}')
   })
 
-  it('keeps characters outside the listed classes, such as the zero-width space and emoji', () => {
-    expect(visibleText('a\u200Bb')).toEqual({ text: 'a\u200Bb', hadControls: false })
+  it('keeps ordinary text such as emoji and accented letters', () => {
     expect(visibleText('ok \u{1F600} \u00E9')).toEqual({ text: 'ok \u{1F600} \u00E9', hadControls: false })
+  })
+
+  it('makes line and paragraph separators visible', () => {
+    expect(visibleText('a\u2028b\u2029c').text).toBe('a\\u{2028}b\\u{2029}c')
+  })
+
+  it('makes zero-width, invisible and filler characters visible', () => {
+    const cases: [string, string][] = [
+      ['\u200B', '200B'],
+      ['\u200C', '200C'],
+      ['\u200D', '200D'],
+      ['\u00AD', '00AD'],
+      ['\u034F', '034F'],
+      ['\u2060', '2060'],
+      ['\u2061', '2061'],
+      ['\u2062', '2062'],
+      ['\u2063', '2063'],
+      ['\u2064', '2064'],
+      ['\u3164', '3164'],
+      ['\u115F', '115F'],
+      ['\u1160', '1160'],
+      ['\u{E0000}', 'E0000'],
+      ['\u{E0041}', 'E0041'],
+      ['\u{E007F}', 'E007F']
+    ]
+    for (const [c, hex] of cases) {
+      expect(visibleText(`a${c}b`)).toEqual({ text: `a\\u{${hex}}b`, hadControls: true })
+    }
+  })
+
+  it('shows a name with a hidden zero-width space differently from the plain name', () => {
+    expect(visibleText('report\u200B.exe').text).not.toBe(visibleText('report.exe').text)
+  })
+
+  it('keeps a zero-width joiner inside an emoji sequence', () => {
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'
+    expect(visibleText(family)).toEqual({ text: family, hadControls: false })
+    const heart = '\u2764\uFE0F\u200D\u{1F525}'
+    expect(visibleText(heart)).toEqual({ text: heart, hadControls: false })
+    expect(visibleText('a\u200D\u{1F600}').text).toBe('a\\u{200D}\u{1F600}')
+    expect(visibleText('\u{1F600}\u200Da').text).toBe('\u{1F600}\\u{200D}a')
+  })
+
+  it('makes lone surrogates visible and keeps valid pairs', () => {
+    expect(visibleText('a\uD800b').text).toBe('a\\u{D800}b')
+    expect(visibleText('a\uDFFFb').text).toBe('a\\u{DFFF}b')
+    expect(visibleText('\uDE00\uD83D').text).toBe('\\u{DE00}\\u{D83D}')
+    expect(visibleText('\uD83D\uDE00')).toEqual({ text: '\u{1F600}', hadControls: false })
   })
 
   it('keeps markup as literal text', () => {

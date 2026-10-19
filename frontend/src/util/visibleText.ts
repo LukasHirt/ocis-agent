@@ -1,7 +1,15 @@
-// Characters that can hide or reorder text: bidi embeddings, overrides and
-// isolates, direction marks, the Arabic letter mark, the BOM, and every C0
-// control (except tab and newline), DEL and the C1 controls.
-const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g
+// Characters that can hide, fake or reorder text, all shown as escapes:
+// - every C0 control except tab and newline, DEL and the C1 controls
+// - bidi embeddings, overrides and isolates, direction marks, the Arabic
+//   letter mark, line and paragraph separators
+// - invisible characters: soft hyphen, combining grapheme joiner, zero-width
+//   space, non-joiner and joiner, word joiner and invisible operators, BOM,
+//   tag characters, Hangul fillers
+// - lone surrogates (the u flag matches only unpaired ones)
+// A zero-width joiner between two pictographs (an emoji sequence such as a
+// family) is kept, optionally after a variation selector or skin tone.
+const CONTROL =
+  /(?!(?<=\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D(?=\p{Extended_Pictographic}))[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\u{E0000}-\u{E007F}\uD800-\uDFFF]/gu
 
 export type Segment = { ctl: false; text: string } | { ctl: true; text: string; code: string }
 

@@ -72,9 +72,17 @@ describe('createPlatform', () => {
   const deps = () => {
     let token = 'first'
     const modals: Array<Record<string, unknown>> = []
+    let open: string[] = []
+    const listeners = new Set<() => void>()
     return {
       setToken: (t: string) => (token = t),
       modals,
+      listeners,
+      // what the host's removeModal / removeAllModals do
+      close: (id?: string) => {
+        open = id === undefined ? [] : open.filter((x) => x !== id)
+        listeners.forEach((l) => l())
+      },
       d: {
         accessToken: () => token,
         backendUrl: undefined as unknown,
@@ -82,7 +90,15 @@ describe('createPlatform', () => {
         showMessage: (_: { title: string; desc?: string; status?: string }) => undefined,
         showErrorMessage: (_: { title: string; desc?: string }) => undefined,
         dispatchModal: (m: Record<string, unknown>) => {
+          const id = `m${modals.length}`
           modals.push(m)
+          open.push(id)
+          return { id }
+        },
+        isModalOpen: (id: string) => open.includes(id),
+        onModalsChange: (cb: () => void) => {
+          listeners.add(cb)
+          return () => listeners.delete(cb)
         }
       }
     }
@@ -103,6 +119,26 @@ describe('createPlatform', () => {
     expect(createPlatform(x.d).backendUrl).toBe('/agent-api/v1')
     expect(createPlatform({ ...x.d, backendUrl: '/x/api/' }).backendUrl).toBe('/x/api')
     expect(createPlatform({ ...x.d, backendUrl: 42 }).backendUrl).toBe('/agent-api/v1')
+  })
+
+  it('accepts only a root-relative backend URL', () => {
+    const x = deps()
+    const url = (backendUrl: unknown) => createPlatform({ ...x.d, backendUrl }).backendUrl
+    expect(url('/agent-api/v1')).toBe('/agent-api/v1')
+    for (const bad of [
+      'https://evil.example/api',
+      '//evil.example/api',
+      '/\\evil.example/api',
+      '\\\\evil.example',
+      'agent-api/v1',
+      'javascript:alert(1)',
+      '',
+      '/',
+      ' /agent-api/v1',
+      '/agent api'
+    ]) {
+      expect(url(bad), bad).toBe('/agent-api/v1')
+    }
   })
 
   it('routes notifications to the oCIS messages', () => {
@@ -135,6 +171,38 @@ describe('createPlatform', () => {
     expect(x.modals[1].variation).toBe('passive')
     ;(x.modals[1].onCancel as () => void)()
     await expect(b).resolves.toBe(false)
+    expect(x.listeners.size).toBe(0)
+  })
+
+  it('resolves confirm with false when the modal is removed without a decision', async () => {
+    const x = deps()
+    const p = createPlatform(x.d)
+    const a = p.confirm({ title: 't', message: 'm', confirmText: 'ok' })
+    const b = p.confirm({ title: 't2', message: 'm', confirmText: 'ok' })
+    x.close('m0')
+    await expect(a).resolves.toBe(false)
+    x.close()
+    await expect(b).resolves.toBe(false)
+    expect(x.listeners.size).toBe(0)
+  })
+
+  it('keeps true when the host removes the modal after confirming', async () => {
+    const x = deps()
+    const p = createPlatform(x.d)
+    const a = p.confirm({ title: 't', message: 'm', confirmText: 'ok' })
+    ;(x.modals[0].onConfirm as () => void)()
+    x.close('m0')
+    await expect(a).resolves.toBe(true)
+  })
+
+  it('leaves other modals alone', async () => {
+    const x = deps()
+    const p = createPlatform(x.d)
+    let settled = false
+    void p.confirm({ title: 't', message: 'm', confirmText: 'ok' }).then(() => (settled = true))
+    x.close('other')
+    await Promise.resolve()
+    expect(settled).toBe(false)
   })
 
   it('uses the given fetch and the real clock and random source', () => {

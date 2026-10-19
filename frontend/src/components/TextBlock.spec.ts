@@ -40,10 +40,10 @@ describe('TextBlock', () => {
     expect(w.element.textContent).toBe('a\\u{0000}b\\u{009B}c\td\ne')
   })
 
-  it('keeps emoji and the zero-width space as they are', () => {
-    const w = mount(TextBlock, { props: { text: 'hi \u{1F600}\u200B!' } })
-    expect(w.findAll('span.agent-ctl')).toHaveLength(0)
-    expect(w.element.textContent).toBe('hi \u{1F600}\u200B!')
+  it('keeps emoji and makes the zero-width space and line separator visible', () => {
+    const w = mount(TextBlock, { props: { text: 'hi \u{1F600}\u200B!\u2028' } })
+    expect(w.findAll('span.agent-ctl').map((s) => s.text())).toEqual(['\\u{200B}', '\\u{2028}'])
+    expect(w.element.textContent).toBe('hi \u{1F600}\\u{200B}!\\u{2028}')
   })
 
   it('renders very long strings in full', () => {

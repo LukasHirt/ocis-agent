@@ -82,6 +82,23 @@ describe('JsonBlock', () => {
     expect(writeText).toHaveBeenCalledWith('bad\u202E')
   })
 
+  it('shows Copied for a while and clears its timer on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const writeText = vi.fn(async () => {})
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+      const w = mount(JsonBlock, { props: { raw: '{}' } })
+      await w.find('button').trigger('click')
+      await flushPromises()
+      expect(w.find('button').text()).toBe('Copied')
+      expect(vi.getTimerCount()).toBe(1)
+      w.unmount()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('hides the copy button without a clipboard API', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: undefined })
     const w = mount(JsonBlock, { props: { raw: '{}' } })

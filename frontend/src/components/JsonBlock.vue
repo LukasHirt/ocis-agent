@@ -11,7 +11,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import TextBlock from './TextBlock.vue'
 import { prettyJson, stringifyValue } from '../util/json'
 
@@ -28,16 +28,28 @@ const preStyle = { maxHeight: '24rem', overflow: 'auto' }
 
 const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard?.writeText
 const copied = ref(false)
+let resetTimer: ReturnType<typeof setTimeout> | undefined
+
+const clearResetTimer = () => {
+  if (resetTimer !== undefined) clearTimeout(resetTimer)
+  resetTimer = undefined
+}
 
 const copy = async () => {
   try {
     await navigator.clipboard.writeText(shown.value)
     copied.value = true
-    setTimeout(() => (copied.value = false), 2000)
+    clearResetTimer()
+    resetTimer = setTimeout(() => {
+      resetTimer = undefined
+      copied.value = false
+    }, 2000)
   } catch {
     copied.value = false
   }
 }
+
+onBeforeUnmount(clearResetTimer)
 </script>
 
 <style>
