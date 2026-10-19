@@ -7,11 +7,21 @@ import (
 
 // Response shapes. Times are RFC 3339 in UTC; a time that does not apply is
 // null. No view ever carries a token value, a token hash or (outside the
-// revoke-all preview) a token label.
+// revoke-all preview) a token label. Fields marked untrusted are data from
+// files, the model or other clients: render them as plain text only.
+//
+// Pages (jobs, approvals, audit): follow next_cursor until it is null. A page
+// can hold fewer entries than the limit, even none, and still have a
+// next_cursor (a byte budget or, for filtered audit lists, a scan budget
+// ended it); only a null next_cursor means the end.
 
 // statusView is the body of GET /status (and of enrol). A caller who is not
-// enrolled gets enrolled=false and zero values everywhere else, except
-// token.status "none".
+// enrolled gets enrolled=false, token.status "none", the global kill_switch
+// flags and the operator's models, and zero values for everything else.
+// pending_approvals counts the pending approvals of LIVE jobs only (they can
+// be decided; at most 500 are counted), while GET /approvals?state=pending
+// also lists those of ended jobs, marked job_ended=true, until the
+// scheduler settles them.
 type statusView struct {
 	Enrolled         bool           `json:"enrolled"`
 	User             userView       `json:"user"`
@@ -26,7 +36,7 @@ type statusView struct {
 
 type userView struct {
 	ID    string `json:"id"`
-	Name  string `json:"name"`  // display name
+	Name  string `json:"name"`  // display name: chosen by the user or an admin, untrusted
 	Login string `json:"login"` // login name
 }
 
@@ -81,7 +91,7 @@ type previewView struct {
 // confirmation: the label (the user's own app password names) and dates,
 // never a hash or a value.
 type tokenSummaryView struct {
-	Label     string  `json:"label"`
+	Label     string  `json:"label"` // set by whatever client created the token: untrusted
 	CreatedAt *string `json:"created_at"`
 	ExpiresAt *string `json:"expires_at"`
 	Ours      bool    `json:"ours"`
@@ -174,7 +184,8 @@ type jobPageView struct {
 }
 
 // approvalView is one approval. Args and Preview are the stored JSON,
-// exactly what executes if approved (untrusted data, show it fenced);
+// exactly what executes if approved, NOT capped (up to 2 MiB each;
+// untrusted data, show it fenced);
 // Rationale is the model's explanation (untrusted, unverified, capped).
 // JobEnded marks a pending approval whose job has already ended: it can no
 // longer be decided and the scheduler settles it soon. NeedsVerification

@@ -36,9 +36,20 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 	dayStart := startOfUTCDay(now)
 	v := statusView{Token: tokenView{Status: "none"}, Models: modelsView{Available: []modelView{}}}
 	err := s.d.Store.View(ctx, func(tx store.Tx) error {
+		// the global state, also for a user who has not enrolled
+		switch ks, err := tx.GetSystem(store.KillSwitchKey); {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			return err
+		default:
+			v.KillSwitch.Database = ks == store.KillSwitchOnValue
+		}
+		v.KillSwitch.Environment = s.d.Cfg.KillSwitchEnv
+		v.Models = s.modelsView(store.Policy{})
+
 		u, err := tx.GetUser(p.UserID)
 		if errors.Is(err, store.ErrNotFound) {
-			return nil // not enrolled: zero values
+			return nil // not enrolled: zero values for the user's own state
 		}
 		if err != nil {
 			return err
@@ -71,15 +82,6 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 			DailyTokens: s.dailyBudget(pol.DailyTokens), // what the runner enforces
 			ResetsAt:    timeView(dayStart.AddDate(0, 0, 1)),
 		}
-
-		switch ks, err := tx.GetSystem(store.KillSwitchKey); {
-		case errors.Is(err, store.ErrNotFound):
-		case err != nil:
-			return err
-		default:
-			v.KillSwitch.Database = ks == store.KillSwitchOnValue
-		}
-		v.KillSwitch.Environment = s.d.Cfg.KillSwitchEnv
 
 		v.Models = s.modelsView(pol)
 

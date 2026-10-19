@@ -12,14 +12,24 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
 
+// A user who has not enrolled sees the global state (both kill switch
+// flags, the operator's models) and zero values for everything of their own.
 func TestStatusOfAnUnknownUserIsNotEnrolled(t *testing.T) {
 	s := newStack(t, func(d *Deps) { d.Cfg.KillSwitchEnv = true })
+	s.mustTx(t, func(tx store.Tx) error { return tx.SetSystem(store.KillSwitchKey, store.KillSwitchOnValue) })
 	rec := s.do(http.MethodGet, "/agent-api/v1/status", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
 	}
 	got := statusDoc(t, rec)
-	want := statusView{Token: tokenView{Status: "none"}, Models: modelsView{Available: []modelView{}}}
+	want := statusView{
+		Token:      tokenView{Status: "none"},
+		KillSwitch: killSwitchView{Database: true, Environment: true},
+		Models: modelsView{
+			Default:   "model-a",
+			Available: []modelView{{ID: "model-a", Label: "Model A"}, {ID: "model-b", Label: "Model B"}},
+		},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("not enrolled = %+v, want %+v", got, want)
 	}
