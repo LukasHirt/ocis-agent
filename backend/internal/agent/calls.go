@@ -179,6 +179,11 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 			if a.State == store.ApprovalApproved && r.d.OwnWrites != nil {
 				// never executed before: a Done outcome is this run's write
 				afterWrite = r.d.OwnWrites.BeforeWrite(ctx, env, tools.TargetPaths(a.Args))
+				// its checks take a while: look at the kill switch, the
+				// pause and the credentials again right before the write
+				if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
+					return true, err
+				}
 			}
 		}
 		out, err := r.d.Executor.Run(ctx, claim, env, a.ID)

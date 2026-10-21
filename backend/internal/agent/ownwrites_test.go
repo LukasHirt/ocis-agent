@@ -19,6 +19,7 @@ type fakeOwnWrites struct {
 	after   int
 	exists  func() bool // reports whether the target exists; called in BeforeWrite
 	existed []bool
+	during  func() // runs inside BeforeWrite
 }
 
 func (o *fakeOwnWrites) BeforeWrite(_ context.Context, env tools.Env, paths []string) func(context.Context) {
@@ -28,6 +29,9 @@ func (o *fakeOwnWrites) BeforeWrite(_ context.Context, env tools.Env, paths []st
 	o.users = append(o.users, env.UserID)
 	if o.exists != nil {
 		o.existed = append(o.existed, o.exists())
+	}
+	if o.during != nil {
+		o.during()
 	}
 	return func(context.Context) {
 		o.mu.Lock()
@@ -206,4 +210,25 @@ func TestOnlyFreshApprovedWritesAreReported(t *testing.T) {
 			t.Fatalf("before %d, after %d for a reconciled call", b, a)
 		}
 	})
+}
+
+// The checks before an approved write run again after BeforeWrite, which may
+// take a while: a pause or kill switch that arrives meanwhile stops the call.
+func TestAPauseDuringBeforeWriteStopsTheApprovedWrite(t *testing.T) {
+	f := newFixture(t)
+	o := &fakeOwnWrites{}
+	o.during = func() { f.setPolicy(func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseUser }) }
+	approvedRun(t, f, o, store.ApprovalApproved, nil)
+	if n := f.executes("files.write_new"); n != 0 || f.modifying("/a.txt") != 0 {
+		t.Fatalf("%d executes after a pause", n)
+	}
+	if st := f.approvals()[0].State; st != store.ApprovalApproved {
+		t.Fatalf("approval = %s, want approved (resumed later)", st)
+	}
+	if f.job().State != store.JobQueued {
+		t.Fatalf("job = %s, want requeued", f.job().State)
+	}
+	if _, after := o.counts(); after != 0 {
+		t.Errorf("after called %d times", after)
+	}
 }
