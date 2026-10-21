@@ -36,7 +36,7 @@
     <p
       v-if="store.settings"
       v-text="
-        $gettextInterpolate(
+        interpolate(
           $gettext('The agent pauses itself when you have not visited for %{days} days.'),
           { days: store.settings.dormancy_days },
           true
@@ -99,7 +99,7 @@ import type { PauseReason } from '../../api/types'
 // kill switch and disabling (unenrolling) the agent.
 const store = useAgentStore()
 const platform = usePlatform()
-const { $gettext } = useGettext()
+const { $gettext, interpolate } = useGettext()
 const { describe, notifyError } = useReport()
 
 const status = computed(() => store.status)

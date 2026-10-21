@@ -5,7 +5,7 @@
     <p
       v-if="status?.token.expires_at"
       v-text="
-        $gettextInterpolate($gettext('It expires on %{time}.'), { time: formatTime(status.token.expires_at) }, true)
+        interpolate($gettext('It expires on %{time}.'), { time: formatTime(status.token.expires_at) }, true)
       "
     />
     <p

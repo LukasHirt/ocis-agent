@@ -5,7 +5,7 @@
       <p
         data-testid="agent-budget-usage"
         v-text="
-          $gettextInterpolate(
+          interpolate(
             $gettext('%{used} of %{total} tokens used today'),
             { used: number(budget.used_tokens), total: number(budget.daily_tokens) },
             true
@@ -32,7 +32,7 @@
     <p
       class="agent-settings-hint"
       v-text="
-        $gettextInterpolate(
+        interpolate(
           $gettext('You can lower the limit set by the operator (%{max} tokens) but not raise it.'),
           { max: number(max) },
           true

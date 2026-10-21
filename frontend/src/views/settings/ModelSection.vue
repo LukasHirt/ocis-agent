@@ -19,7 +19,7 @@
           class="agent-settings-hint"
           :data-testid="'agent-model-' + task.key + '-effective'"
           v-text="
-            $gettextInterpolate($gettext('Used: %{model}'), { model: labelOf(form.draft.models[task.key] ?? defaultId) }, true)
+            interpolate($gettext('Used: %{model}'), { model: labelOf(form.draft.models[task.key] ?? defaultId) }, true)
           "
         />
       </div>
