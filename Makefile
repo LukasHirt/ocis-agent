@@ -13,6 +13,7 @@ backend-test:
 
 backend-vet:
 	go vet -C backend ./...
+	go vet -C backend -tags integration ./internal/integration/...
 	test -z "$$(gofmt -l backend)"
 
 frontend-build:

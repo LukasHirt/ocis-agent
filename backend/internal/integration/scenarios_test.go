@@ -192,29 +192,14 @@ func (h *harness) approval(t *testing.T, id string) approvalDoc {
 	return a
 }
 
-// davDelete removes a file or folder the test created (cleanup).
+// davDelete removes a file the test created (cleanup); remove refuses
+// anything else.
 func (h *harness) davDelete(t *testing.T, p string) {
 	t.Helper()
 	st, err := h.remove(p)
 	if err != nil || (st != http.StatusNoContent && st != http.StatusNotFound) {
 		t.Errorf("delete %s: %d %v", p, st, err)
 	}
-}
-
-func (h *harness) davExists(t *testing.T, p string) bool {
-	t.Helper()
-	st, _, err := h.dav("PROPFIND", p, nil, map[string]string{"Depth": "0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	switch st {
-	case http.StatusMultiStatus:
-		return true
-	case http.StatusNotFound:
-		return false
-	}
-	t.Fatalf("PROPFIND %s = %d", p, st)
-	return false
 }
 
 // --- scenarios ---
@@ -240,6 +225,7 @@ func scenarioEnrol(t *testing.T, h *harness) {
 
 	// a file put there directly, so the listing must come from oCIS
 	probe := "/ocis-agent-it-" + strings.Trim(marker(), "[]") + ".txt"
+	h.track(probe)
 	if st, _, err := h.dav(http.MethodPut, probe, []byte("probe"), nil); err != nil || st/100 != 2 {
 		t.Fatalf("put %s: %d %v", probe, st, err)
 	}
@@ -345,10 +331,11 @@ func scenarioApproval(t *testing.T, h *harness) {
 	h.enrol(t)
 	conv := h.conversation(t)
 
-	run := func(decision string) (approvalDoc, jobDoc, string) {
+	run := func(decision string) (approvalDoc, jobDoc, string, string) {
 		m := marker()
 		path := "/ocis-agent-it-" + strings.Trim(m, "[]") + ".txt"
 		content := "written by the integration test " + m
+		h.track(path) // the sidecar creates it once approved
 		t.Cleanup(func() { h.davDelete(t, path) })
 		h.llm.on(m, callThenAnswer("files.write_new", map[string]string{"path": path, "content": content}, "Done."))
 		sent := h.send(t, conv, "Write a file "+m)
@@ -368,7 +355,7 @@ func scenarioApproval(t *testing.T, h *harness) {
 		if s := h.status(t); s.PendingApprovals < 1 {
 			t.Fatalf("status counts %d pending approvals", s.PendingApprovals)
 		}
-		if h.davExists(t, path) {
+		if h.exists(t, path) {
 			t.Fatalf("%s exists before the decision", path)
 		}
 
@@ -385,10 +372,10 @@ func scenarioApproval(t *testing.T, h *harness) {
 		h.expect(t, http.StatusOK, http.MethodPost, "/approvals/"+a.ID+"/decision",
 			map[string]string{"decision": decision, "args_hash": a.ArgsHash}, &decided)
 		j := h.waitJob(t, sent.Job.ID, "succeeded")
-		return h.approval(t, a.ID), j, path
+		return h.approval(t, a.ID), j, path, m
 	}
 
-	a, _, path := run("approve")
+	a, _, path, _ := run("approve")
 	if a.State != "executed" || a.Outcome == nil || a.Outcome.State != "done" {
 		t.Fatalf("approved approval: state %s, outcome %+v", a.State, a.Outcome)
 	}
@@ -397,14 +384,23 @@ func scenarioApproval(t *testing.T, h *harness) {
 		t.Fatalf("GET %s = %d %v", path, st, err)
 	}
 
-	a, j, path := run("reject")
+	a, j, path, m := run("reject")
 	if a.State != "rejected" {
 		t.Fatalf("rejected approval: state %s", a.State)
 	}
-	if !strings.Contains(j.Answer, "Done.") {
-		t.Fatalf("the model did not get the rejection back: %q", j.Answer)
+	// the model got the rejection as the call's result, then answered
+	reqs := h.llm.requests(m)
+	if len(reqs) != 2 {
+		t.Fatalf("the model was asked %d time(s) for the rejected call, want 2", len(reqs))
 	}
-	if h.davExists(t, path) {
+	res := strings.Join(reqs[1].toolResults(), "\n")
+	if !strings.Contains(res, "files.write_new") || !strings.Contains(res, "rejected") || !strings.Contains(res, "The user rejected this action.") {
+		t.Fatalf("the model did not get the rejection back: %q", res)
+	}
+	if !strings.Contains(j.Answer, "The user rejected this action.") {
+		t.Fatalf("the job's answer does not carry the rejection the model saw: %q", j.Answer)
+	}
+	if h.exists(t, path) {
 		t.Fatalf("%s exists after a rejection", path)
 	}
 }
@@ -424,12 +420,14 @@ func scenarioPause(t *testing.T, h *harness) {
 	if !sent.Agent.Paused {
 		t.Fatalf("the send does not report the pause: %+v", sent.Agent)
 	}
-	time.Sleep(4 * time.Second) // a few worker polls
-	if j := h.job(t, sent.Job.ID); j.State != "queued" {
-		t.Fatalf("a paused user's job is %s, want queued", j.State)
-	}
-	if n := len(h.llm.requests(m)); n != 0 {
-		t.Fatalf("the model was called %d time(s) while paused", n)
+	// the send woke the workers: for a few seconds (several claim attempts)
+	// the job must stay queued and the model unasked
+	var j jobDoc
+	if !consistently(4*time.Second, func() bool {
+		j = h.job(t, sent.Job.ID)
+		return j.State == "queued" && len(h.llm.requests(m)) == 0
+	}) {
+		t.Fatalf("a paused user's job ran: state %s, %d model call(s)", j.State, len(h.llm.requests(m)))
 	}
 	h.expect(t, http.StatusOK, http.MethodPost, "/resume", map[string]any{}, &s)
 	if s.Paused {
@@ -553,8 +551,10 @@ func scenarioAudit(t *testing.T, h *harness) {
 
 // (h) memory: create a note, edit it with If-Match, a stale ETag is 412.
 func scenarioMemory(t *testing.T, h *harness) {
-	slug := "it-" + strings.ToLower(strings.Trim(strings.NewReplacer("_", "-").Replace(marker()), "[]")) + ".md"
+	// a slug of [a-z0-9-] that is also an ocis-agent-it-* name
+	slug := testFilePrefix + strings.ToLower(strings.Trim(strings.NewReplacer("_", "-").Replace(marker()), "[]")) + ".md"
 	name := "notes/" + slug
+	h.track("/.ocis-agent/memory/" + name)
 	t.Cleanup(func() { h.davDelete(t, "/.ocis-agent/memory/"+name) })
 
 	var created struct {
