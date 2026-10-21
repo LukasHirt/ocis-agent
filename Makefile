@@ -1,5 +1,6 @@
 -include .env
 OCIS_DEV_PORT ?= 9200
+AGENT_DEV_PORT ?= 9300
 
 .PHONY: backend-test backend-vet frontend-build frontend-test license-check dev-up dev-down spike sidecar
 
@@ -36,7 +37,7 @@ dev-down:
 spike:
 	go run -C backend ./cmd/spike -base https://localhost:$(OCIS_DEV_PORT) $(ARGS)
 
-# the sidecar listens on :9300 and serves the REST API under /agent-api/v1 (nginx routes /agent-api/ to it;
+# the sidecar listens on :$(AGENT_DEV_PORT) (default 9300) and serves the REST API under /agent-api/v1 (nginx routes /agent-api/ to it;
 # state-changing requests must come from AGENT_ALLOWED_ORIGIN, default the oCIS URL). Local state and a stable dev master key
 # live in backend/bin/data (git-ignored); delete that directory to reset. Never use this key elsewhere.
 # AGENT_ROLES defaults to the api role only here: the default (api,worker) needs a model provider, which the
@@ -48,4 +49,4 @@ spike:
 sidecar:
 	@mkdir -p $(CURDIR)/backend/bin/data
 	@test -f $(CURDIR)/backend/bin/data/dev-master.key || (umask 077 && openssl rand -base64 32 > $(CURDIR)/backend/bin/data/dev-master.key)
-	AGENT_ROLES=$${AGENT_ROLES:-api} AGENT_DATA_DIR=$(CURDIR)/backend/bin/data AGENT_OCIS_URL=https://localhost:$(OCIS_DEV_PORT) AGENT_INSECURE=true AGENT_MASTER_KEY=$$(cat $(CURDIR)/backend/bin/data/dev-master.key) go run -C backend ./cmd/ocis-agent
+	AGENT_ROLES=$${AGENT_ROLES:-api} AGENT_HTTP_ADDR=:$(AGENT_DEV_PORT) AGENT_DATA_DIR=$(CURDIR)/backend/bin/data AGENT_OCIS_URL=https://localhost:$(OCIS_DEV_PORT) AGENT_INSECURE=true AGENT_MASTER_KEY=$$(cat $(CURDIR)/backend/bin/data/dev-master.key) go run -C backend ./cmd/ocis-agent
