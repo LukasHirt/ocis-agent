@@ -1,0 +1,11 @@
+# The image is built from backend/ plus the licence files only: everything else
+# (the dev stack, certificates, .env, local data, the frontend) stays out of the
+# build context.
+*
+!backend/
+!LICENSE
+!NOTICE
+backend/bin/
+**/*.test
+**/*.out
+**/.DS_Store

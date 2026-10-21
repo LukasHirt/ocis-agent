@@ -8,6 +8,19 @@ extension (`frontend/`).
 - `backend/` Go module `github.com/owncloud/ocis-agent/backend`
 - `frontend/` `web-app-agent`, the oCIS Web extension (Vue 3 + TypeScript)
 - `docker-compose.yml` + `dev/` dev stack (oCIS + TLS proxy), started from the repo root
+- `Dockerfile` + `deploy/docker-compose.example.yml` container image of the sidecar and an example
+  deployment next to an existing oCIS
+
+## Container image
+
+    docker build -t ocis-agent:dev .
+
+The image holds the static binary only and runs as uid 10001 with its database in the `/data`
+volume, so the root filesystem can be read-only. All settings come from the environment;
+`AGENT_MASTER_KEY` is environment-only, so pass it with an env_file of mode 0600 (never bake it into
+an image). Port 9300 serves `/agent-api/` (health check: `GET /agent-api/healthz`), port 9301 only
+`/healthz` and `/readyz` for probes. Give the container a stop grace period of at least
+`AGENT_SHUTDOWN_DRAIN` + 15s (45s with the defaults). See `deploy/docker-compose.example.yml`.
 
 ## Contributing
 

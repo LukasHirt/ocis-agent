@@ -1,0 +1,84 @@
+# Example: the ocis-agent sidecar next to an existing oCIS deployment.
+#
+# This file runs the sidecar only. oCIS, its reverse proxy and the web extension
+# (frontend/dist, installed into the oCIS web assets as apps/agent) are yours.
+# oCIS needs app tokens: OCIS_ADD_RUN_SERVICES=auth-app and PROXY_ENABLE_APP_AUTH=true.
+#
+# Before the first start, next to this file:
+#
+#   umask 077
+#   printf 'AGENT_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" > agent.env   # mode 0600
+#   printf '%s\n' 'your-llm-api-key' > llm_api_key                             # mode 0600
+#   sudo chown 10001 llm_api_key   # Linux: the container user (uid 10001) must read it
+#
+# AGENT_MASTER_KEY is read from the environment only (there is no file variant),
+# so keep agent.env at mode 0600, outside version control, and back it up
+# separately from the database: a backup is useless without the same key, and a
+# lost key cannot be recovered. Only the LLM key has a file variant
+# (AGENT_LLM_API_KEY_FILE), used here with a docker secret.
+#
+# Reverse proxy: route https://<oCIS host>/agent-api/ to this container's port
+# 9300 with response buffering off and a long read timeout (server-sent events
+# on /agent-api/v1/events). Never route /agent/: those are the extension's UI
+# routes and must reach oCIS Web.
+#
+#   docker compose -f docker-compose.example.yml up -d
+
+services:
+  ocis-agent:
+    image: ocis-agent:dev # docker build -t ocis-agent:dev . (from the repository root)
+    restart: unless-stopped
+    env_file:
+      - agent.env
+    environment:
+      # the public origin of oCIS (scheme://host[:port], no path); the browser's
+      # Origin must equal AGENT_ALLOWED_ORIGIN, which defaults to it
+      AGENT_OCIS_URL: https://ocis.example.com
+      # api serves the REST API, worker runs the jobs and all maintenance (token
+      # renewal, expiry, dormancy). Run exactly ONE process with the worker role
+      # per database.
+      AGENT_ROLES: api,worker
+      # the worker role needs a model endpoint: https, or http only on loopback
+      # (inside this container, a model on the Docker host is NOT loopback)
+      AGENT_LLM_BASE_URL: https://api.openai.com/v1
+      AGENT_LLM_MODEL: gpt-4.1-mini
+      AGENT_LLM_API_KEY_FILE: /run/secrets/llm_api_key
+      AGENT_SHUTDOWN_DRAIN: 30s
+    secrets:
+      - llm_api_key
+    volumes:
+      - agent-data:/data
+    # the database is the only state; everything else is read-only
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # published on loopback for a reverse proxy on the same host; on a shared
+    # Docker network with the proxy, drop "ports" and use ocis-agent:9300.
+    # The debug port 9301 (/healthz, /readyz) is for probes only: never publish it.
+    ports:
+      - "127.0.0.1:9300:9300"
+    healthcheck:
+      # liveness of the API and readiness of the process (/readyz is 503 while
+      # shutting down, before the secrets are ready or with no live worker)
+      test: ["CMD-SHELL", "wget -q -T 4 -O /dev/null http://127.0.0.1:9300/agent-api/healthz && wget -q -T 4 -O /dev/null http://127.0.0.1:9301/readyz"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    # SIGTERM drains running jobs for up to AGENT_SHUTDOWN_DRAIN, then requeues
+    # them: the grace period must be at least AGENT_SHUTDOWN_DRAIN + 15s
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
+
+secrets:
+  llm_api_key:
+    file: ./llm_api_key
+
+volumes:
+  # a fresh named volume takes the owner of the image's /data (uid 10001); for a
+  # bind mount, chown the host directory to 10001:10001 and chmod it 0700
+  agent-data:
