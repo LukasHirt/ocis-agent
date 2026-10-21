@@ -35,6 +35,14 @@ func TestKeysetPagesUseAnIndexRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	live, largs, err := countJobsQuery("u1", store.ProactiveTriggers, []store.JobState{store.JobQueued, store.JobRunning, store.JobWaitingApproval}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daily, dargs, err := countJobsQuery("u1", store.ProactiveTriggers, nil, time.Unix(1000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, q := range map[string]struct {
 		sql   string
 		args  []any
@@ -45,6 +53,8 @@ func TestKeysetPagesUseAnIndexRange(t *testing.T) {
 		"conversations":         {`SELECT id FROM conversations WHERE user_id = ?` + ccond + ` ORDER BY updated_at DESC, id DESC LIMIT 10`, append([]any{"u1"}, ccargs...), "conversations_user (user_id=? AND updated_at<?)"},
 		"messages":              {`SELECT id FROM messages WHERE conversation_id = ? AND user_id = ?` + mcond + ` ORDER BY created_at DESC, id DESC LIMIT 10`, append([]any{"c1", "u1"}, mcargs...), "messages_conversation (conversation_id=? AND created_at<?)"},
 		"jobs since":            {`SELECT COUNT(*) FROM jobs WHERE user_id = ? AND created_at >= ? AND trigger_kind = ?`, []any{"u1", int64(1), "chat"}, "jobs_user (user_id=? AND created_at>?)"},
+		"live proactive jobs":   {live, largs, "jobs_user_state (user_id=? AND state=?"},
+		"proactive jobs today":  {daily, dargs, "jobs_user (user_id=? AND created_at>?)"},
 		"change marks jobs":     {`SELECT COALESCE(MAX(updated_at), 0) FROM jobs WHERE user_id = ?`, []any{"u1"}, "jobs_user_updated (user_id=?)"},
 		"change marks messages": {`SELECT COALESCE(MAX(created_at), 0) FROM messages WHERE user_id = ?`, []any{"u1"}, "messages_user (user_id=?)"},
 	} {

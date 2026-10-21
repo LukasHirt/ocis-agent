@@ -196,13 +196,11 @@ func TestBackupDoesNotMigrateTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := supportedVersion(t) - 1
-	// undo the latest migration (0014)
+	// undo the latest migration (0015)
 	for _, q := range []string{
-		`ALTER TABLE cursors DROP COLUMN watch_etags`,
-		`ALTER TABLE cursors DROP COLUMN watch_dirty_since`,
-		`ALTER TABLE cursors DROP COLUMN watch_changed_at`,
-		`PRAGMA user_version = 13`,
-		`UPDATE system SET value = '13' WHERE key = 'schema_version'`,
+		`DROP INDEX jobs_user_state`,
+		`PRAGMA user_version = 14`,
+		`UPDATE system SET value = '14' WHERE key = 'schema_version'`,
 	} {
 		if _, err := s.w.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
