@@ -692,3 +692,107 @@ func TestWatchConfigValidation(t *testing.T) {
 		t.Errorf("defaults = %+v", got)
 	}
 }
+
+// A run cut off by its deadline keeps what the finished polls found; users
+// it did not get to are not pushed back by an interval.
+func TestWatchDeadlineKeepsFinishedPolls(t *testing.T) {
+	w := newWatchFixture(t)
+	w.cfg.Watch.Parallel = 1
+	w.envDelay = 40 * time.Millisecond
+	ids := w.watchUsers(8)
+	s := w.scheduler()
+	ctx, cancel := context.WithTimeout(bg, 150*time.Millisecond)
+	defer cancel()
+	if _, _, err := s.watchRun(ctx, w.clk.Now()); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	var done []string
+	for _, u := range ids {
+		if w.cursor(u).WatchETags["/Documents"] != "" {
+			done = append(done, u)
+		}
+	}
+	if len(done) == 0 || len(done) == len(ids) {
+		t.Fatalf("baselines after a cut-off run: %v of %d", done, len(ids))
+	}
+	// the rest is polled at the next run, without waiting an interval
+	w.envDelay = 0
+	n, _ := w.poll(s)
+	if n != len(ids)-len(done) {
+		t.Fatalf("the next run polled %d, want the %d left", n, len(ids)-len(done))
+	}
+	for _, u := range ids {
+		if w.cursor(u).WatchETags["/Documents"] == "" {
+			t.Errorf("%s never polled", u)
+		}
+	}
+}
+
+func TestWatchDeadlineIsShorterThanTheTaskTimeout(t *testing.T) {
+	w := newWatchFixture(t)
+	s := w.scheduler()
+	for _, tk := range s.tasks {
+		want := s.c.TaskTimeout
+		if tk.name == TaskWatch {
+			want = watchTaskTimeout
+		}
+		if tk.name == TaskWatch || tk.timeout > 0 {
+			if tk.timeout != want {
+				t.Errorf("%s timeout = %v, want %v", tk.name, tk.timeout, want)
+			}
+		}
+	}
+	if watchTaskTimeout >= s.c.TaskTimeout {
+		t.Errorf("watch deadline %v not below the task timeout", watchTaskTimeout)
+	}
+}
+
+// A pending change of folders the user no longer watches never fires.
+func TestWatchDropsAPendingChangeWithoutBaselines(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	w.put(u, "/Documents/a.txt")
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s) // pending
+	// the folder is taken off the list and another one is added
+	w.enableProactive(u, 0, func(p *store.Policy) { p.Watch = []string{"/Projects"} })
+	w.put(u, "/Projects/seed.txt")
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s)
+	if c := w.cursor(u); c.WatchDirtySince != nil {
+		t.Fatalf("a change of an unwatched folder stayed pending: %+v", c)
+	}
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s)
+	if n := len(w.fileJobs(u)); n != 0 {
+		t.Fatalf("%d file jobs for an unwatched folder", n)
+	}
+}
+
+// A poll in which every folder failed does not confirm that the folders
+// went quiet: the pending change waits for a poll that saw them.
+func TestWatchNeedsAWorkingPollToFire(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	w.put(u, "/Documents/a.txt")
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s) // pending
+	w.fake.Fail("PROPFIND", "/remote.php/dav/spaces/drive-"+u+"/", http.StatusBadGateway, 1)
+	w.clk.Advance(time.Minute)
+	w.poll(s)
+	if n := len(w.fileJobs(u)); n != 0 {
+		t.Fatalf("%d file jobs after a failed poll", n)
+	}
+	if w.cursor(u).WatchDirtySince == nil {
+		t.Fatal("the pending change was dropped")
+	}
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s)
+	if n := len(w.fileJobs(u)); n != 1 {
+		t.Fatalf("%d file jobs after a working poll, want 1", n)
+	}
+}

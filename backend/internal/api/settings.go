@@ -259,6 +259,23 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
+		if !pol.ProactiveEnabled || !slices.Contains(changed, "proactive_enabled") {
+			if slices.Contains(changed, "watch") {
+				// a pending change may be of a folder no longer watched;
+				// the baselines stay (a removed folder's is pruned by the
+				// next poll)
+				c, err := tx.GetCursor(p.UserID)
+				if err != nil {
+					return err
+				}
+				if c.WatchDirtySince != nil || c.WatchChangedAt != nil {
+					c.WatchDirtySince, c.WatchChangedAt = nil, nil
+					if err := tx.PutCursor(c); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		// names only: values can be paths and are the user's data
 		return s.appendAudit(tx, p.UserID, audit.KindPolicyChanged, "changed", strings.Join(changed, ","))
 	})

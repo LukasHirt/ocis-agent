@@ -57,7 +57,12 @@ func (c WatchConfig) withDefaults() (WatchConfig, error) {
 // Watch-folder poll limits for a folder that holds the agent's own folder
 // (the root): its listing is digested instead of its ETag.
 const (
-	maxWatchPages       = 10
+	maxWatchPages = 10
+	// watchTaskTimeout is the deadline of one watch run (shorter than
+	// Config.TaskTimeout: it delays the database tasks of the next Tick);
+	// watchApplyTimeout bounds the transaction recording one user's poll.
+	watchTaskTimeout    = time.Minute
+	watchApplyTimeout   = 10 * time.Second
 	maxRootListEntries  = 5000
 	listDigestPrefix    = "list:"
 	watchFolderSkipped  = 0
@@ -92,6 +97,7 @@ type watchPoll struct {
 	noCred  bool  // no usable credentials: nothing was polled
 	envErr  error // building the environment failed: nothing was polled
 	unauth  bool  // oCIS answered 401: the poll is discarded
+	cut     bool  // the run's deadline ended the poll: it is discarded and retried
 	errs    []error
 }
 
@@ -120,23 +126,40 @@ func (s *Scheduler) watchRun(ctx context.Context, now time.Time) (int, int, erro
 	if kill || s.c.Proactive.Limits.KillSwitchEnv {
 		return 0, 0, nil
 	}
-	due, err := s.watchDue(ctx, now)
+	prevAfter := s.watch.after
+	due, wrapped, err := s.watchDue(ctx, now)
 	if err != nil {
 		return 0, 0, err
 	}
-	polls := make([]watchPoll, len(due))
+	// Polls run Parallel at a time; each result is applied as soon as it
+	// arrives, so the deadline only costs the polls it cut short. No poll
+	// starts once ctx ended.
+	results := make(chan watchPoll, len(due))
 	sem := make(chan struct{}, s.c.Watch.Parallel)
 	var wg sync.WaitGroup
-	for i, id := range due {
+	sent := 0
+dispatch:
+	for _, id := range due {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
+		sent++
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			polls[i] = s.pollUser(ctx, id)
+			results <- s.pollUser(ctx, id)
 		}()
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
 	polled, started := 0, 0
 	var errs []error
@@ -147,21 +170,31 @@ func (s *Scheduler) watchRun(ctx context.Context, now time.Time) (int, int, erro
 		s.itemLog(ctx, TaskWatch, errs)
 	}()
 	st := &s.watch
-	for _, p := range polls {
+	retry := map[string]bool{} // cut short or not started: due again at once
+	for _, id := range due[sent:] {
+		retry[id] = true
+	}
+	for p := range results {
 		errs = append(errs, p.errs...)
-		st.next[p.user] = now.Add(s.c.Watch.PollInterval)
-		switch {
-		case p.noCred:
-			continue
-		case p.envErr != nil:
+		if p.envErr != nil {
 			errs = append(errs, p.envErr)
+		}
+		if p.cut {
+			retry[p.user] = true
+			continue
+		}
+		st.next[p.user] = now.Add(s.c.Watch.PollInterval)
+		if p.noCred || p.envErr != nil {
 			continue
 		}
 		polled++
 		if p.unauth {
 			continue
 		}
-		next, ok, err := s.applyWatch(ctx, p, now)
+		// the store work is short and must not be lost to the poll deadline
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), watchApplyTimeout)
+		next, ok, err := s.applyWatch(actx, p, now)
+		cancel()
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -173,11 +206,25 @@ func (s *Scheduler) watchRun(ctx context.Context, now time.Time) (int, int, erro
 			started++
 		}
 	}
+	// resume the rotation at the first user that was not polled to the end
+	if !wrapped {
+		for i, id := range due {
+			if retry[id] {
+				if i == 0 {
+					st.after = prevAfter
+				} else {
+					st.after = due[i-1]
+				}
+				break
+			}
+		}
+	}
 	return polled, len(errs), nil
 }
 
-// watchDue picks the users to poll in this run from the rotation cursor.
-func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, error) {
+// watchDue picks the users to poll in this run from the rotation cursor and
+// reports whether it reached the end of the list (the rotation wrapped).
+func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, bool, error) {
 	st := &s.watch
 	var due []string
 	for page := 0; page < maxWatchPages; page++ {
@@ -187,7 +234,7 @@ func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, erro
 			ids, err = tx.ListWatchUsers(st.after, s.c.Batch)
 			return err
 		}); err != nil {
-			return nil, fmt.Errorf("scheduler: list watch users: %w", err)
+			return nil, false, fmt.Errorf("scheduler: list watch users: %w", err)
 		}
 		for _, id := range ids {
 			st.seen[id] = true
@@ -198,15 +245,15 @@ func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, erro
 			due = append(due, id)
 			st.after = id
 			if len(due) >= s.c.Watch.PerTick {
-				return due, nil
+				return due, false, nil
 			}
 		}
 		if len(ids) < s.c.Batch {
 			s.wrapWatch()
-			return due, nil
+			return due, true, nil
 		}
 	}
-	return due, nil
+	return due, false, nil
 }
 
 // wrapWatch ends a pass: the cursor restarts at the first user and users the
@@ -223,8 +270,14 @@ func (s *Scheduler) wrapWatch() {
 }
 
 // pollUser checks every watch folder of the user. It talks to oCIS only.
-func (s *Scheduler) pollUser(ctx context.Context, userID string) watchPoll {
-	p := watchPoll{user: userID, folders: map[string]folderResult{}}
+func (s *Scheduler) pollUser(ctx context.Context, userID string) (p watchPoll) {
+	p = watchPoll{user: userID, folders: map[string]folderResult{}}
+	defer func() {
+		// a poll the context may have cut short is not trusted
+		if ctx.Err() != nil {
+			p = watchPoll{user: userID, cut: true}
+		}
+	}()
 	env, err := s.d.Env(ctx, userID)
 	switch {
 	case errors.Is(err, auth.ErrCredentialInvalid):
@@ -306,7 +359,9 @@ func listDigest(ctx context.Context, env tools.Env, folder string) (folderResult
 // applyWatch records one user's poll in one transaction: folders seen for
 // the first time get a baseline, a moved ETag marks a pending change (first
 // and latest time), a vanished folder loses its baseline, a failed one
-// keeps it, and folders no longer on the policy's list are forgotten. A
+// keeps it, and folders no longer on the policy's list are forgotten
+// together with a pending change (it may be of such a folder; so is one
+// left without any baseline). A
 // pending change whose folders stayed unchanged for Debounce (or that waits
 // for MaxWait) starts a file_event job if store.CheckProactive allows it;
 // otherwise it stays pending and the refusal goes to
@@ -329,15 +384,17 @@ func (s *Scheduler) applyWatch(ctx context.Context, p watchPoll, now time.Time) 
 		if err != nil {
 			return err
 		}
-		changed := false
+		changed, confirmed, pruned := false, false, false
 		for f, r := range p.folders {
 			if !slices.Contains(pol.Watch, f) {
 				continue
 			}
 			switch r.state {
 			case watchFolderVanished:
+				confirmed = true
 				delete(c.WatchETags, f)
 			case watchFolderSeen:
+				confirmed = true
 				if old, had := c.WatchETags[f]; had && old != r.value {
 					changed = true
 				}
@@ -347,7 +404,12 @@ func (s *Scheduler) applyWatch(ctx context.Context, p watchPoll, now time.Time) 
 		for f := range c.WatchETags {
 			if !slices.Contains(pol.Watch, f) {
 				delete(c.WatchETags, f)
+				pruned = true
 			}
+		}
+		if pruned || len(c.WatchETags) == 0 {
+			// the pending change may be of a folder no longer watched
+			c.WatchDirtySince, c.WatchChangedAt = nil, nil
 		}
 		if changed {
 			at := now
@@ -356,7 +418,9 @@ func (s *Scheduler) applyWatch(ctx context.Context, p watchPoll, now time.Time) 
 			}
 			c.WatchChangedAt = &at
 		}
-		if c.WatchDirtySince != nil {
+		// a poll in which every folder failed does not show that the
+		// folders stayed quiet: a pending change waits for one that does
+		if c.WatchDirtySince != nil && confirmed {
 			if c.WatchChangedAt == nil {
 				c.WatchChangedAt = c.WatchDirtySince
 			}

@@ -507,8 +507,8 @@ and starts a review (`trigger_kind` `file_event`) once they stayed unchanged for
 while they keep changing, under the same conditions as a scheduled one (a change that cannot
 start a review stays pending, is checked again at the next poll and is recorded like a skipped
 scheduled review). The first
-check of a folder only records its state, and switching proactive work on starts afresh, so
-earlier changes never start a review. Changes inside `/.ocis-agent` (the agent's memory) do not
+check of a folder only records its state, switching proactive work on starts afresh, and
+changing `watch` drops a pending change, so earlier changes never start a review. Changes inside `/.ocis-agent` (the agent's memory) do not
 count. A folder that is missing or unreadable is skipped. Paused users are not checked: changes
 made while paused start one review after the resume.
 

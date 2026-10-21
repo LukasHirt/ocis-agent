@@ -11,7 +11,8 @@
 // switch and of user pauses: they keep the state consistent and the
 // credentials alive while the agent does no work. A task that fails or
 // panics is reported and does not stop the others. The tasks that call oCIS
-// (reconcile, renew, sweep, watch) run last, each under Config.TaskTimeout, and
+// (reconcile, renew, sweep, watch) run last, each under a deadline
+// (Config.TaskTimeout; the watch poll a shorter one), and
 // renew and sweep stop their batch at the first item that finds oCIS
 // unavailable; the rest is retried at the next run. Logs carry task names,
 // counts and fixed categories only, never error text (errors from oCIS, the
@@ -191,7 +192,7 @@ type TickResult struct {
 type task struct {
 	name     string
 	interval time.Duration
-	ocis     bool // talks to oCIS: runs under Config.TaskTimeout
+	timeout  time.Duration // a task that talks to oCIS runs under this deadline; 0: none
 	run      func(ctx context.Context, now time.Time) (count, errs int, err error)
 }
 
@@ -219,17 +220,19 @@ func New(d Deps, c Config) (*Scheduler, error) {
 	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState(), watch: newWatchState()}
 	iv := c.Intervals
 	// The database-only tasks run first, so a slow or hung oCIS delays them
-	// by at most the three TaskTimeouts of the previous Tick.
+	// by at most the deadlines of the previous Tick's oCIS-bound tasks: three
+	// TaskTimeouts plus the watch deadline (7m with the defaults).
+	tt := c.TaskTimeout
 	s.tasks = []task{
-		{TaskReap, iv.Reap, false, s.reap},
-		{TaskExpire, iv.Expire, false, s.expire},
-		{TaskSettle, iv.Settle, false, s.settle},
-		{TaskDormant, iv.Dormant, false, s.dormant},
-		{TaskProactive, iv.Proactive, false, s.proactive},
-		{TaskReconcile, iv.Reconcile, true, s.reconcile},
-		{TaskRenew, iv.Renew, true, s.renew},
-		{TaskSweep, iv.Sweep, true, s.sweepRun},
-		{TaskWatch, iv.Watch, true, s.watchRun},
+		{TaskReap, iv.Reap, 0, s.reap},
+		{TaskExpire, iv.Expire, 0, s.expire},
+		{TaskSettle, iv.Settle, 0, s.settle},
+		{TaskDormant, iv.Dormant, 0, s.dormant},
+		{TaskProactive, iv.Proactive, 0, s.proactive},
+		{TaskReconcile, iv.Reconcile, tt, s.reconcile},
+		{TaskRenew, iv.Renew, tt, s.renew},
+		{TaskSweep, iv.Sweep, tt, s.sweepRun},
+		{TaskWatch, iv.Watch, min(tt, watchTaskTimeout), s.watchRun},
 	}
 	return s, nil
 }
@@ -272,9 +275,9 @@ func (s *Scheduler) runTask(ctx context.Context, t task, now time.Time) (count, 
 			cat = CategoryPanic
 		}
 	}()
-	if t.ocis {
+	if t.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.c.TaskTimeout)
+		ctx, cancel = context.WithTimeout(ctx, t.timeout)
 		defer cancel()
 	}
 	count, errs, err := t.run(ctx, now)

@@ -143,7 +143,8 @@ Every setting comes from the environment. Logs are JSON lines on stderr.
 - `worker`: the job workers (`AGENT_WORKERS`) and the scheduler, which does all maintenance: token
   renewal and the token sweep, approval expiry, the dormancy pause, the lease reaper and the
   settling of approvals of ended jobs; it also starts the scheduled proactive reviews and checks the watch folders for changes. It needs the `AGENT_LLM_*` settings; start-up refuses
-  otherwise.
+  otherwise. The tasks that call oCIS run under deadlines (2 min each, 1 min for the watch
+  folders), so an unresponsive oCIS can delay the lease reaper and approval expiry by up to 7 min.
 
 **Run exactly one process with the worker role per database.** An api-only process runs no
 maintenance (it logs that once at start-up) and its chat jobs stay queued until a worker process
@@ -182,9 +183,9 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_API_STREAMS_PER_USER` | `3` | Open event streams per user (1 to 10). |
 | `AGENT_API_STREAMS_TOTAL` | `200` | Open event streams in the process (1 to 5000). |
 | `AGENT_PROACTIVE_DAILY_JOBS` | `24` | Proactive reviews (scheduled, file change and on request) per user and UTC day (1 to 1000). |
-| `AGENT_WATCH_POLL_INTERVAL` | `5m` | How often each user's watch folders are checked for changes, one depth-0 PROPFIND per folder (1m to 24h). |
+| `AGENT_WATCH_POLL_INTERVAL` | `5m` | How often each user's watch folders are checked for changes (1m to 24h): one depth-0 PROPFIND per folder, except a watched `/`, which is listed one level deep without the agent's own folder. Only the first 5000 entries of `/` count, and a `/` whose listing is over 4 MiB (roughly ten thousand entries) cannot be checked. |
 | `AGENT_WATCH_DEBOUNCE` | `1m` | How long the watch folders must stay unchanged after a change before a file-change review starts (10s to 10m; it starts at the latest 10 minutes after the first change). |
-| `AGENT_WATCH_MAX_POLLS_PER_TICK` | `50` | Users whose watch folders one scheduler run (every 10 s) checks, four at a time (1 to 1000). |
+| `AGENT_WATCH_MAX_POLLS_PER_TICK` | `50` | Users whose watch folders one scheduler run (every 10 s, at most 1 min long) checks, four at a time (1 to 1000). With the default, about 1500 users fit into one 5-minute poll interval; beyond that each user's checks space out accordingly. |
 | `AGENT_USER_DAILY_TOKENS` | `200000` | The operator's cap and default of a user's daily model-token budget (1000 to 1000000000). |
 | `AGENT_LLM_BASE_URL` | none | The model endpoint, for example `https://api.openai.com/v1`. https, or http only for a loopback host. Required by the worker role and by the other `AGENT_LLM_*` variables of this table except `AGENT_LLM_MAX_TOKENS`. |
 | `AGENT_LLM_PROVIDER` | `openai` | The wire protocol; only `openai` (OpenAI-compatible chat completions). |
