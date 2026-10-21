@@ -204,15 +204,17 @@ func (s *syncBuffer) String() string {
 }
 
 type fixture struct {
-	t     *testing.T
-	srv   *Server
-	h     http.Handler
-	v     *fakeValidator
-	cr    *fakeCreds
-	wk    *fakeWaker
-	st    store.Store
-	clock *fakeClock
-	logs  *syncBuffer
+	t   *testing.T
+	srv *Server
+	h   http.Handler
+	v   *fakeValidator
+	cr  *fakeCreds
+	wk  *fakeWaker
+	st  store.Store
+	// dbPath is the sqlite file behind st (tests that tamper with rows open it directly)
+	dbPath string
+	clock  *fakeClock
+	logs   *syncBuffer
 	// bearer is the token req sends (default goodToken)
 	bearer string
 }
@@ -222,19 +224,21 @@ type fixture struct {
 // are registered on every fixture.
 func newFixture(t *testing.T, mod ...func(*Deps)) *fixture {
 	t.Helper()
-	st, err := sqlite.Open(filepath.Join(t.TempDir(), "agent.db"))
+	dbPath := filepath.Join(t.TempDir(), "agent.db")
+	st, err := sqlite.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	f := &fixture{
-		t:     t,
-		v:     &fakeValidator{tokens: map[string]auth.Identity{goodToken: aliceID, otherToken: bobID}},
-		cr:    &fakeCreds{},
-		wk:    &fakeWaker{},
-		st:    st,
-		clock: &fakeClock{t: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)},
-		logs:  &syncBuffer{},
+		t:      t,
+		v:      &fakeValidator{tokens: map[string]auth.Identity{goodToken: aliceID, otherToken: bobID}},
+		cr:     &fakeCreds{},
+		wk:     &fakeWaker{},
+		st:     st,
+		dbPath: dbPath,
+		clock:  &fakeClock{t: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)},
+		logs:   &syncBuffer{},
 	}
 	d := Deps{
 		Store:     st,

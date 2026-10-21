@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -308,9 +309,9 @@ func (t tamperTx) ReadAudit(userID string, after int64, limit int) ([]audit.Reco
 	return recs, err
 }
 
-func (t tamperTx) VerifyAudit(userID string) error {
+func (t tamperTx) VerifyAudit(userID string) (int64, error) {
 	if t.s.verifyHook != nil {
-		return t.s.verifyHook(userID)
+		return t.s.verifyChecked, t.s.verifyHook(userID)
 	}
 	return t.Tx.VerifyAudit(userID)
 }
@@ -324,9 +325,11 @@ type tamperStore struct {
 	readHook   func(n int) error
 	afterRead  func(n int)
 	verifyHook func(user string) error
-	mu         sync.Mutex
-	deadline   time.Time
-	ignoreCtx  bool // the store does not notice a cancelled context
+	// verifyChecked is the count a hooked verification reports
+	verifyChecked int64
+	mu            sync.Mutex
+	deadline      time.Time
+	ignoreCtx     bool // the store does not notice a cancelled context
 }
 
 func (s *tamperStore) lastDeadline() time.Duration {
@@ -361,23 +364,92 @@ func TestAuditVerify(t *testing.T) {
 	f, ts := newTamperFixture(t)
 	seedAudit(t, f.st, aliceID.UserID, 30, nil)
 	rec := f.do(http.MethodGet, verifyPath, "")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"ok":true,"limitation":"removal of the newest records cannot be detected"}` {
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"ok":true,"limitation":"removal of the newest records cannot be detected","checked":30}` {
 		t.Fatalf("ok: %d %s", rec.Code, rec.Body.String())
 	}
 	// a real, untouched chain of another user does not matter; a broken one does
+	ts.verifyChecked = 6
 	ts.verifyHook = func(string) error {
-		return fmt.Errorf("%w: user u-alice seq 7: SECRET-detail", audit.ErrChainBroken)
+		return fmt.Errorf("sqlite: %w", &audit.ChainError{UserID: "u-alice", Seq: 7, Reason: "SECRET-detail"})
 	}
 	rec = f.do(http.MethodGet, verifyPath, "")
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) !=
-		`{"ok":false,"message":"the audit chain is broken","limitation":"removal of the newest records cannot be detected"}` {
+		`{"ok":false,"message":"the audit chain is broken","limitation":"removal of the newest records cannot be detected","checked":6,"broken_at":7}` {
 		t.Fatalf("broken: %d %s", rec.Code, rec.Body.String())
+	}
+	// a broken chain without a position still reports the break
+	ts.verifyChecked = 0
+	ts.verifyHook = func(string) error { return fmt.Errorf("%w: SECRET", audit.ErrChainBroken) }
+	rec = f.do(http.MethodGet, verifyPath, "")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) !=
+		`{"ok":false,"message":"the audit chain is broken","limitation":"removal of the newest records cannot be detected","checked":0}` {
+		t.Fatalf("broken without position: %d %s", rec.Code, rec.Body.String())
 	}
 	// any other failure goes through the error mapper
 	ts.verifyHook = func(string) error { return errors.New("SECRET disk failure") }
 	b := wantError(t, f.do(http.MethodGet, verifyPath, ""), http.StatusInternalServerError, "internal")
 	if strings.Contains(b.Error.Message, "SECRET") {
 		t.Error("error text leaked")
+	}
+}
+
+type verifyResult struct {
+	OK         bool   `json:"ok"`
+	Message    string `json:"message"`
+	Limitation string `json:"limitation"`
+	Checked    *int64 `json:"checked"`
+	BrokenAt   *int64 `json:"broken_at"`
+}
+
+func getVerify(t *testing.T, f *fixture) (verifyResult, string) {
+	t.Helper()
+	rec := f.do(http.MethodGet, verifyPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify = %d %s", rec.Code, rec.Body.String())
+	}
+	var v verifyResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	return v, rec.Body.String()
+}
+
+// The counts come from the real chain in the database: an empty log, an
+// intact one and one with a row rewritten behind the triggers' back.
+func TestAuditVerifyReportsCountsOfTheRealChain(t *testing.T) {
+	f := newFixture(t)
+	if v, body := getVerify(t, f); !v.OK || v.Checked == nil || *v.Checked != 0 || v.BrokenAt != nil {
+		t.Fatalf("empty log: %s", body)
+	}
+	seedAudit(t, f.st, aliceID.UserID, 10, nil)
+	seedAudit(t, f.st, bobID.UserID, 4, nil)
+	if v, body := getVerify(t, f); !v.OK || v.Checked == nil || *v.Checked != 10 || v.BrokenAt != nil {
+		t.Fatalf("intact chain: %s", body)
+	}
+	raw, err := sql.Open("sqlite", "file:"+f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, q := range []string{
+		`DROP TRIGGER audit_no_update`,
+		`UPDATE audit SET detail = 'TAMPERED-detail' WHERE user_id = '` + aliceID.UserID + `' AND seq = 4`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	v, body := getVerify(t, f)
+	if v.OK || v.Message != "the audit chain is broken" || v.Checked == nil || *v.Checked != 3 || v.BrokenAt == nil || *v.BrokenAt != 4 {
+		t.Fatalf("tampered chain: %s", body)
+	}
+	if strings.Contains(body, "TAMPERED") || strings.Contains(body, aliceID.UserID) {
+		t.Errorf("event data in the response: %s", body)
+	}
+	// bob's chain is untouched
+	f.bearer = otherToken
+	if v, body := getVerify(t, f); !v.OK || v.Checked == nil || *v.Checked != 4 {
+		t.Fatalf("bob: %s", body)
 	}
 }
 

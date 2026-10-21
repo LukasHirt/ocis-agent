@@ -263,6 +263,10 @@ type auditVerifyView struct {
 	OK         bool   `json:"ok"`
 	Message    string `json:"message,omitempty"`
 	Limitation string `json:"limitation"`
+	// Checked is the number of events that verified; BrokenAt the seq of the
+	// first event whose chain link or hash fails (only when broken).
+	Checked  int64  `json:"checked"`
+	BrokenAt *int64 `json:"broken_at,omitempty"`
 }
 
 // auditExportView is one line of the export: the complete, uncapped record

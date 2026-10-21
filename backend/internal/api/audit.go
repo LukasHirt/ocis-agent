@@ -293,7 +293,9 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 
 // verifyAudit is GET /agent-api/v1/audit/verify (heavyLimiter: one per user,
 // maxVerifies in the process; 429 rate_limited with Retry-After otherwise); it runs
-// under the request deadline. HEAD is 405.
+// under the request deadline. HEAD is 405. The result counts the events that
+// verified and, for a broken chain, names the seq of the first failing one;
+// the message is fixed text, never event data.
 func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
@@ -310,12 +312,22 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	defer s.heavy.release(p.UserID, heavyVerify)
-	err := s.d.Store.View(r.Context(), func(tx store.Tx) error { return tx.VerifyAudit(p.UserID) })
+	var checked int64
+	err := s.d.Store.View(r.Context(), func(tx store.Tx) error {
+		var err error
+		checked, err = tx.VerifyAudit(p.UserID)
+		return err
+	})
+	var ce *audit.ChainError
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, auditVerifyView{OK: true, Limitation: auditLimitation})
+		writeJSON(w, http.StatusOK, auditVerifyView{OK: true, Limitation: auditLimitation, Checked: checked})
 	case errors.Is(err, audit.ErrChainBroken):
-		writeJSON(w, http.StatusOK, auditVerifyView{OK: false, Message: auditBrokenMessage, Limitation: auditLimitation})
+		v := auditVerifyView{OK: false, Message: auditBrokenMessage, Limitation: auditLimitation, Checked: checked}
+		if errors.As(err, &ce) {
+			v.BrokenAt = &ce.Seq
+		}
+		writeJSON(w, http.StatusOK, v)
 	default:
 		return err
 	}

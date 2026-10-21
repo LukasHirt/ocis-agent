@@ -240,7 +240,8 @@ func TestUnenrollRemovesTheUserButKeepsTheAuditLog(t *testing.T) {
 		if _, err := tx.GetPolicy(userID); !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("policy still exists: %v", err)
 		}
-		return tx.VerifyAudit(userID)
+		_, err := tx.VerifyAudit(userID)
+		return err
 	}); err != nil {
 		t.Fatal(err)
 	}

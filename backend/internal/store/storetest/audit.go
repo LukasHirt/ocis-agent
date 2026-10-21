@@ -39,7 +39,18 @@ func readAll(t *testing.T, st store.Store, user string) []audit.Record {
 }
 
 func verifyAudit(st store.Store, user string) error {
-	return st.View(bg(), func(tx store.Tx) error { return tx.VerifyAudit(user) })
+	_, err := verifyCount(st, user)
+	return err
+}
+
+func verifyCount(st store.Store, user string) (int64, error) {
+	var n int64
+	err := st.View(bg(), func(tx store.Tx) error {
+		var err error
+		n, err = tx.VerifyAudit(user)
+		return err
+	})
+	return n, err
 }
 
 func init() { register("Audit", runAudit) }
@@ -76,17 +87,33 @@ func runAudit(t *testing.T, f Factory) {
 		if len(u2) != 2 || u2[0].Seq != 1 || u2[0].PrevHash != audit.Genesis {
 			t.Errorf("u2 chain = %+v", u2)
 		}
-		for _, u := range []string{"u1", "u2"} {
-			if err := verifyAudit(st, u); err != nil {
-				t.Errorf("VerifyAudit(%s): %v", u, err)
+		for u, want := range map[string]int64{"u1": 3, "u2": 2} {
+			if n, err := verifyCount(st, u); err != nil || n != want {
+				t.Errorf("VerifyAudit(%s) = %d, %v, want %d", u, n, err, want)
 			}
+		}
+	})
+
+	t.Run("verify counts every record of a long chain", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustTx(t, st, func(tx store.Tx) error {
+			for i := 0; i < 1203; i++ {
+				if _, err := tx.AppendAudit(ev("u1", "tool_call")); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		appendN(t, st, "u2", 1)
+		if n, err := verifyCount(st, "u1"); err != nil || n != 1203 {
+			t.Fatalf("VerifyAudit = %d, %v, want 1203", n, err)
 		}
 	})
 
 	t.Run("an empty log verifies", func(t *testing.T) {
 		st, _ := open(t, f)
-		if err := verifyAudit(st, "nobody"); err != nil {
-			t.Fatalf("VerifyAudit of an empty log: %v", err)
+		if n, err := verifyCount(st, "nobody"); err != nil || n != 0 {
+			t.Fatalf("VerifyAudit of an empty log = %d, %v", n, err)
 		}
 	})
 

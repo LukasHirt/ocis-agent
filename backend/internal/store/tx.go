@@ -29,9 +29,11 @@ type Tx interface {
 	// ReadAuditBefore returns records with seq < beforeSeq in descending
 	// order; beforeSeq <= 0 starts at the newest record. Limits as ReadAudit.
 	ReadAuditBefore(userID string, beforeSeq int64, limit int) ([]audit.Record, error)
-	// VerifyAudit recomputes the user's whole chain. Failures wrap
-	// audit.ErrChainBroken.
-	VerifyAudit(userID string) error
+	// VerifyAudit recomputes the user's whole chain and returns the number of
+	// records that verified. A broken chain is an *audit.ChainError (wrapping
+	// audit.ErrChainBroken) with the seq of the first failing record; the
+	// count then stops before it.
+	VerifyAudit(userID string) (int64, error)
 
 	// PutDEK stores a wrapped data-encryption key. ErrConflict if the id
 	// exists; a zero CreatedAt becomes Now().

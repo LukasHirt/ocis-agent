@@ -96,20 +96,20 @@ func (t *tx) readAudit(q, userID string, seq int64, limit int) ([]audit.Record, 
 }
 
 // VerifyAudit implements store.Tx.
-func (t *tx) VerifyAudit(userID string) error {
+func (t *tx) VerifyAudit(userID string) (int64, error) {
 	v := audit.NewVerifier()
 	var after int64
 	for {
 		recs, err := t.ReadAudit(userID, after, verifyPageSize)
 		if err != nil {
-			return err
+			return v.Checked(), err
 		}
 		if len(recs) == 0 {
-			return nil
+			return v.Checked(), nil
 		}
 		for _, r := range recs {
 			if err := v.Add(r); err != nil {
-				return err
+				return v.Checked(), err
 			}
 		}
 		after = recs[len(recs)-1].Seq
