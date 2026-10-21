@@ -31,13 +31,14 @@ func TestStatusOfAnUnknownUserIsNotEnrolled(t *testing.T) {
 			Default:   "model-a",
 			Available: []modelView{{ID: "model-a", Label: "Model A"}, {ID: "model-b", Label: "Model B"}},
 		},
+		Proactive: proactiveView{DailyJobs: 24},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("not enrolled = %+v, want %+v", got, want)
 	}
 	// every key is present (zero values, not missing fields)
 	m := decode(t, rec)
-	for _, k := range []string{"enrolled", "user", "paused", "pause_reason", "token", "budget", "kill_switch", "models", "pending_approvals"} {
+	for _, k := range []string{"enrolled", "user", "paused", "pause_reason", "token", "budget", "kill_switch", "models", "pending_approvals", "proactive"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("key %q missing in %s", k, rec.Body.String())
 		}
@@ -64,6 +65,7 @@ func TestStatusOfAnEnrolledUser(t *testing.T) {
 			Default:   "model-a",
 			Available: []modelView{{ID: "model-a", Label: "Model A"}, {ID: "model-b", Label: "Model B"}},
 		},
+		Proactive: proactiveView{Blocked: "proactive_disabled", DailyJobs: 24},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("status =\n%+v\nwant\n%+v", got, want)

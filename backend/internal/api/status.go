@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -45,6 +46,7 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 		// the budget a new enrolment starts with (never 0, which a client
 		// could read as unlimited)
 		v.Budget = budgetView{DailyTokens: s.dailyBudget(0), ResetsAt: timeView(dayStart.AddDate(0, 0, 1))}
+		v.Proactive = proactiveView{DailyJobs: s.d.Cfg.Proactive.DailyJobs}
 
 		u, err := tx.GetUser(p.UserID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -84,6 +86,10 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 
 		v.Models = s.modelsView(pol)
 
+		if v.Proactive, err = s.proactiveState(tx, p.UserID, pol, now); err != nil {
+			return err
+		}
+
 		// the decidable ones: pending approvals of jobs that have not ended
 		v.PendingApprovals, err = tx.CountPendingOfLiveJobs(p.UserID)
 		return err
@@ -92,6 +98,55 @@ func (s *Server) status(ctx context.Context, p Principal) (statusView, error) {
 		return statusView{}, err
 	}
 	return v, nil
+}
+
+// proactiveState is the proactiveView of the user at now, read in tx.
+func (s *Server) proactiveState(tx store.Tx, userID string, pol store.Policy, now time.Time) (proactiveView, error) {
+	reason, err := store.CheckProactive(tx, userID, now, s.d.Cfg.Proactive, true)
+	if err != nil {
+		return proactiveView{}, err
+	}
+	c, err := tx.GetCursor(userID)
+	if err != nil {
+		return proactiveView{}, err
+	}
+	v := proactiveView{
+		Enabled: pol.ProactiveEnabled, Blocked: proactiveBlocked(reason, pol.PauseReason), DailyJobs: s.d.Cfg.Proactive.DailyJobs,
+	}
+	if c.LastSweepAt != nil {
+		v.LastSweepAt = timeView(*c.LastSweepAt)
+		if pol.ProactiveEnabled {
+			next := c.LastSweepAt.Add(pol.SweepInterval)
+			if next.Before(now) {
+				next = now
+			}
+			if end := store.QuietHoursEnd(pol.QuietHours, next); !end.IsZero() {
+				next = end
+			}
+			v.NextSweepAt = timeView(next)
+		}
+	}
+	return v, nil
+}
+
+// proactiveBlocked is the code of a store.CheckProactive reason in the
+// status: the refusal code of POST /proactive/run (credentials_invalid for a
+// credential_* pause), quiet_hours, or "" (none, or not enrolled).
+func proactiveBlocked(reason, pauseReason string) string {
+	switch reason {
+	case "", store.SkipNotEnrolled:
+		return ""
+	case store.SkipQuietHours:
+		return "quiet_hours"
+	case store.SkipPaused:
+		if strings.HasPrefix(pauseReason, "credential_") {
+			return errCredentialsPaused.code
+		}
+	}
+	if e, ok := proactiveRefusals[reason]; ok {
+		return e.code
+	}
+	return reason
 }
 
 // dailyBudget is the user's budget under the operator's cap

@@ -130,7 +130,14 @@ The caller's state, read in one transaction. Also answers for a user who has not
     "available": [{"id": "gpt-4.1-mini", "label": "GPT-4.1 mini"}],
     "preferences": {"chat": null, "proactive": null}
   },
-  "pending_approvals": 0
+  "pending_approvals": 0,
+  "proactive": {
+    "enabled": true,
+    "last_sweep_at": "2026-10-21T06:00:00Z",
+    "next_sweep_at": "2026-10-21T12:00:00Z",
+    "blocked": "",
+    "daily_jobs": 24
+  }
 }
 ```
 
@@ -147,6 +154,15 @@ The caller's state, read in one transaction. Also answers for a user who has not
 - `models`: the operator's catalog (empty without a model configured) and the user's
   preferences per task kind, shown only while they are in the catalog.
 - `pending_approvals`: the exact number of pending approvals of jobs that have not ended.
+- `proactive` (see [Proactive reviews](#proactive-reviews)): `enabled` is `proactive_enabled`;
+  `last_sweep_at` the last scheduled or requested review (null before the first);
+  `next_sweep_at` an estimate of the next scheduled one (one `sweep_interval` after the last, at
+  the end of the quiet hours (UTC) if it falls into them, now if overdue; null while disabled or
+  before the first; a skip moves it later); `blocked` is `""` or why no review could start now:
+  `proactive_disabled`, `kill_switch`, `paused`, `credentials_invalid`, `quiet_hours` (scheduled
+  reviews only), `live_job`, `daily_cap` or `budget`; `daily_jobs` is the operator's limit of
+  reviews per UTC day (`AGENT_PROACTIVE_DAILY_JOBS`). For a user not enrolled only `daily_jobs` is
+  set, the rest are zero values.
 
 ### POST /agent-api/v1/enroll
 

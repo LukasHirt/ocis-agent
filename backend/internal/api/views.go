@@ -33,6 +33,24 @@ type statusView struct {
 	KillSwitch       killSwitchView `json:"kill_switch"`
 	Models           modelsView     `json:"models"`
 	PendingApprovals int            `json:"pending_approvals"`
+	Proactive        proactiveView  `json:"proactive"`
+}
+
+// proactiveView is the user's proactive state in the status: Enabled is the
+// policy switch, LastSweepAt the last scheduled or requested review (null
+// before the first), NextSweepAt an estimate of the next scheduled one (one
+// sweep interval after the last, at the end of the quiet hours if it falls
+// into them, now if overdue; null while disabled) and Blocked "" or the code
+// that would refuse a review right now: a POST /proactive/run refusal code
+// or quiet_hours (which stops only the scheduled ones). DailyJobs is the
+// operator's limit of proactive reviews per user and UTC day, also for a
+// user who has not enrolled.
+type proactiveView struct {
+	Enabled     bool    `json:"enabled"`
+	LastSweepAt *string `json:"last_sweep_at"`
+	NextSweepAt *string `json:"next_sweep_at"`
+	Blocked     string  `json:"blocked"`
+	DailyJobs   int     `json:"daily_jobs"`
 }
 
 type userView struct {
