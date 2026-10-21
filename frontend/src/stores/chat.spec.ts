@@ -732,4 +732,89 @@ describe('useChatStore', () => {
     expect(chat.draftByConversation).toEqual({})
     expect(chat.sendError).toBeNull()
   })
+
+  describe('startConversation', () => {
+    it('creates, navigates and sends, in that order', async () => {
+      const st = chatState()
+      const { chat, server } = await setup(st)
+      const order: string[] = []
+      const go = (id: string) => {
+        order.push('go:' + id + ':' + server.calls.map((c) => c.method + c.path).join(','))
+        void chat.openConversation(id)
+      }
+      chat.landingDraft = 'Hello'
+      expect(await chat.startConversation('Hello', go)).toBe(true)
+      expect(order).toHaveLength(1)
+      expect(order[0]).toMatch(/^go:c100:.*POST\/conversations$/)
+      expect(order[0]).not.toContain('/messages')
+      const posts = server.calls.filter((c) => c.method === 'POST').map((c) => c.path)
+      expect(posts).toEqual(['/conversations', '/conversations/c100/messages'])
+      expect(chat.landingDraft).toBe('')
+      expect(chat.starting).toBe(false)
+      expect(chat.current).toBe('c100')
+      expect(chat.thread.map((m) => m.content)).toEqual(['Hello'])
+    })
+
+    it('creates one conversation for a double submit', async () => {
+      const st = chatState()
+      const { chat, server } = await setup(st)
+      const go = (id: string) => void chat.openConversation(id)
+      const a = chat.startConversation('one', go)
+      const b = chat.startConversation('one', go)
+      expect(await b).toBe(false)
+      expect(await a).toBe(true)
+      expect(server.calls.filter((c) => c.method === 'POST' && c.path === '/conversations')).toHaveLength(1)
+    })
+
+    it('creates nothing for text the server would refuse or during the cooldown', async () => {
+      const st = chatState({ conversations: [conversationOf('c1')], messages: { c1: [] } })
+      const { chat, server, platform } = await setup(st)
+      const go = vi.fn()
+      expect(await chat.startConversation('   ', go)).toBe(false)
+      expect(chat.landingError?.code).toBe('empty')
+      expect(await chat.startConversation('a\u0007b', go)).toBe(false)
+      expect(chat.landingError?.code).toBe('control')
+      chat.blockedUntil = platform.now() + 5000
+      expect(await chat.startConversation('fine', go)).toBe(false)
+      expect(chat.landingError?.code).toBe('cooldown')
+      expect(go).not.toHaveBeenCalled()
+      expect(server.calls.filter((c) => c.method === 'POST')).toHaveLength(0)
+    })
+
+    it('keeps the draft and explains the limit when the create is refused', async () => {
+      const { chat } = await setup(chatState(), (c) =>
+        c.method === 'POST' && c.path === '/conversations' ? apiErr(409, 'limit_reached') : undefined
+      )
+      const go = vi.fn()
+      chat.landingDraft = 'keep'
+      expect(await chat.startConversation('keep', go)).toBe(false)
+      expect(go).not.toHaveBeenCalled()
+      expect(chat.landingDraft).toBe('keep')
+      expect(chat.landingError?.message).toBe(
+        'You have 200 conversations, the most there can be. Delete one to start a new one.'
+      )
+      expect(chat.actionError).toBeNull()
+      expect(chat.starting).toBe(false)
+    })
+
+    it('keeps the text in the new conversation when the send is refused', async () => {
+      const st = chatState({ failSend: errWithRetry(429, 'too_many_pending', 5) })
+      const { chat } = await setup(st)
+      const go = (id: string) => void chat.openConversation(id)
+      chat.landingDraft = 'keep me'
+      expect(await chat.startConversation('keep me', go)).toBe(false)
+      expect(chat.landingDraft).toBe('')
+      expect(chat.draftByConversation.c100).toBe('keep me')
+      expect(chat.current).toBe('c100')
+      expect(chat.sendError?.code).toBe('too_many_pending')
+    })
+
+    it('forgets the landing draft with the session', async () => {
+      const { chat } = await setup(chatState())
+      chat.landingDraft = 'x'
+      chat.reset()
+      expect(chat.landingDraft).toBe('')
+      expect(chat.landingError).toBeNull()
+    })
+  })
 })

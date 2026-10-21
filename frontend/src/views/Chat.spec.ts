@@ -47,11 +47,67 @@ const withThread = () =>
   })
 
 describe('Chat', () => {
-  it('lists the conversations and asks to pick one without an id', async () => {
+  it('lists the conversations and shows the landing without an id', async () => {
     const { w } = await setup(withThread())
     expect(w.findAll('.agent-conv')).toHaveLength(2)
-    expect(w.text()).toContain('Choose a conversation or start a new one.')
-    expect(w.find('textarea').exists()).toBe(false)
+    expect(w.find('.agent-landing').exists()).toBe(true)
+    expect(w.find('.agent-chat-pick').exists()).toBe(false)
+    expect(w.text()).not.toContain('Choose a conversation or start a new one.')
+    expect(w.find('textarea').exists()).toBe(true)
+    expect(w.find('.agent-chat--solo').exists()).toBe(false)
+  })
+
+  it('greets the user by the display name of the status', async () => {
+    const { w } = await setup(withThread())
+    expect(w.find('.agent-landing-title').text()).toMatch(/^Hello, .+\. How can I help\?$/)
+  })
+
+  it('hides the list when there are no conversations', async () => {
+    const { w } = await setup(chatState())
+    expect(w.find('.agent-chat').classes()).toContain('agent-chat--solo')
+    expect(w.find('.agent-landing').exists()).toBe(true)
+  })
+
+  it('creates, opens and sends from the landing', async () => {
+    const st = withThread()
+    const { w, server, push, chat } = await setup(st)
+    push.mockImplementation(async (to: { params: { id: string } }) => {
+      await w.setProps({ id: to.params.id })
+    })
+    const ta = w.find('.agent-landing textarea')
+    await ta.setValue('Hello there')
+    ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
+    ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
+    await flushPromises()
+    expect(push).toHaveBeenCalledTimes(1)
+    expect(push).toHaveBeenCalledWith({ name: 'agent-chat-conversation', params: { id: 'c100' } })
+    const posts = server.calls.filter((c) => c.method === 'POST').map((c) => c.path)
+    expect(posts).toEqual(['/conversations', '/conversations/c100/messages'])
+    expect(chat.landingDraft).toBe('')
+    expect(w.find('.agent-landing').exists()).toBe(false)
+    expect(w.findAll('.agent-msg-content').map((m) => m.text())).toContain('Hello there')
+  })
+
+  it('keeps the typed text on the landing when the conversation limit is reached', async () => {
+    const { w, push } = await setup(withThread(), {}, (c) =>
+      c.method === 'POST' && c.path === '/conversations' ? apiErr(409, 'limit_reached') : undefined
+    )
+    const ta = w.find('.agent-landing textarea')
+    await ta.setValue('keep this')
+    ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
+    await flushPromises()
+    expect(push).not.toHaveBeenCalled()
+    expect((w.find('.agent-landing textarea').element as HTMLTextAreaElement).value).toBe('keep this')
+    expect(w.find('.agent-landing .agent-composer-error').text()).toBe(
+      'You have 200 conversations, the most there can be. Delete one to start a new one.'
+    )
+  })
+
+  it('fills the box from an example without sending', async () => {
+    const { w, server } = await setup(withThread())
+    await w.find('.agent-landing-examples button').trigger('click')
+    expect((w.find('.agent-landing textarea').element as HTMLTextAreaElement).value).toBe('What can you do?')
+    expect(server.calls.filter((c) => c.method === 'POST')).toHaveLength(0)
   })
 
   it('opens the conversation of the route and shows its thread', async () => {
@@ -218,6 +274,15 @@ describe('Chat', () => {
     expect(w.find('.agent-composer-hint').text()).toBe('Set up the agent to ask it questions.')
   })
 
+  it('disables the landing and keeps the enrol notice while not set up', async () => {
+    const { w, store } = await setup(withThread())
+    store.status = statusOf({ enrolled: false })
+    await flushPromises()
+    expect(w.find('.agent-landing textarea').attributes('disabled')).toBeDefined()
+    expect(w.find('.agent-landing .agent-composer-hint').text()).toBe('Set up the agent to ask it questions.')
+    expect(w.find('.agent-landing-examples').exists()).toBe(false)
+  })
+
   it('updates the thread on change events while mounted only', async () => {
     const st = withThread()
     const { w, events, server } = await setup(st, { id: 'c2' })
@@ -326,6 +391,6 @@ describe('Chat during an outage', () => {
   it('shows empty states with an icon', async () => {
     const { w } = await setup(chatState())
     expect(w.find('.agent-convs-empty [data-stub=OcIcon]').attributes('data-icon')).toBe('chat-3')
-    expect(w.find('.agent-chat-pick [data-stub=OcIcon]').attributes('data-icon')).toBe('chat-3')
+    expect(w.find('.agent-chat-pick').exists()).toBe(false)
   })
 })
