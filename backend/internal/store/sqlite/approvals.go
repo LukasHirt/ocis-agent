@@ -125,7 +125,7 @@ func (t *tx) CountPendingOfLiveJobs(userID string) (int, error) {
 	var n int
 	err := t.q.QueryRowContext(t.ctx,
 		`SELECT COUNT(*) FROM approvals a JOIN jobs j ON j.id = a.job_id AND j.user_id = a.user_id
-		 WHERE a.user_id = ? AND a.state = 'pending' AND j.state NOT IN ('succeeded', 'failed', 'cancelled')`,
+		 WHERE a.user_id = ? AND a.state = 'pending' AND j.state NOT IN `+terminalJobStates,
 		userID).Scan(&n)
 	return n, err
 }

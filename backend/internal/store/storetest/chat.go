@@ -913,7 +913,7 @@ func runChatCounts(t *testing.T, f Factory) {
 		// audit
 		clk.Advance(time.Second)
 		mustTx(t, st, func(tx store.Tx) error {
-			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "test"})
+			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindChatMessage})
 			return err
 		})
 		m4 := marks("u1")
@@ -921,7 +921,7 @@ func runChatCounts(t *testing.T, f Factory) {
 			t.Errorf("after an audit event = %+v", m4)
 		}
 		mustTx(t, st, func(tx store.Tx) error {
-			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "test"})
+			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindChatMessage})
 			return err
 		})
 		if m := marks("u1"); m.AuditSeq != 2 {
@@ -949,7 +949,7 @@ func runChatCounts(t *testing.T, f Factory) {
 		c2 := addConv(t, st, "u2", "c")
 		addMsg(t, st, "u2", c2.ID, store.RoleUser, "x", "")
 		mustTx(t, st, func(tx store.Tx) error {
-			_, err := tx.AppendAudit(audit.Event{UserID: "u2", Kind: "test"})
+			_, err := tx.AppendAudit(audit.Event{UserID: "u2", Kind: audit.KindChatMessage})
 			return err
 		})
 		if got := marks("u1"); got != marks("u1") || got != m5 {

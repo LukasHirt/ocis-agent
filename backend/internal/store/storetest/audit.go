@@ -18,7 +18,7 @@ func appendN(t *testing.T, st store.Store, user string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		mustTx(t, st, func(tx store.Tx) error {
-			_, err := tx.AppendAudit(ev(user, "tool_call"))
+			_, err := tx.AppendAudit(ev(user, audit.KindToolCall))
 			return err
 		})
 	}
@@ -98,7 +98,7 @@ func runAudit(t *testing.T, f Factory) {
 		st, _ := open(t, f)
 		mustTx(t, st, func(tx store.Tx) error {
 			for i := 0; i < 1203; i++ {
-				if _, err := tx.AppendAudit(ev("u1", "tool_call")); err != nil {
+				if _, err := tx.AppendAudit(ev("u1", audit.KindToolCall)); err != nil {
 					return err
 				}
 			}
@@ -122,7 +122,7 @@ func runAudit(t *testing.T, f Factory) {
 		var rec audit.Record
 		mustTx(t, st, func(tx store.Tx) error {
 			var err error
-			rec, err = tx.AppendAudit(ev("u1", "pause"))
+			rec, err = tx.AppendAudit(ev("u1", audit.KindAgentPaused))
 			return err
 		})
 		if !rec.TS.Equal(clk.Now()) {
@@ -133,7 +133,7 @@ func runAudit(t *testing.T, f Factory) {
 	t.Run("an explicit timestamp is kept at millisecond precision", func(t *testing.T) {
 		st, _ := open(t, f)
 		want := time.Date(2025, 5, 6, 7, 8, 9, 123456789, time.UTC)
-		e := ev("u1", "pause")
+		e := ev("u1", audit.KindAgentPaused)
 		e.TS = want
 		var rec audit.Record
 		mustTx(t, st, func(tx store.Tx) error {
@@ -162,11 +162,28 @@ func runAudit(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("events need a kind the agent records", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		for _, k := range []string{"x", "Tool_call", "tool_call ", "made_up"} {
+			err := st.InTx(bg(), func(tx store.Tx) error {
+				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: k})
+				return err
+			})
+			if !errors.Is(err, store.ErrInvalid) {
+				t.Errorf("kind %q: err = %v, want ErrInvalid", k, err)
+			}
+		}
+		if n := len(readAll(t, st, "u1")); n != 0 {
+			t.Errorf("%d events stored", n)
+		}
+	})
+
 	t.Run("a rolled-back append leaves no gap", func(t *testing.T) {
 		st, _ := open(t, f)
 		boom := errors.New("boom")
 		_ = st.InTx(bg(), func(tx store.Tx) error {
-			if _, err := tx.AppendAudit(ev("u1", "a")); err != nil {
+			if _, err := tx.AppendAudit(ev("u1", audit.KindToolCall)); err != nil {
 				return err
 			}
 			return boom
@@ -273,7 +290,7 @@ func runAudit(t *testing.T, f Factory) {
 				defer wg.Done()
 				for i := 0; i < each; i++ {
 					err := st.InTx(bg(), func(tx store.Tx) error {
-						_, err := tx.AppendAudit(ev("u1", "tool_call"))
+						_, err := tx.AppendAudit(ev("u1", audit.KindToolCall))
 						return err
 					})
 					if err != nil {

@@ -221,9 +221,22 @@ func endedAt(v int64) time.Time {
 }
 
 // endedAtSet is the SET clause of a transition: ended_at becomes the
-// transition's time if the new state (the first placeholder) is terminal.
-// The callers only move live jobs, so an end time is never replaced.
-const endedAtSet = `ended_at = CASE WHEN ? IN ('succeeded', 'failed', 'cancelled') THEN ? ELSE ended_at END`
+// transition's time (the second placeholder) if the new state is terminal
+// (the first: its JobState.Terminal). The callers only move live jobs, so
+// an end time is never replaced.
+const endedAtSet = `ended_at = CASE WHEN ? THEN ? ELSE ended_at END`
+
+// terminalJobStates is the SQL list of the states that end a job, built
+// from JobState.Terminal (the migrations keep their own literals).
+var terminalJobStates = func() string {
+	var l []string
+	for _, s := range store.JobStates {
+		if s.Terminal() {
+			l = append(l, "'"+string(s)+"'")
+		}
+	}
+	return "(" + strings.Join(l, ", ") + ")"
+}()
 
 // ListJobSummaries implements store.Tx.
 func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSummary, error) {
@@ -256,7 +269,7 @@ func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSumm
 func (t *tx) CancelJob(userID, jobID string) error {
 	res, err := t.q.ExecContext(t.ctx,
 		`UPDATE jobs SET state = 'cancelled', updated_at = ?1, ended_at = ?1
-		 WHERE id = ?2 AND user_id = ?3 AND state NOT IN ('succeeded', 'failed', 'cancelled')`,
+		 WHERE id = ?2 AND user_id = ?3 AND state NOT IN `+terminalJobStates,
 		ms(t.now()), jobID, userID)
 	if err != nil {
 		return err
@@ -455,7 +468,7 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 		     attempt = CASE WHEN ? IN ('queued','waiting_approval') AND attempt > 0 THEN attempt - 1 ELSE attempt END,
 		     updated_at = ?, `+endedAtSet+`
 		 WHERE id = ? AND user_id = ? AND state = 'running'`,
-		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), now, string(next), now,
+		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), now, next.Terminal(), now,
 		c.Job.ID, c.Job.UserID)
 	if err != nil {
 		return false, err

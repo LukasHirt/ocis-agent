@@ -41,7 +41,7 @@ func finishExecution(tx store.Tx, c store.Claim, a store.Approval, result string
 		return errInjected
 	}
 	if _, err := tx.AppendAudit(audit.Event{
-		UserID: a.UserID, JobID: a.JobID, Kind: "action_executed", Tool: a.Tool, Risk: a.Risk,
+		UserID: a.UserID, JobID: a.JobID, Kind: audit.KindActionExecuted, Tool: a.Tool, Risk: a.Risk,
 		ArgsHash: a.ArgsHash, Cred: "app", Outcome: "ok",
 	}); err != nil {
 		return err

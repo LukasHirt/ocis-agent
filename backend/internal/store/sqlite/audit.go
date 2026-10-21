@@ -21,6 +21,9 @@ func (t *tx) AppendAudit(ev audit.Event) (audit.Record, error) {
 	if ev.UserID == "" || ev.Kind == "" {
 		return audit.Record{}, store.Invalid("an audit event needs a user id and a kind")
 	}
+	if !audit.IsKind(ev.Kind) {
+		return audit.Record{}, store.Invalid("the audit event kind is not one the agent records")
+	}
 	if ev.TS.IsZero() {
 		ev.TS = t.now()
 	}

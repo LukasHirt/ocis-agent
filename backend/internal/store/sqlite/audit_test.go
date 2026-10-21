@@ -14,7 +14,7 @@ import (
 func TestAuditTriggersRejectUpdateAndDelete(t *testing.T) {
 	s := openSQLite(t)
 	if err := s.InTx(context.Background(), func(tx store.Tx) error {
-		_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "x"})
+		_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindToolCall})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestVerifyAuditDetectsDirectDatabaseTampering(t *testing.T) {
 		s := openSQLite(t)
 		for i := 0; i < 4; i++ {
 			if err := s.InTx(context.Background(), func(tx store.Tx) error {
-				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "x", Detail: strconv.Itoa(i)})
+				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindToolCall, Detail: strconv.Itoa(i)})
 				return err
 			}); err != nil {
 				t.Fatal(err)

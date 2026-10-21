@@ -27,7 +27,7 @@ func (t *tx) ExpireEndedJobApprovals(limit int) ([]store.ApprovalRef, error) {
 		`UPDATE approvals SET state = 'expired'
 		 WHERE state IN ('pending', 'approved') AND id IN (
 		     SELECT a.id FROM approvals a JOIN jobs j ON j.id = a.job_id AND j.user_id = a.user_id
-		     WHERE a.state IN ('pending', 'approved') AND j.state IN ('succeeded', 'failed', 'cancelled')
+		     WHERE a.state IN ('pending', 'approved') AND j.state IN `+terminalJobStates+`
 		     ORDER BY a.requested_at, a.id LIMIT ?)
 		 RETURNING id, user_id, job_id, requested_at`, limit)
 	if err != nil {

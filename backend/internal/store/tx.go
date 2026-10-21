@@ -21,7 +21,8 @@ type Tx interface {
 
 	// AppendAudit adds an event to the user's chain, assigning the sequence
 	// number, previous hash and hash inside the transaction. A zero TS becomes
-	// Now(). UserID and Kind are required.
+	// Now(). UserID and Kind are required, and Kind must be one of the
+	// audit.Kind* constants (audit.IsKind); anything else is ErrInvalid.
 	AppendAudit(ev audit.Event) (audit.Record, error)
 	// ReadAudit returns records with seq > afterSeq in ascending order.
 	// limit <= 0 means 100; the maximum is 1000.
@@ -95,7 +96,9 @@ type Tx interface {
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)
 	// ListJobSummaries is ListJobs without the checkpoints and with each
-	// job's step count, in one query (same order, filter and limits).
+	// job's step count and token sums (TokensIn, TokensOut over its steps,
+	// 0 without steps) and its EndedAt (zero while live), in one query (same
+	// order, filter and limits; no query per job).
 	ListJobSummaries(userID string, f JobFilter) ([]JobSummary, error)
 	// CancelJob cancels a job that is not terminal yet. ErrNotFound, or
 	// ErrConflict if the job is already terminal.

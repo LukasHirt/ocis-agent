@@ -40,7 +40,7 @@ func seedAudit(t *testing.T, st store.Store, user string, n int, mod func(i int,
 	base := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
 	err := st.InTx(bg, func(tx store.Tx) error {
 		for i := range n {
-			e := audit.Event{UserID: user, TS: base.Add(time.Duration(i) * time.Millisecond), Kind: "tool", Cred: "app", Outcome: "ok"}
+			e := audit.Event{UserID: user, TS: base.Add(time.Duration(i) * time.Millisecond), Kind: audit.KindToolCall, Cred: "app", Outcome: "ok"}
 			if mod != nil {
 				mod(i, &e)
 			}

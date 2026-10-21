@@ -18,6 +18,9 @@ const (
 	JobCancelled       JobState = "cancelled"
 )
 
+// JobStates are all job states.
+var JobStates = []JobState{JobQueued, JobRunning, JobWaitingApproval, JobSucceeded, JobFailed, JobCancelled}
+
 // Valid reports whether s is a known state.
 func (s JobState) Valid() bool {
 	switch s {
