@@ -141,6 +141,8 @@ describe('Chat', () => {
     expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('')
     expect(w.findAll('.agent-msg-content').map((m) => m.text())).toEqual(['What changed?'])
     expect(w.find('.agent-msg-status').text()).toContain('Waiting')
+    expect(w.find('.agent-chat-back').exists()).toBe(true)
+    expect(w.find('.agent-chat').classes()).toContain('agent-chat--open')
     expect(document.activeElement).toBe(w.find('textarea').element)
   })
 

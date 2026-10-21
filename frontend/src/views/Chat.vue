@@ -1,9 +1,9 @@
 <template>
-  <section class="agent-chat agent-page agent-page--fill">
+  <section :class="['agent-chat', 'agent-page', 'agent-page--fill', { 'agent-chat--open': !!id }]">
     <aside class="agent-chat-side">
       <div class="agent-chat-side-head">
-        <h1 v-text="$gettext('Chat')" />
-        <oc-button appearance="filled" size="small" :disabled="creating" @click="create">
+        <h1 class="agent-page-title" v-text="$gettext('Chat')" />
+        <oc-button appearance="filled" variation="primary" size="small" :disabled="creating" @click="create">
           <oc-icon name="chat-new" size="small" />
           <span v-text="$gettext('New conversation')" />
         </oc-button>
@@ -14,7 +14,7 @@
     <div class="agent-chat-main">
       <div v-if="chat.needsEnrol" class="agent-chat-enrol" role="alert">
         <span v-text="$gettext('The agent is not set up for you yet. Set it up first.')" />
-        <oc-button appearance="filled" size="small" :disabled="enrolling" @click="enable" v-text="$gettext('Enable agent')" />
+        <oc-button appearance="filled" variation="primary" size="small" :disabled="enrolling" @click="enable" v-text="$gettext('Enable agent')" />
       </div>
 
       <EmptyState
@@ -27,15 +27,21 @@
         <EmptyState
           class="agent-chat-missing"
           role="alert"
-          icon="chat-3"
+          icon="chat-delete"
           :title="$gettext('This conversation no longer exists.')"
         />
       </template>
       <template v-else>
-        <h2 class="agent-chat-title">
-          <TextBlock v-if="title" :text="title" />
-          <span v-else v-text="$gettext('New conversation')" />
-        </h2>
+        <div class="agent-chat-head">
+          <router-link class="agent-chat-back" :to="{ name: `${APPID}-chat` }">
+            <oc-icon name="arrow-left" size="small" />
+            <span v-text="$gettext('All conversations')" />
+          </router-link>
+          <h2 class="agent-chat-title agent-section-title">
+            <TextBlock v-if="title" :text="title" />
+            <span v-else v-text="$gettext('New conversation')" />
+          </h2>
+        </div>
         <ErrorState
           v-if="chat.messagesError && (!chat.messagesLoaded || !agent.serviceDown)"
           class="agent-chat-error"
@@ -195,31 +201,43 @@ const enable = async () => {
 <style>
 .agent-chat {
   display: grid;
-  grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr);
+  grid-template-columns: var(--agent-pane) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  gap: var(--oc-space-medium, 16px);
-  padding: var(--oc-space-medium, 16px) var(--oc-space-large, 24px);
+  gap: 0;
+  padding: 0;
+}
+@container agent (max-width: 999px) {
+  .agent-chat {
+    --agent-pane: 15rem;
+  }
 }
 @container agent (max-width: 699px) {
   .agent-chat {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .agent-chat--open .agent-chat-side {
+    display: none;
+  }
+  .agent-chat:not(.agent-chat--open) .agent-chat-main {
+    display: none;
   }
 }
 .agent-chat-side {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
+  border-right: var(--agent-line);
+  background: var(--oc-color-background-muted);
 }
 .agent-chat-side-head {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-4);
 }
 .agent-chat-side-head h1 {
   margin: 0;
@@ -227,19 +245,52 @@ const enable = async () => {
 .agent-chat-main {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0;
   min-width: 0;
   min-height: 0;
 }
+.agent-chat-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-2);
+  min-width: 0;
+  padding: var(--agent-space-3) var(--agent-space-5);
+  border-bottom: var(--agent-line);
+}
+.agent-chat-back {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: var(--agent-space-1);
+  white-space: nowrap;
+}
+@container agent (max-width: 699px) {
+  .agent-chat-back {
+    display: inline-flex;
+  }
+}
 .agent-chat-title {
-  margin: 0;
-  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-chat-title .agent-text {
+  white-space: nowrap !important;
 }
 .agent-chat-enrol,
 .agent-chat-error {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
+  margin: var(--agent-space-3) var(--agent-space-5) 0;
+}
+.agent-chat-pick,
+.agent-chat-missing {
+  margin: auto;
 }
 </style>

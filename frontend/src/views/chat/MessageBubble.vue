@@ -1,50 +1,57 @@
 <template>
   <article :class="['agent-msg', `agent-msg-${kind}`]">
-    <header class="agent-msg-head">
+    <span v-if="kind !== 'user'" class="agent-msg-avatar" aria-hidden="true">
       <oc-icon :name="roleIcon" size="small" />
-      <span class="agent-msg-role" v-text="roleLabel" />
-      <TextBlock v-if="kind === 'other'" :text="message.role" class="agent-msg-raw-role" />
-      <time
-        v-if="message.created_at"
-        class="agent-msg-time"
-        :datetime="message.created_at"
-        v-text="formatTime(message.created_at)"
-      />
-    </header>
-    <div class="agent-msg-content">
-      <span v-if="systemText" v-text="systemText" />
-      <TextBlock v-else :text="message.content" />
-    </div>
+    </span>
+    <div class="agent-msg-body">
+      <header class="agent-msg-head">
+        <span class="agent-msg-role" v-text="roleLabel" />
+        <TextBlock v-if="kind === 'other'" :text="message.role" class="agent-msg-raw-role" />
+        <time
+          v-if="message.created_at"
+          class="agent-msg-time"
+          :datetime="message.created_at"
+          v-text="formatTime(message.created_at)"
+        />
+      </header>
+      <div class="agent-msg-content">
+        <span v-if="systemText" v-text="systemText" />
+        <TextBlock v-else :text="message.content" />
+      </div>
 
-    <div v-if="kind === 'user' && message.job" class="agent-msg-status">
-      <oc-icon :name="state.icon" size="small" />
-      <span class="agent-msg-state" v-text="state.label" />
-      <TextBlock v-if="!state.known" :text="message.job.state" class="agent-msg-raw-state" />
-      <router-link
-        v-if="waiting"
-        :to="{ name: `${APPID}-approvals`, query: { job: message.job.id } }"
-        v-text="$gettext('Open the approvals inbox')"
-      />
-    </div>
-    <p v-if="failed && message.job?.error" class="agent-msg-error">
-      <span v-if="jobErrorText" v-text="jobErrorText" />
-      <TextBlock v-else :text="message.job.error" />
-    </p>
-    <p v-if="noticeText" class="agent-msg-notice" v-text="noticeText" />
+      <div
+        v-if="kind === 'user' && message.job"
+        :class="['agent-msg-status', 'agent-chip', `agent-chip--${state.tone}`, { 'agent-chip--dashed': !state.known }]"
+      >
+        <oc-icon :name="state.icon" size="small" :class="{ 'agent-spin': state.spin }" />
+        <span class="agent-msg-state" v-text="state.label" />
+        <TextBlock v-if="!state.known" :text="message.job.state" class="agent-msg-raw-state" />
+        <router-link
+          v-if="waiting"
+          :to="{ name: `${APPID}-approvals`, query: { job: message.job.id } }"
+          v-text="$gettext('Open the approvals inbox')"
+        />
+      </div>
+      <p v-if="failed && message.job?.error" class="agent-msg-error agent-notice agent-notice--danger">
+        <span v-if="jobErrorText" v-text="jobErrorText" />
+        <TextBlock v-else :text="message.job.error" />
+      </p>
+      <p v-if="noticeText" class="agent-msg-notice agent-notice agent-notice--warning" v-text="noticeText" />
 
-    <div v-if="waiting && approvals" class="agent-msg-approvals">
-      <p v-if="approvals.error" role="alert" v-text="approvals.error" />
-      <ul v-if="approvals.items.length > 0">
-        <li v-for="a in approvals.items" :key="a.id">
-          <TextBlock :text="a.tool" class="agent-msg-tool" />
-          <RiskBadge :risk="a.risk" />
-          <router-link
-            :to="{ name: `${APPID}-approvals`, query: { job: a.job_id } }"
-            v-text="$gettext('Review')"
-          />
-        </li>
-      </ul>
-      <p v-if="approvals.more" v-text="$gettext('More actions are waiting; see them all in the inbox.')" />
+      <div v-if="waiting && approvals" class="agent-msg-approvals agent-surface">
+        <p v-if="approvals.error" role="alert" v-text="approvals.error" />
+        <ul v-if="approvals.items.length > 0">
+          <li v-for="a in approvals.items" :key="a.id">
+            <TextBlock :text="a.tool" class="agent-msg-tool" />
+            <RiskBadge :risk="a.risk" />
+            <router-link
+              :to="{ name: `${APPID}-approvals`, query: { job: a.job_id } }"
+              v-text="$gettext('Review')"
+            />
+          </li>
+        </ul>
+        <p v-if="approvals.more" v-text="$gettext('More actions are waiting; see them all in the inbox.')" />
+      </div>
     </div>
   </article>
 </template>
@@ -98,21 +105,21 @@ const roleIcon = computed(() => {
   return 'information'
 })
 
-const STATES: Record<string, { icon: string; label: () => string }> = {
-  ['queued' satisfies JobState]: { icon: 'time', label: () => $gettext('Waiting') },
-  ['running' satisfies JobState]: { icon: 'loader-4', label: () => $gettext('Working') },
-  ['waiting_approval' satisfies JobState]: { icon: 'hourglass', label: () => $gettext('Needs your approval') },
-  ['succeeded' satisfies JobState]: { icon: 'checkbox-circle', label: () => $gettext('Answered') },
-  ['failed' satisfies JobState]: { icon: 'error-warning', label: () => $gettext('Could not answer') },
-  ['cancelled' satisfies JobState]: { icon: 'close-circle', label: () => $gettext('Cancelled') }
+const STATES: Record<string, { icon: string; tone: string; label: () => string }> = {
+  ['queued' satisfies JobState]: { tone: 'neutral', icon: 'time', label: () => $gettext('Waiting') },
+  ['running' satisfies JobState]: { tone: 'info', icon: 'loader-4', label: () => $gettext('Working') },
+  ['waiting_approval' satisfies JobState]: { tone: 'warning', icon: 'hourglass', label: () => $gettext('Needs your approval') },
+  ['succeeded' satisfies JobState]: { tone: 'success', icon: 'checkbox-circle', label: () => $gettext('Answered') },
+  ['failed' satisfies JobState]: { tone: 'danger', icon: 'error-warning', label: () => $gettext('Could not answer') },
+  ['cancelled' satisfies JobState]: { tone: 'neutral', icon: 'close-circle', label: () => $gettext('Cancelled') }
 }
 
 const state = computed(() => {
   const s = props.message.job?.state ?? ''
   const known = Object.hasOwn(STATES, s)
   return known
-    ? { known, icon: STATES[s].icon, label: STATES[s].label() }
-    : { known, icon: 'question', label: $gettext('Unknown state:') }
+    ? { known, tone: STATES[s].tone, spin: s === ('running' satisfies JobState), icon: STATES[s].icon, label: STATES[s].label() }
+    : { known, tone: 'danger', spin: false, icon: 'question', label: $gettext('Unknown state:') }
 })
 
 // the runner's fixed texts are translated (as on the tasks screen); any
@@ -144,53 +151,91 @@ const noticeText = computed(() => {
 
 <style>
 .agent-msg {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  max-width: min(48rem, 90%);
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  column-gap: var(--agent-space-2);
+  align-self: stretch;
   min-width: 0;
   overflow-wrap: anywhere;
-  border: 1px solid var(--oc-color-border, #ddd);
 }
 .agent-msg-user {
+  display: block;
   align-self: flex-end;
-  background: var(--oc-color-background-highlight, #eef3fd);
-}
-.agent-msg-assistant {
-  align-self: flex-start;
-  background: var(--oc-color-background-default, #fff);
+  max-width: min(40rem, 85%);
 }
 .agent-msg-system,
 .agent-msg-other {
-  align-self: center;
-  border-style: dashed;
-  font-style: italic;
-  background: var(--oc-color-background-muted, #f5f5f5);
+  justify-self: center;
+}
+.agent-msg-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--oc-color-background-highlight);
+  color: var(--oc-color-swatch-primary-default);
+}
+.agent-msg-avatar svg {
+  fill: currentColor;
+}
+.agent-msg-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-1);
+  min-width: 0;
+}
+.agent-msg-user .agent-msg-body {
+  align-items: flex-end;
 }
 .agent-msg-head {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.85em;
-  color: var(--oc-color-text-muted, #555);
+  gap: var(--agent-space-1);
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
+}
+.agent-msg-user .agent-msg-head {
+  justify-content: flex-end;
 }
 .agent-msg-role {
-  font-weight: bold;
+  font-weight: 600;
+}
+.agent-msg-content {
+  padding: var(--agent-space-2) var(--agent-space-3);
+  border-radius: var(--agent-radius-m);
+  line-height: 1.5;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.agent-msg-assistant .agent-msg-content {
+  background: var(--oc-color-background-muted);
+}
+.agent-msg-user .agent-msg-content {
+  background: var(--oc-color-background-highlight);
+}
+.agent-msg-system .agent-msg-content,
+.agent-msg-other .agent-msg-content {
+  padding: 0;
+  background: none;
+  color: var(--oc-color-text-muted);
+  font-style: italic;
 }
 .agent-msg-status,
 .agent-msg-notice,
 .agent-msg-error {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.85em;
   margin: 0;
 }
-.agent-msg-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+.agent-msg-status {
+  flex-wrap: wrap;
+}
+.agent-msg-approvals {
+  padding: var(--agent-space-3);
+}
+.agent-msg-approvals p {
+  margin: 0;
 }
 .agent-msg-approvals ul {
   list-style: none;
@@ -198,17 +243,17 @@ const noticeText = computed(() => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
 }
 .agent-msg-approvals li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
 }
 .agent-msg-tool,
 .agent-msg-raw-state,
 .agent-msg-raw-role {
-  font-family: var(--oc-font-family-mono, monospace);
+  font-family: var(--agent-font-mono);
 }
 </style>

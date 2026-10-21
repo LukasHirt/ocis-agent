@@ -46,7 +46,7 @@
         </div>
         <template v-else>
           <router-link
-            class="agent-conv-link"
+            class="agent-conv-link agent-row-link"
             :to="{ name: `${APPID}-chat-conversation`, params: { id: c.id } }"
             :aria-current="c.id === chat.current ? 'page' : undefined"
           >
@@ -61,7 +61,7 @@
               v-text="formatTime(c.updated_at)"
             />
           </router-link>
-          <span class="agent-conv-actions">
+          <span class="agent-conv-actions agent-row-aside">
             <oc-button
               appearance="raw"
               size="small"
@@ -200,10 +200,14 @@ const remove = async (id: string) => {
 
 <style>
 .agent-convs {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
+  gap: var(--agent-space-2);
+  padding: 0 var(--agent-space-2) var(--agent-space-4);
 }
 .agent-convs-list {
   list-style: none;
@@ -211,19 +215,24 @@ const remove = async (id: string) => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
 }
 .agent-conv {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
-  border-radius: 4px;
-  padding: 0.25rem 0.5rem;
+  gap: var(--agent-space-1);
+  border-radius: var(--agent-radius-m);
+  padding: var(--agent-space-2) var(--agent-space-3);
   min-width: 0;
 }
-.agent-conv-current {
-  background: var(--oc-color-background-highlight, #eef3fd);
-  border-left: 3px solid var(--oc-color-swatch-primary-default, #2f6fed);
+.agent-conv:hover {
+  background: var(--oc-color-background-hover);
+}
+.agent-conv-current,
+.agent-conv-current:hover {
+  background: var(--oc-color-background-highlight);
+  box-shadow: inset 3px 0 0 var(--oc-color-swatch-primary-default);
 }
 .agent-conv-link {
   flex: 1 1 auto;
@@ -242,28 +251,35 @@ const remove = async (id: string) => {
   white-space: nowrap !important;
 }
 .agent-conv-current .agent-conv-title {
-  font-weight: bold;
+  font-weight: 600;
 }
 .agent-conv-untitled {
   font-style: italic;
 }
 .agent-conv-time {
-  font-size: 0.8em;
-  color: var(--oc-color-text-muted, #555);
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
 }
 .agent-conv-actions {
   display: flex;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
+  opacity: 0;
+}
+.agent-conv:hover .agent-conv-actions,
+.agent-conv:focus-within .agent-conv-actions,
+.agent-conv-current .agent-conv-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .agent-conv-actions {
+    opacity: 1;
+  }
 }
 .agent-conv-rename {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
   width: 100%;
-}
-.agent-convs-error,
-.agent-convs-action-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 </style>

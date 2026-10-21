@@ -116,18 +116,25 @@ defineExpose({ toBottom })
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.5rem;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-4) var(--agent-space-5);
+}
+.agent-thread,
+.agent-thread-older {
+  width: 100%;
+  max-width: 52rem;
+  margin: 0 auto;
+  box-sizing: border-box;
 }
 .agent-thread {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--agent-space-4);
 }
 .agent-thread-older {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
 }
 </style>

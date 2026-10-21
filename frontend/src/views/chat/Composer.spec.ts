@@ -11,7 +11,20 @@ describe('Composer', () => {
     const ta = w.find('textarea')
     const label = w.find(`label[for="${ta.attributes('id')}"]`)
     expect(label.text()).toBe('Message')
-    expect(ta.attributes('placeholder')).toContain('Enter sends, Shift+Enter starts a new line')
+    expect(ta.attributes('placeholder')).toBe('Ask the agent…')
+    expect(w.find('.agent-composer-keys').text()).toBe('Enter sends, Shift+Enter starts a new line')
+    expect(w.find('.agent-composer-box textarea').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('grows from 2 to 8 rows with the lines typed', async () => {
+    const w = mountComposer()
+    const rows = () => w.find('textarea').attributes('rows')
+    expect(rows()).toBe('2')
+    await w.setProps({ modelValue: 'a\nb\nc\nd' })
+    expect(rows()).toBe('4')
+    await w.setProps({ modelValue: Array(20).fill('x').join('\n') })
+    expect(rows()).toBe('8')
     w.unmount()
   })
 

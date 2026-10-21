@@ -1,18 +1,20 @@
 <template>
   <div class="agent-composer">
+    <div class="agent-composer-box">
     <oc-textarea
       ref="input"
       class="agent-composer-input"
       :model-value="modelValue"
       :label="$gettext('Message')"
-      :placeholder="$gettext('Ask the agent… (Enter sends, Shift+Enter starts a new line)')"
+      :placeholder="$gettext('Ask the agent…')"
       :submit-on-enter="false"
       :disabled="inputDisabled"
-      rows="3"
+      :rows="rows"
       @update:model-value="(v: string) => emit('update:modelValue', v)"
       @keydown="onKeydown"
     />
     <div class="agent-composer-bar">
+      <span class="agent-composer-keys" v-text="$gettext('Enter sends, Shift+Enter starts a new line')" />
       <span
         v-if="nearLimit"
         :class="['agent-composer-count', { 'agent-composer-over': over }]"
@@ -24,6 +26,8 @@
       <oc-button
         class="agent-composer-send"
         appearance="filled"
+        variation="primary"
+        size="small"
         :disabled="sendDisabled"
         @click="trySend"
       >
@@ -31,6 +35,7 @@
         <span v-text="$gettext('Send')" />
       </oc-button>
       <oc-spinner v-if="sending" size="small" :aria-label="$gettext('Sending')" />
+    </div>
     </div>
     <p v-if="error" class="agent-composer-error" role="alert" v-text="error.message" />
   </div>
@@ -56,10 +61,13 @@ const props = withDefaults(
   { sending: false, disabled: false, hint: '', error: null }
 )
 const emit = defineEmits<{ 'update:modelValue': [string]; send: [] }>()
-const { interpolate } = useGettext()
+const { $gettext, interpolate } = useGettext()
 
 // the count shows from this many bytes on
 const COUNT_FROM = MAX_MESSAGE_BYTES - 1024
+
+// the box grows with the lines typed, from 2 to 8 rows, then scrolls
+const rows = computed(() => Math.min(8, Math.max(2, (props.modelValue ?? '').split('\n').length)))
 
 const bytes = computed(() => byteLength(props.modelValue ?? ''))
 const nearLimit = computed(() => bytes.value >= COUNT_FROM)
@@ -90,35 +98,74 @@ defineExpose({ focus: () => input.value?.focus() })
 
 <style>
 .agent-composer {
+  flex: none;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
+  padding: var(--agent-space-3) var(--agent-space-5) var(--agent-space-4);
+  border-top: var(--agent-line);
+  background: var(--oc-color-background-default);
+}
+.agent-composer-box {
+  width: 100%;
+  max-width: 52rem;
+  margin: 0 auto;
+  box-sizing: border-box;
+  border: 1px solid var(--oc-color-input-border);
+  border-radius: var(--agent-radius-m);
+  background: var(--oc-color-input-bg);
+  padding: var(--agent-space-2);
+}
+.agent-composer-box:focus-within {
+  border-color: var(--oc-color-swatch-primary-default);
+}
+.agent-composer-input .oc-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 .agent-composer-input textarea {
-  resize: vertical;
-  min-height: 4.5rem;
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  border: 0;
+  resize: none;
+  min-height: auto;
+  max-height: 12rem;
+  padding: var(--agent-space-1);
 }
 .agent-composer-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.5rem;
-  font-size: 0.85em;
+  gap: var(--agent-space-2);
+  font-size: var(--agent-font-xs);
+}
+.agent-composer-keys {
+  margin-right: auto;
+  color: var(--oc-color-text-muted);
 }
 .agent-composer-over,
 .agent-composer-over-text,
 .agent-composer-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  color: var(--oc-color-swatch-danger-default);
 }
 .agent-composer-over {
-  font-weight: bold;
+  font-weight: 600;
 }
 .agent-composer-hint {
-  margin-right: auto;
-  color: var(--oc-color-text-muted, #555);
+  color: var(--oc-color-text-muted);
 }
 .agent-composer-error {
-  margin: 0;
+  width: 100%;
+  max-width: 52rem;
+  margin: 0 auto;
 }
 </style>
