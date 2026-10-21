@@ -44,6 +44,9 @@ type node struct {
 	data []byte
 	etag string
 	mod  time.Time
+	// tooEarly is how many more GETs answer 425 (the upload is still being
+	// postprocessed)
+	tooEarly int
 }
 
 type account struct{ username, password, id, driveID string }
@@ -88,6 +91,7 @@ type Server struct {
 	heartbeat time.Duration
 	closing   chan struct{}
 	maxPut    int64
+	postproc  int // GETs answered 425 after each upload
 }
 
 // New starts a fake and stops it when the test ends.
@@ -262,6 +266,16 @@ func (s *Server) SetMaxPut(n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.maxPut = n
+}
+
+// SetPostprocessing makes the next n GETs of a file answer 425 Too Early
+// after every upload (PUT), as oCIS does while it postprocesses a fresh
+// upload; PROPFIND is not affected. The default is 0. PutFile is not an
+// upload and is never postprocessed.
+func (s *Server) SetPostprocessing(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.postproc = n
 }
 
 // DropStreams closes every open SSE stream from the server side.
@@ -506,6 +520,9 @@ func (s *Server) dav(w http.ResponseWriter, r *http.Request, a *account) {
 			w.WriteHeader(http.StatusNotFound)
 		case n.dir:
 			w.WriteHeader(http.StatusMethodNotAllowed)
+		case n.tooEarly > 0:
+			n.tooEarly--
+			w.WriteHeader(http.StatusTooEarly)
 		default:
 			w.Header().Set("ETag", n.etag)
 			w.Header().Set("Content-Type", "application/octet-stream")
@@ -564,7 +581,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*n
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
-	nodes[p] = &node{data: data}
+	nodes[p] = &node{data: data, tooEarly: s.postproc}
 	s.bump(nodes, p)
 	w.Header().Set("ETag", nodes[p].etag)
 	if exists {

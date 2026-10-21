@@ -26,6 +26,14 @@ type Client struct {
 	base    string
 	hc      *http.Client
 	sseIdle time.Duration
+	// tooEarlyWaits are the pauses before each retry of a GET that oCIS
+	// answered 425 (a fresh upload still in postprocessing); a field for tests
+	tooEarlyWaits []time.Duration
+}
+
+// defaultTooEarlyWaits wait out about three seconds of postprocessing.
+var defaultTooEarlyWaits = []time.Duration{
+	100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond,
 }
 
 // Option configures New.
@@ -58,7 +66,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("ocisclient: base URL must be an http(s) origin without credentials, path or query")
 	}
-	c := &Client{base: u.Scheme + "://" + u.Host, hc: NewHTTPClient(false), sseIdle: 2 * time.Minute}
+	c := &Client{base: u.Scheme + "://" + u.Host, hc: NewHTTPClient(false), sseIdle: 2 * time.Minute, tooEarlyWaits: defaultTooEarlyWaits}
 	for _, o := range opts {
 		o(c)
 	}

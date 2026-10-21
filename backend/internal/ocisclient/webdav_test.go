@@ -488,3 +488,38 @@ func TestGetFailsClosedWhenNoETagHeader(t *testing.T) {
 		t.Fatalf("%q %q %v %d", data, etag, err, propfinds)
 	}
 }
+
+func TestGetWaitsOutPostprocessing(t *testing.T) {
+	f := newFixture(t)
+	f.c.tooEarlyWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	f.s.SetPostprocessing(3)
+	etag, err := f.c.Put(bg, f.cr, testDrive, "/a.md", []byte("fresh"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, got, err := f.c.Get(bg, f.cr, testDrive, "/a.md", 10)
+	if err != nil || string(data) != "fresh" || got != etag {
+		t.Fatalf("get right after an upload = %q %q %v", data, got, err)
+	}
+
+	f.s.SetPostprocessing(4) // one more 425 than the client waits out
+	if _, err := f.c.Put(bg, f.cr, testDrive, "/b.md", []byte("slow"), ""); err != nil {
+		t.Fatal(err)
+	}
+	var se *StatusError
+	if _, _, err := f.c.Get(bg, f.cr, testDrive, "/b.md", 10); !errors.Is(err, ErrTooEarly) || !errors.As(err, &se) || se.Status != http.StatusTooEarly {
+		t.Fatalf("get of a file still postprocessing = %v, want ErrTooEarly", err)
+	}
+
+	f.s.SetPostprocessing(100)
+	if _, err := f.c.Put(bg, f.cr, testDrive, "/c.md", []byte("x"), ""); err != nil {
+		t.Fatal(err)
+	}
+	f.c.tooEarlyWaits = []time.Duration{time.Hour}
+	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, _, err := f.c.Get(ctx, f.cr, testDrive, "/c.md", 10); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
+		t.Fatalf("the wait does not end with the context: %v after %v", err, time.Since(start))
+	}
+}

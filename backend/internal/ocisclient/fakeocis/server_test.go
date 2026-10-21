@@ -544,3 +544,29 @@ func TestOversizedPutIs413(t *testing.T) {
 		t.Fatalf("at the limit = %d", st)
 	}
 }
+
+func TestGetIsTooEarlyWhilePostprocessing(t *testing.T) {
+	s := newFake(t)
+	s.SetPostprocessing(2)
+	if st, _, _ := call(t, s, http.MethodPut, dav+"/a.md", einstein, nil, "one"); st != http.StatusCreated {
+		t.Fatalf("put = %d", st)
+	}
+	// oCIS answers 425 Too Early to a GET while the upload is postprocessed
+	// (measured on the dev stack: a GET right after a PUT); PROPFIND works
+	if st, _, _ := call(t, s, "PROPFIND", dav+"/a.md", einstein, map[string]string{"Depth": "0"}, ""); st != http.StatusMultiStatus {
+		t.Fatalf("propfind while postprocessing = %d", st)
+	}
+	for i := 0; i < 2; i++ {
+		if st, _, _ := call(t, s, http.MethodGet, dav+"/a.md", einstein, nil, ""); st != http.StatusTooEarly {
+			t.Fatalf("get %d while postprocessing = %d, want 425", i, st)
+		}
+	}
+	if st, _, body := call(t, s, http.MethodGet, dav+"/a.md", einstein, nil, ""); st != http.StatusOK || body != "one" {
+		t.Fatalf("get after postprocessing = %d %q", st, body)
+	}
+	// PutFile (the test's own setup) is not an upload: no postprocessing
+	s.PutFile(drv, "/b.md", []byte("two"))
+	if st, _, _ := call(t, s, http.MethodGet, dav+"/b.md", einstein, nil, ""); st != http.StatusOK {
+		t.Fatalf("get of a PutFile file = %d", st)
+	}
+}
