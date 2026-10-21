@@ -24,6 +24,23 @@ export const stateLabel = (state: string, t: Gettext): StateLabel =>
     ? { known: true, icon: STATES[state].icon, label: STATES[state].label(t) }
     : { known: false, icon: 'question', label: t('Unknown state:') }
 
+export type Tone = 'neutral' | 'info' | 'warning' | 'success' | 'danger'
+
+// stateTone is the chip tone of a job state.
+export const stateTone = (state: string): Tone => {
+  switch (state) {
+    case 'running' satisfies JobState:
+      return 'info'
+    case 'waiting_approval' satisfies JobState:
+      return 'warning'
+    case 'succeeded' satisfies JobState:
+      return 'success'
+    case 'failed' satisfies JobState:
+      return 'danger'
+  }
+  return 'neutral'
+}
+
 // filterLabel is the label of a list filter (a job state, or '' for all).
 export const filterLabel = (state: string, t: Gettext): string => {
   switch (state) {

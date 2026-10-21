@@ -93,4 +93,26 @@ describe('JobRow', () => {
     expect(odd.find('.agent-job-error i').exists()).toBe(false)
     expect(row({ error: '' }).find('.agent-job-error').exists()).toBe(false)
   })
+
+  it.each([
+    ['queued', 'neutral'],
+    ['running', 'info'],
+    ['waiting_approval', 'warning'],
+    ['succeeded', 'success'],
+    ['failed', 'danger'],
+    ['cancelled', 'neutral']
+  ])('gives the state %s the chip tone %s', (state, tone) => {
+    const w = row({ state })
+    expect(w.find('.agent-job-state').classes()).toEqual(expect.arrayContaining(['agent-chip', `agent-chip--${tone}`]))
+    expect(w.find('.agent-job-trigger').classes()).toContain('agent-chip--neutral')
+  })
+
+  it('keeps tokens, steps and times in the side block', () => {
+    const w = row({ tokens_in: 5, tokens_out: 6, steps_count: 2, created_at: '2026-01-01T10:00:00Z' })
+    const side = w.find('.agent-job-side')
+    expect(side.find('.agent-job-tokens').exists()).toBe(true)
+    expect(side.find('.agent-job-steps').exists()).toBe(true)
+    expect(side.find('.agent-job-created').exists()).toBe(true)
+    expect(w.classes()).toContain('agent-row')
+  })
 })

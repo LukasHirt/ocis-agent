@@ -241,4 +241,17 @@ describe('JobDetail during an outage', () => {
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
   })
+
+  it('lays out the main column and the facts card, with chips for state and trigger', async () => {
+    const st = jobsState({ jobs: [jobOf('j1', { state: 'failed' })], steps: { j1: [stepOf(1)] } })
+    const { w } = await setup(st)
+    const main = w.find('.agent-job-detail-main')
+    const side = w.find('aside.agent-job-detail-side')
+    expect(main.exists()).toBe(true)
+    expect(side.classes()).toContain('agent-surface')
+    expect(main.find('.agent-job-detail-steps').exists()).toBe(true)
+    expect(side.find('.agent-job-detail-facts').exists()).toBe(true)
+    expect(side.find('.agent-job-detail-state').classes()).toEqual(expect.arrayContaining(['agent-chip', 'agent-chip--danger']))
+    expect(side.find('.agent-job-detail-trigger').classes()).toContain('agent-chip--neutral')
+  })
 })

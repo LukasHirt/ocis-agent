@@ -1,11 +1,25 @@
 <template>
   <section class="agent-tasks agent-page">
-    <h1 v-text="$gettext('Tasks')" />
-
+    <header class="agent-page-head agent-page-head--sticky">
+      <div class="agent-page-titles">
+        <h1 class="agent-page-title" v-text="$gettext('Tasks')" />
+      </div>
+      <div v-if="!id" class="agent-page-actions">
+        <oc-button size="small" appearance="outline" :disabled="jobs.loading" @click="jobs.refresh()">
+          <oc-icon name="refresh" size="small" />
+          <span v-text="$gettext('Refresh')" />
+        </oc-button>
+        <oc-button size="small" appearance="outline" :disabled="!canReview" @click="reviewNow">
+          <oc-icon name="search-eye" size="small" />
+          <span v-text="$gettext('Review now')" />
+        </oc-button>
+      </div>
+    </header>
+    <div class="agent-page-body">
     <JobDetail v-if="id" />
 
     <template v-else>
-      <div class="agent-tasks-tools">
+      <div class="agent-toolbar agent-tasks-tools">
         <oc-select
           class="agent-tasks-filter"
           :model-value="selected"
@@ -17,18 +31,10 @@
           :label="$gettext('Show')"
           @update:model-value="(o: FilterOption | null) => o && jobs.setFilter(o.value)"
         />
-        <oc-button size="small" :disabled="jobs.loading" @click="jobs.refresh()">
-          <oc-icon name="refresh" size="small" />
-          <span v-text="$gettext('Refresh')" />
-        </oc-button>
-        <oc-button size="small" appearance="outline" :disabled="!canReview" @click="reviewNow">
-          <oc-icon name="search-eye" size="small" />
-          <span v-text="$gettext('Review now')" />
-        </oc-button>
       </div>
       <p
         v-if="reviewResult"
-        class="agent-tasks-review-result"
+        class="agent-tasks-review-result agent-notice agent-notice--info"
         role="status"
         data-testid="agent-review-result"
         v-text="reviewResult"
@@ -55,7 +61,7 @@
       />
 
       <template v-if="jobs.loaded">
-        <ul class="agent-tasks-list">
+        <ul class="agent-tasks-list agent-rows">
           <li v-for="j in jobs.jobs" :key="j.id"><JobRow :job="j" /></li>
         </ul>
         <EmptyState
@@ -74,6 +80,7 @@
         />
       </template>
     </template>
+    </div>
   </section>
 </template>
 
@@ -166,44 +173,15 @@ watch(
 
 <style>
 .agent-tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
   min-width: 0;
-}
-.agent-tasks h1 {
-  margin: 0;
-}
-.agent-tasks-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.75rem;
 }
 .agent-tasks-filter {
   min-width: 14rem;
-}
-.agent-tasks-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
-}
-.agent-tasks-review-result {
-  margin: 0;
-}
-.agent-tasks-review-error {
-  margin: 0;
-  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 .agent-tasks-error {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
-  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 </style>
