@@ -26,8 +26,21 @@
 
 services:
   ocis-agent:
-    image: ocis-agent:dev # docker build -t ocis-agent:dev . (from the repository root)
+    # docker build -t ocis-agent:dev . (from the repository root). For
+    # reproducible builds, pin the Dockerfile's base images by digest, e.g.
+    # FROM alpine:3.22@sha256:<digest> (docker buildx imagetools inspect alpine:3.22
+    # shows it), and reference a pushed image here by digest too.
+    image: ocis-agent:dev
     restart: unless-stopped
+    # a minimal init as PID 1 forwards SIGTERM and reaps child processes
+    init: true
+    # resource limits: examples, tune them to your load (the sidecar is a
+    # single Go process; memory grows with concurrent jobs and event streams)
+    pids_limit: 256
+    mem_limit: 512m
+    # env_file values become plain container environment: anyone who can run
+    # docker inspect or docker compose config sees AGENT_MASTER_KEY, so access
+    # to the Docker socket (or the docker group) equals access to the master key.
     env_file:
       - agent.env
     environment:

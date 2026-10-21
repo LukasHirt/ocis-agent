@@ -9,6 +9,9 @@
 # be passed in (for example with an env_file of mode 0600), never baked in.
 # The database lives in /data (a volume); the root filesystem can be read-only.
 
+# The base images are pinned by tag only. To pin them by digest, append it to
+# the image reference, e.g. FROM alpine:${ALPINE_VERSION}@sha256:<digest>; get
+# the digest with: docker buildx imagetools inspect alpine:3.22
 ARG GO_VERSION=1.26
 ARG ALPINE_VERSION=3.22
 
