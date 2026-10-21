@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +28,7 @@ const (
 	recentMaxDepth     = 4    // levels below a watch folder
 	recentMaxScan      = 5000 // entries scanned per call, all folders together
 	recentMaxRequests  = 200  // PROPFIND requests per call
+	recentTimeout      = 2 * time.Minute
 	// maxRecentBlockBytes keeps the block below the runner's per-block limit,
 	// so a page of long names is cut rather than dropped whole.
 	maxRecentBlockBytes = 48 << 10
@@ -51,6 +51,7 @@ type recentChanges struct {
 	now      func() time.Time
 	maxScan  int
 	maxDepth int
+	timeout  time.Duration // the whole call; the walk stops with what it found
 }
 
 // NewRecentChanges returns files.recent_changes: what changed lately in the
@@ -61,11 +62,13 @@ func NewRecentChanges() Tool { return newRecentChanges(time.Now) }
 func newRecentChanges(now func() time.Time) recentChanges {
 	return recentChanges{
 		base: base{
-			name:   "files.recent_changes",
-			desc:   "List the files and folders in the user's watch folders that changed recently, newest first (up to 4 levels deep).",
+			name: "files.recent_changes",
+			desc: "List what changed recently in the user's watch folders (up to 4 levels deep), newest first. " +
+				"Each line: kind (f file, d folder), size, modification time, ETag, path, tab-separated. " +
+				"A folder's time and ETag change whenever anything inside it changes.",
 			schema: schemaRecent, risk: RiskRead,
 		},
-		now: now, maxScan: recentMaxScan, maxDepth: recentMaxDepth,
+		now: now, maxScan: recentMaxScan, maxDepth: recentMaxDepth, timeout: recentTimeout,
 	}
 }
 
@@ -148,7 +151,17 @@ func (t recentChanges) parse(env Env, raw json.RawMessage) (recentCall, error) {
 		if !ok {
 			return recentCall{}, refuse("a requested path is not inside a watch folder")
 		}
-		if !slices.Contains(c.folders, p) {
+	}
+	// walk each subtree once: drop a folder inside another requested one
+	for i, p := range wanted {
+		covered := false
+		for j, q := range wanted {
+			if j != i && inside(p, q) && (p != q || j < i) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
 			c.folders = append(c.folders, p)
 		}
 	}
@@ -168,12 +181,16 @@ func (t recentChanges) Execute(ctx context.Context, env Env, raw json.RawMessage
 	if env.Reads.Remaining() <= 0 {
 		return Result{}, refuse("the job's read budget is used up")
 	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, t.timeout)
+	defer cancel()
 	seen := map[string]bool{}
 	var changed []ocisclient.Entry
-	unreadable, scanned, requests, cut := 0, 0, 0, false
-	for _, folder := range c.folders {
-		if scanned >= t.maxScan || requests >= recentMaxRequests {
-			cut = true
+	unreadable, dropped, scanned, requests := 0, 0, 0, 0
+	cut, timedOut, notChecked := false, false, 0
+	for i, folder := range c.folders {
+		if timedOut || scanned >= t.maxScan || requests >= recentMaxRequests {
+			notChecked = len(c.folders) - i
 			break
 		}
 		lim := ocisclient.WalkLimits{MaxDepth: t.maxDepth, MaxEntries: t.maxScan - scanned, MaxRequests: recentMaxRequests - requests}
@@ -181,14 +198,18 @@ func (t recentChanges) Execute(ctx context.Context, env Env, raw json.RawMessage
 		requests += w.Requests
 		switch {
 		case errors.Is(err, ocisclient.ErrNotFound), errors.Is(err, ocisclient.ErrNotDir),
-			errors.Is(err, ocisclient.ErrForbidden), errors.Is(err, ocisclient.ErrMalformed):
+			errors.Is(err, ocisclient.ErrForbidden), errors.Is(err, ocisclient.ErrMalformed),
+			errors.Is(err, ocisclient.ErrTooLarge):
 			unreadable++
 			continue
+		case err != nil && ctx.Err() != nil && parent.Err() == nil:
+			timedOut = true // the call's own deadline: keep what the walk found
 		case err != nil:
 			return Result{}, fmt.Errorf("tools: recent changes: %w", err)
 		}
 		scanned += len(w.Entries)
 		unreadable += w.Skipped
+		dropped += w.Dropped
 		cut = cut || w.Truncated
 		for _, e := range w.Entries {
 			if seen[e.Path] || e.ModTime.Before(c.since) {
@@ -225,11 +246,20 @@ func (t recentChanges) Execute(ctx context.Context, env Env, raw json.RawMessage
 	if len(lines) < len(changed) {
 		summary += fmt.Sprintf("; showing the newest %d", len(lines))
 	}
-	if cut {
+	switch {
+	case timedOut:
+		summary += "; the scan stopped at its time limit"
+	case cut || notChecked > 0:
 		summary += "; the scan stopped at its limit"
+	}
+	if notChecked > 0 {
+		summary += fmt.Sprintf("; %d folder(s) not checked", notChecked)
 	}
 	if unreadable > 0 {
 		summary += fmt.Sprintf("; %d folder(s) could not be read", unreadable)
+	}
+	if dropped > 0 {
+		summary += fmt.Sprintf("; %d entries skipped as unreadable names", dropped)
 	}
 	return Result{Summary: summary, Blocks: []Block{{Source: "changes", Content: content}}}, nil
 }

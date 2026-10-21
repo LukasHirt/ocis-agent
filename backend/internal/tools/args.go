@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -200,6 +201,39 @@ func isControl(r rune) bool {
 	case r == 0x2028, r == 0x2029, r == 0x200e, r == 0x200f, r == 0x061c:
 		return true
 	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
+}
+
+// visibleName replaces every character that can break, hide or reorder a line
+// (the isControl set: C0 and C1 controls such as NEL, line and paragraph
+// separators, bidirectional controls; and invisible ones: soft hyphen,
+// combining grapheme joiner, zero-width space, word joiner and invisible
+// operators, BOM, tag characters, Hangul fillers) with its visible escape
+// \u{XXXX}, as the extension's visibleText does. ZWJ and ZWNJ stay (emoji).
+func visibleName(s string) string {
+	if !strings.ContainsFunc(s, hiddenRune) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if hiddenRune(r) {
+			fmt.Fprintf(&b, "\\u{%04X}", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func hiddenRune(r rune) bool {
+	switch {
+	case isControl(r):
+		return true
+	case r == 0x00ad, r == 0x034f, r == 0x115f, r == 0x1160, r == 0x200b, r == 0x3164, r == 0xfeff:
+		return true
+	case r >= 0x2060 && r <= 0x2064, r >= 0xe0000 && r <= 0xe007f:
 		return true
 	}
 	return false
