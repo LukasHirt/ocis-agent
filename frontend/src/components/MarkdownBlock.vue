@@ -200,15 +200,16 @@ export default defineComponent({
 
 <style>
 .agent-md { line-height: 1.5; overflow-wrap: anywhere; min-width: 0; }
-.agent-md :is(.agent-md-p, .agent-md-h, .agent-md-ul, .agent-md-ol, .agent-md-quote, .agent-md-pre, .agent-md-hr, .agent-md-table-wrap) { margin: 0; }
-.agent-md > * + *, .agent-md-li > * + *, .agent-md-quote > * + * { margin-top: var(--agent-space-2); }
+:where(.agent-md) :where(.agent-md-p, .agent-md-h, .agent-md-ul, .agent-md-ol, .agent-md-quote, .agent-md-pre, .agent-md-hr, .agent-md-table-wrap) { margin: 0; }
+.agent-md > * + *, .agent-md-quote > * + * { margin-top: 0.6em; }
+.agent-md-li > * + * { margin-top: 0.25em; }
 .agent-md-h { font-weight: 600; line-height: 1.3; }
-.agent-md > .agent-md-h:not(:first-child) { margin-top: var(--agent-space-3); }
+.agent-md > .agent-md-h:not(:first-child) { margin-top: 0.9em; }
 .agent-md-h3 { font-size: var(--agent-font-l); }
 .agent-md-h4 { font-size: var(--agent-font-m); }
 .agent-md-h5 { font-size: var(--agent-font-s); }
 .agent-md-ul, .agent-md-ol { padding-left: 1.5em; }
-.agent-md-li + .agent-md-li { margin-top: var(--agent-space-1); }
+.agent-md-li + .agent-md-li { margin-top: 0.25em; }
 .agent-md-code, .agent-md-pre { font-family: var(--agent-font-mono); font-size: 0.9em; background: var(--oc-color-background-default); border: var(--agent-line); border-radius: var(--agent-radius-s); }
 .agent-md-code { padding: 0 0.3em; }
 .agent-md-pre { padding: var(--agent-space-2) var(--agent-space-3); overflow-x: auto; white-space: pre; }
