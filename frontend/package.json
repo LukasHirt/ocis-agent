@@ -22,7 +22,7 @@
     "@ownclouders/web-pkg": "12.5.0",
     "@vue/test-utils": "2.5.1",
     "happy-dom": "21.0.3",
-    "pinia": "^3.0.4",
+    "pinia": "^4.1.0",
     "typescript": "5.9.3",
     "vite": "7.3.5",
     "vitest": "5.0.5",
