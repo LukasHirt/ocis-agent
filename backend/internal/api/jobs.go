@@ -186,7 +186,7 @@ func summaryOf(j store.Job, steps []store.JobStep) store.JobSummary {
 	s := store.JobSummary{
 		ID: j.ID, UserID: j.UserID, TriggerKind: j.TriggerKind, TriggerRef: j.TriggerRef, Goal: j.Goal, State: j.State,
 		Attempt: j.Attempt, Runs: j.Runs, NotBefore: j.NotBefore, Error: j.Error, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
-		EndedAt: j.EndedAt, StepCount: len(steps),
+		EndedAt: j.EndedAt, StepCount: len(steps), JobPartial: j.JobPartial,
 	}
 	for _, st := range steps {
 		s.TokensIn += st.TokensIn
@@ -201,12 +201,24 @@ func jobViewOf(j store.JobSummary) jobView {
 		Attempt: j.Attempt, Runs: j.Runs, CreatedAt: timeView(j.CreatedAt), UpdatedAt: timeView(j.UpdatedAt),
 		EndedAt: timeView(j.EndedAt), Error: j.Error, StepsCount: j.StepCount, TokensIn: j.TokensIn, TokensOut: j.TokensOut,
 	}
+	v.Partial, v.PartialState = partialView(j.State, j.JobPartial)
 	// only a chat job's ref is shown: it is the conversation id the server
 	// assigned; refs of other triggers are not part of the view
 	if j.TriggerKind == store.TriggerChat {
 		v.TriggerRef = j.TriggerRef
 	}
 	return v
+}
+
+// partialView is the partial answer of a job as shown: the capped text and
+// the state of a running job, and nothing for a job in any other state
+// (even if its partial was not cleared), an unknown state or text without
+// a state.
+func partialView(state store.JobState, p store.JobPartial) (text, ps string) {
+	if state != store.JobRunning || !p.PartialState.Valid() || p.PartialState == store.PartialNone {
+		return "", ""
+	}
+	return capText(p.Partial, maxAnswerView), string(p.PartialState)
 }
 
 // listJobs is GET /agent-api/v1/jobs?state=&limit=&cursor= (newest first;
