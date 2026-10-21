@@ -987,3 +987,76 @@ func TestReasoningAndToolCallChunksAreHeartbeats(t *testing.T) {
 		t.Errorf("deltas = %+v, want %+v", log.d, want)
 	}
 }
+
+// A call that is not streamed is bounded by PlainTimeout, not the streaming
+// total: an endpoint that refuses streaming and then hangs, and one that
+// answers a stream request with JSON that never ends (bytes trickle in, so
+// the idle timer never fires).
+func TestCallsThatAreNotStreamedUseThePlainTimeout(t *testing.T) {
+	hang := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		for {
+			if _, err := io.WriteString(w, " "); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	for name, h := range map[string]http.HandlerFunc{
+		"refused, then a plain call hangs": func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["stream"] == true {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			hang(w, r)
+		},
+		"JSON answer to a stream request": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			hang(w, r)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+			o := streamClient(t, srv.URL, func(c *OpenAIConfig) {
+				c.Timeout = time.Minute
+				c.IdleTimeout = 5 * time.Second
+				c.PlainTimeout = 300 * time.Millisecond
+			})
+			start := time.Now()
+			_, err := o.CompleteStream(context.Background(), simpleReq(), nil)
+			if !errors.Is(err, ErrUnavailable) || time.Since(start) > 5*time.Second {
+				t.Errorf("err = %v after %v, want ErrUnavailable within the plain timeout", err, time.Since(start))
+			}
+			noLeak(t, err, srv.URL)
+		})
+	}
+}
+
+// PlainTimeout defaults to 120s, capped by the total timeout.
+func TestPlainTimeoutDefault(t *testing.T) {
+	for _, c := range []struct {
+		cfg  OpenAIConfig
+		want time.Duration
+	}{
+		{OpenAIConfig{Stream: true}, 120 * time.Second},
+		{OpenAIConfig{Stream: true, Timeout: 20 * time.Minute}, 120 * time.Second},
+		{OpenAIConfig{Timeout: 30 * time.Second}, 30 * time.Second},
+		{OpenAIConfig{Stream: true, Timeout: 20 * time.Minute, PlainTimeout: 10 * time.Minute}, 10 * time.Minute},
+		{OpenAIConfig{Timeout: time.Minute, PlainTimeout: 10 * time.Minute}, time.Minute},
+	} {
+		c.cfg.BaseURL, c.cfg.Model, c.cfg.AllowHTTP = "http://127.0.0.1:1/v1", "m1", true
+		o, err := NewOpenAI(c.cfg)
+		if err != nil || o.plain != c.want {
+			t.Errorf("%+v: plain %v, err %v, want %v", c.cfg, o.plain, err, c.want)
+		}
+	}
+}

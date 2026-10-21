@@ -54,6 +54,12 @@ type OpenAIConfig struct {
 	// Stream requests a streamed response (stream: true); see
 	// CompleteStream. Off, every call waits for the whole answer.
 	Stream bool
+	// PlainTimeout bounds a call that is not streamed: streaming off or
+	// refused by the endpoint, or a streaming request answered with plain
+	// JSON (counted from the start of that request). 0 means 120s; it is
+	// capped by Timeout. An operator who sets AGENT_LLM_TIMEOUT explicitly
+	// gets that value here too.
+	PlainTimeout time.Duration
 	// IdleTimeout ends a streamed call that receives no byte for this long,
 	// the wait for the response headers included; 0 means 60s.
 	IdleTimeout time.Duration
@@ -85,6 +91,7 @@ type OpenAI struct {
 	maxWire     int64
 	stream      bool
 	idle        time.Duration
+	plain       time.Duration // the bound of a call that is not streamed
 	finishGrace time.Duration
 	now         func() time.Time
 	// learnt from the endpoint per model, forgotten after learntTTL
@@ -164,6 +171,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		effort:      cfg.ReasoningEffort,
 		stream:      cfg.Stream,
 		idle:        cfg.IdleTimeout,
+		plain:       cfg.PlainTimeout,
 		finishGrace: finishGrace,
 		now:         time.Now,
 		learnt:      map[learntKey]time.Time{},
@@ -171,6 +179,10 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	if o.idle <= 0 {
 		o.idle = defaultIdleTimeout
 	}
+	if o.plain <= 0 {
+		o.plain = defaultTimeout
+	}
+	o.plain = min(o.plain, client.Timeout)
 	if o.maxResponse <= 0 {
 		o.maxResponse = defaultMaxResponse
 	}
@@ -339,14 +351,16 @@ func (o *OpenAI) post(ctx context.Context, req CompletionRequest, stream, opts b
 	if err != nil {
 		return CompletionResponse{}, 0, fmt.Errorf("%w: encoding failed", ErrInvalid)
 	}
-	rctx := ctx
+	start := time.Now()
+	rctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	var idle *time.Timer
 	if stream {
-		var cancel context.CancelCauseFunc
-		rctx, cancel = context.WithCancelCause(ctx)
-		defer cancel(nil)
 		idle = time.AfterFunc(o.idle, func() { cancel(errIdle) })
 		defer idle.Stop()
+	} else {
+		plain := time.AfterFunc(o.plain, func() { cancel(errPlain) })
+		defer plain.Stop()
 	}
 	hr, err := http.NewRequestWithContext(rctx, http.MethodPost, o.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -381,6 +395,9 @@ func (o *OpenAI) post(ctx context.Context, req CompletionRequest, stream, opts b
 			out, err := o.readStream(ctx, act, len(body), onDelta)
 			return out, resp.StatusCode, err
 		}
+		// a plain answer to a stream request: bounded like a plain call
+		plain := time.AfterFunc(o.plain-time.Since(start), func() { cancel(errPlain) })
+		defer plain.Stop()
 	}
 	raw, err := io.ReadAll(io.LimitReader(rd, o.maxResponse+1))
 	if err != nil {

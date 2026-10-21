@@ -313,3 +313,32 @@ func TestLLMTimeoutDefaultDependsOnStreaming(t *testing.T) {
 		t.Errorf("streaming: timeout %v, idle %v, err %v", cfg.LLM.Timeout, cfg.LLM.IdleTimeout, err)
 	}
 }
+
+// A call that is not streamed (streaming off or refused, or a JSON answer to
+// a stream request) is bounded by 120s unless AGENT_LLM_TIMEOUT is set
+// explicitly, never by the 30m streaming default.
+func TestLLMPlainTimeout(t *testing.T) {
+	base := map[string]string{"AGENT_LLM_BASE_URL": "http://localhost:11434/v1", "AGENT_LLM_MODEL": "qwen3"}
+	for _, c := range []struct {
+		extra map[string]string
+		want  time.Duration
+	}{
+		{nil, 120 * time.Second},
+		{map[string]string{"AGENT_LLM_STREAM": "false"}, 120 * time.Second},
+		{map[string]string{"AGENT_LLM_TIMEOUT": "20m"}, 20 * time.Minute},
+		{map[string]string{"AGENT_LLM_TIMEOUT": "30m"}, 30 * time.Minute},
+		{map[string]string{"AGENT_LLM_STREAM": "false", "AGENT_LLM_TIMEOUT": "15s"}, 15 * time.Second},
+	} {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		for k, v := range c.extra {
+			env[k] = v
+		}
+		cfg, err := Load(llmEnv(env))
+		if err != nil || cfg.LLM.PlainTimeout != c.want {
+			t.Errorf("%v: plain timeout %v, err %v, want %v", c.extra, cfg.LLM.PlainTimeout, err, c.want)
+		}
+	}
+}

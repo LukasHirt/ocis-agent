@@ -581,9 +581,9 @@ func TestTheModelClientGetsTheStreamingSettings(t *testing.T) {
 	}
 	c := openAIConfig(config.LLMConfig{
 		BaseURL: "http://localhost:11434/v1", Catalog: cat, AllowHTTP: true,
-		Stream: true, IdleTimeout: 3 * time.Minute,
+		Stream: true, IdleTimeout: 3 * time.Minute, PlainTimeout: 2 * time.Minute,
 	})
-	if !c.Stream || c.IdleTimeout != 3*time.Minute {
+	if !c.Stream || c.IdleTimeout != 3*time.Minute || c.PlainTimeout != 2*time.Minute {
 		t.Errorf("OpenAIConfig = %+v", c)
 	}
 	if c := openAIConfig(config.LLMConfig{BaseURL: "http://localhost:11434/v1", Catalog: cat}); c.Stream {

@@ -17,6 +17,10 @@ import (
 // (a stall is reported as ErrUnavailable).
 var errIdle = errors.New("llm: idle timeout")
 
+// errPlain is the cancel cause of a call that is not streamed and ran out
+// of PlainTimeout; it never leaves the package either.
+var errPlain = errors.New("llm: plain call timeout")
+
 // activity restarts the idle timer whenever bytes arrive.
 type activity struct {
 	r io.Reader

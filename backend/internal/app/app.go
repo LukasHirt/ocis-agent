@@ -339,6 +339,6 @@ func openAIConfig(l config.LLMConfig) llm.OpenAIConfig {
 		BaseURL: l.BaseURL, APIKey: l.APIKey, Model: l.Catalog.Default,
 		AllowedHosts: l.AllowedHosts, AllowHTTP: l.AllowHTTP,
 		Timeout: l.Timeout, ReasoningEffort: l.ReasoningEffort,
-		Stream: l.Stream, IdleTimeout: l.IdleTimeout,
+		Stream: l.Stream, IdleTimeout: l.IdleTimeout, PlainTimeout: l.PlainTimeout,
 	}
 }

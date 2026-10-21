@@ -29,6 +29,10 @@ type LLMConfig struct {
 	Timeout time.Duration
 	// Stream requests streamed answers (AGENT_LLM_STREAM, default true).
 	Stream bool
+	// PlainTimeout bounds a call that is not streamed (streaming off or
+	// refused, or a JSON answer to a stream request): Timeout if
+	// AGENT_LLM_TIMEOUT is set, else 120s.
+	PlainTimeout time.Duration
 	// IdleTimeout ends a streamed call that receives nothing for this long
 	// (AGENT_LLM_IDLE_TIMEOUT, default 60s).
 	IdleTimeout time.Duration
@@ -155,10 +159,12 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	if l.Stream {
 		l.Timeout = 30 * time.Minute
 	}
+	l.PlainTimeout = 120 * time.Second
 	if timeoutRaw != "" {
 		if l.Timeout, err = time.ParseDuration(timeoutRaw); err != nil || l.Timeout < 10*time.Second || l.Timeout > 30*time.Minute {
 			return LLMConfig{}, errors.New("AGENT_LLM_TIMEOUT must be a duration from 10s to 30m")
 		}
+		l.PlainTimeout = l.Timeout
 	}
 	if l.Stream && l.IdleTimeout >= l.Timeout {
 		return LLMConfig{}, errors.New("AGENT_LLM_IDLE_TIMEOUT must be shorter than AGENT_LLM_TIMEOUT")
