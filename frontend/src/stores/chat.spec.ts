@@ -579,8 +579,9 @@ describe('useChatStore', () => {
     await chat.openConversation('c1')
     expect(chat.partials).toEqual({ m1: { text: '', state: 'thinking' } })
 
+    // a partial write moves only the messages mark
     st.messages.c1 = [userMessage('m1', running('Hello', 'writing'))]
-    await events().onChanged(['jobs', 'messages'])
+    await events().onChanged(['messages'])
     await flushPromises()
     expect(chat.partials).toEqual({ m1: { text: 'Hello', state: 'writing' } })
 

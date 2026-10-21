@@ -82,8 +82,9 @@ describe('Chat', () => {
     await flushPromises()
     expect(w.find('.agent-msg-partial').exists()).toBe(false)
 
+    // a partial write moves only the messages mark
     st.messages.c1 = [userMessage('m1', job('running', 'Half an answer', 'writing'), 'Summarise')]
-    await events().onChanged(['jobs', 'messages'])
+    await events().onChanged(['messages'])
     await flushPromises()
     expect(w.find('.agent-msg-partial .agent-msg-content').text()).toBe('Half an answer')
 

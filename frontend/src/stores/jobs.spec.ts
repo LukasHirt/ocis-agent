@@ -282,6 +282,32 @@ describe('useJobsStore', () => {
       expect(jobs.detail?.id).toBe('j2')
     })
 
+    it('rereads an open running chat job on a messages change (its partial answer moves only that mark)', async () => {
+      const st = jobsState({
+        jobs: [jobOf('j1', { state: 'running', trigger_kind: 'chat', partial: 'Hel', partial_state: 'writing' })]
+      })
+      const { jobs, server, events } = await setup(st)
+      await jobs.openJob('j1')
+      expect(jobs.detail?.partial).toBe('Hel')
+      st.jobs[0] = { ...st.jobs[0], partial: 'Hello' }
+      await events().onChanged(['messages'])
+      await flushPromises()
+      expect(jobs.detail?.partial).toBe('Hello')
+      // other jobs, and an ended chat job, are not reread on a messages change
+      const reads = () => server.calls.filter((c) => c.path.startsWith('/jobs/')).length
+      st.jobs = [jobOf('j2', { state: 'running', trigger_kind: 'schedule' }), jobOf('j1', { state: 'succeeded' })]
+      await jobs.openJob('j2')
+      let n = reads()
+      await events().onChanged(['messages'])
+      await flushPromises()
+      expect(reads()).toBe(n)
+      await jobs.openJob('j1')
+      n = reads()
+      await events().onChanged(['messages'])
+      await flushPromises()
+      expect(reads()).toBe(n)
+    })
+
     it('refreshes an open live job on a jobs change and an ended one only on a full refresh', async () => {
       const st = jobsState({ jobs: [jobOf('j1', { state: 'running' })] })
       const { jobs, server, events } = await setup(st)
