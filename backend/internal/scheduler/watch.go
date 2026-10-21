@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strconv"
@@ -75,13 +76,14 @@ const (
 // restart loses it and polls everyone once more (the baselines and pending
 // changes live in the cursors table).
 type watchState struct {
-	after string
-	next  map[string]time.Time
-	seen  map[string]bool
+	after  string
+	next   map[string]time.Time
+	polled map[string]time.Time // when each user's last poll was recorded
+	seen   map[string]bool
 }
 
 func newWatchState() watchState {
-	return watchState{next: map[string]time.Time{}, seen: map[string]bool{}}
+	return watchState{next: map[string]time.Time{}, polled: map[string]time.Time{}, seen: map[string]bool{}}
 }
 
 // folderResult is what one poll learned about one watch folder.
@@ -127,10 +129,16 @@ func (s *Scheduler) watchRun(ctx context.Context, now time.Time) (int, int, erro
 		return 0, 0, nil
 	}
 	prevAfter := s.watch.after
-	due, wrapped, err := s.watchDue(ctx, now)
+	poked, err := s.pokedDue(ctx, now)
 	if err != nil {
 		return 0, 0, err
 	}
+	rot, wrapped, err := s.watchDue(ctx, now, s.c.Watch.PerTick-len(poked), poked)
+	if err != nil {
+		s.repoke(slices.Collect(maps.Keys(poked))...)
+		return 0, 0, err
+	}
+	due := append(slices.Sorted(maps.Keys(poked)), rot...)
 	// Polls run Parallel at a time; each result is applied as soon as it
 	// arrives, so the deadline only costs the polls it cut short. No poll
 	// starts once ctx ended.
@@ -184,6 +192,7 @@ dispatch:
 			continue
 		}
 		st.next[p.user] = now.Add(s.c.Watch.PollInterval)
+		st.polled[p.user] = now
 		if p.noCred || p.envErr != nil {
 			continue
 		}
@@ -206,14 +215,20 @@ dispatch:
 			started++
 		}
 	}
+	// an event whose poll did not happen is kept for the next run
+	for id := range poked {
+		if retry[id] {
+			s.sse.poke(id)
+		}
+	}
 	// resume the rotation at the first user that was not polled to the end
 	if !wrapped {
-		for i, id := range due {
+		for i, id := range rot {
 			if retry[id] {
 				if i == 0 {
 					st.after = prevAfter
 				} else {
-					st.after = due[i-1]
+					st.after = rot[i-1]
 				}
 				break
 			}
@@ -222,11 +237,64 @@ dispatch:
 	return polled, len(errs), nil
 }
 
-// watchDue picks the users to poll in this run from the rotation cursor and
-// reports whether it reached the end of the list (the rotation wrapped).
-func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, bool, error) {
+// pokedDue returns the users a notification event marked who are still
+// watched (ListWatchUsers' conditions) and whose last poll is at least
+// SSE.PokeGap ago, at most PerTick; the others that are still watched stay
+// marked for a later run.
+func (s *Scheduler) pokedDue(ctx context.Context, now time.Time) (map[string]bool, error) {
+	ids := s.sse.takePokes()
+	due := map[string]bool{}
+	if len(ids) == 0 {
+		return due, nil
+	}
+	slices.Sort(ids)
+	var later []string
+	err := s.d.Store.View(ctx, func(tx store.Tx) error {
+		for _, id := range ids {
+			if _, err := tx.GetUser(id); errors.Is(err, store.ErrNotFound) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			pol, err := tx.GetPolicy(id)
+			if err != nil {
+				return err
+			}
+			if !pol.ProactiveEnabled || pol.Paused || len(pol.Watch) == 0 {
+				continue
+			}
+			if at, ok := s.watch.polled[id]; (ok && now.Before(at.Add(s.c.SSE.PokeGap))) || len(due) >= s.c.Watch.PerTick {
+				later = append(later, id)
+				continue
+			}
+			due[id] = true
+		}
+		return nil
+	})
+	if err != nil {
+		s.repoke(ids...)
+		return nil, fmt.Errorf("scheduler: poked watch users: %w", err)
+	}
+	s.repoke(later...)
+	return due, nil
+}
+
+// repoke marks the users again, for a later run.
+func (s *Scheduler) repoke(ids ...string) {
+	for _, id := range ids {
+		s.sse.poke(id)
+	}
+}
+
+// watchDue picks at most limit users to poll in this run from the rotation
+// cursor, without those in skip, and reports whether it reached the end of
+// the list (the rotation wrapped).
+func (s *Scheduler) watchDue(ctx context.Context, now time.Time, limit int, skip map[string]bool) ([]string, bool, error) {
 	st := &s.watch
 	var due []string
+	if limit <= 0 {
+		return nil, false, nil
+	}
 	for page := 0; page < maxWatchPages; page++ {
 		var ids []string
 		if err := s.d.Store.View(ctx, func(tx store.Tx) error {
@@ -238,13 +306,13 @@ func (s *Scheduler) watchDue(ctx context.Context, now time.Time) ([]string, bool
 		}
 		for _, id := range ids {
 			st.seen[id] = true
-			if next, ok := st.next[id]; ok && now.Before(next) {
+			if next, ok := st.next[id]; (ok && now.Before(next)) || skip[id] {
 				st.after = id
 				continue
 			}
 			due = append(due, id)
 			st.after = id
-			if len(due) >= s.c.Watch.PerTick {
+			if len(due) >= limit {
 				return due, false, nil
 			}
 		}
@@ -263,6 +331,7 @@ func (s *Scheduler) wrapWatch() {
 	for id := range st.next {
 		if !st.seen[id] {
 			delete(st.next, id)
+			delete(st.polled, id)
 		}
 	}
 	st.after = ""

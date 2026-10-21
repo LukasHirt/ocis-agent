@@ -280,6 +280,9 @@ func (a *App) buildWorkers(opts Options) error {
 		Watch: scheduler.WatchConfig{
 			PollInterval: cfg.Process.WatchPollInterval, Debounce: cfg.Process.WatchDebounce, PerTick: cfg.Process.WatchPollsPerTick,
 		},
+		SSE: scheduler.SSEConfig{
+			Enabled: cfg.Process.SSEEnabled && cfg.Process.SSEMaxSubscriptions > 0, MaxSubscriptions: cfg.Process.SSEMaxSubscriptions,
+		},
 	}); err != nil {
 		return fmt.Errorf("app: scheduler: %w", err)
 	}

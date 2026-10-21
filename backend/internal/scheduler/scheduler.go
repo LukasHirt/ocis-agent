@@ -2,8 +2,9 @@
 // expired job leases, expiring and settling approvals, reconciling orphaned
 // calls, renewing and sweeping app tokens and pausing dormant users. It also
 // starts the scheduled proactive sweeps (proactive.go) and polls the users'
-// watch folders for changes (watch.go), which, unlike the maintenance, never
-// start anything while the kill switch is on or a user is paused.
+// watch folders for changes (watch.go), sooner after a file event on the
+// user's oCIS notification stream (sse.go), which, unlike the maintenance,
+// never start anything while the kill switch is on or a user is paused.
 //
 // Every task has its own interval and runs from Tick when it is due. Tick is
 // synchronous and reads time only through Deps.Now, so tests drive it with a
@@ -24,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
@@ -38,6 +40,7 @@ const (
 	TaskSettle    = "settle"
 	TaskDormant   = "dormant"
 	TaskProactive = "proactive"
+	TaskSSE       = "sse"
 	TaskReconcile = "reconcile"
 	TaskRenew     = "renew"
 	TaskSweep     = "sweep"
@@ -104,6 +107,7 @@ type Intervals struct {
 	Dormant   time.Duration // default 1h
 	Proactive time.Duration // default 1m
 	Watch     time.Duration // how often the watch poll looks for due users; default 10s
+	SSE       time.Duration // how often the notification streams follow the users; default 30s
 	Tick      time.Duration // how often Run calls Tick; default 1s
 }
 
@@ -120,6 +124,7 @@ type Config struct {
 	Batch         int // items per task run (default 100, at most 1000)
 	Proactive     ProactiveConfig
 	Watch         WatchConfig
+	SSE           SSEConfig
 }
 
 const maxBatch = 1000
@@ -136,7 +141,7 @@ func (c Config) withDefaults() (Config, error) {
 		return c, fmt.Errorf("scheduler: batch above %d", maxBatch)
 	}
 	iv := &c.Intervals
-	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Proactive, iv.Watch, iv.Tick} {
+	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Proactive, iv.Watch, iv.SSE, iv.Tick} {
 		if d < 0 {
 			return c, errors.New("scheduler: negative interval")
 		}
@@ -163,6 +168,11 @@ func (c Config) withDefaults() (Config, error) {
 		return c, err
 	}
 	c.Watch = w
+	sse, err := c.SSE.withDefaults()
+	if err != nil {
+		return c, err
+	}
+	c.SSE = sse
 	def(&c.LeaseTTL, 2*time.Minute)
 	def(&c.RetrySettle, 2*time.Minute)
 	def(&c.CallTimeout, 5*time.Minute)
@@ -177,6 +187,7 @@ func (c Config) withDefaults() (Config, error) {
 	def(&iv.Dormant, time.Hour)
 	def(&iv.Proactive, time.Minute)
 	def(&iv.Watch, 10*time.Second)
+	def(&iv.SSE, 30*time.Second)
 	def(&iv.Tick, time.Second)
 	return c, nil
 }
@@ -197,7 +208,7 @@ type task struct {
 }
 
 // Scheduler runs the maintenance tasks. Tick and Run must not be called
-// concurrently.
+// concurrently; Close ends the notification streams (Run calls it).
 type Scheduler struct {
 	d     Deps
 	c     Config
@@ -206,6 +217,7 @@ type Scheduler struct {
 	sweep sweepState
 	pro   proactiveState
 	watch watchState
+	sse   *sseHub // the notification streams; their events bring watch polls forward
 }
 
 // New validates the dependencies and the configuration.
@@ -217,7 +229,7 @@ func New(d Deps, c Config) (*Scheduler, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState(), watch: newWatchState()}
+	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState(), watch: newWatchState(), sse: newSSEHub()}
 	iv := c.Intervals
 	// The database-only tasks run first, so a slow or hung oCIS delays them
 	// by at most the deadlines of the previous Tick's oCIS-bound tasks: three
@@ -233,6 +245,11 @@ func New(d Deps, c Config) (*Scheduler, error) {
 		{TaskRenew, iv.Renew, tt, s.renew},
 		{TaskSweep, iv.Sweep, tt, s.sweepRun},
 		{TaskWatch, iv.Watch, min(tt, watchTaskTimeout), s.watchRun},
+	}
+	if c.SSE.Enabled {
+		// database work only: the streams run on their own goroutines
+		s.tasks = slices.Insert(s.tasks, slices.IndexFunc(s.tasks, func(t task) bool { return t.name == TaskReconcile }),
+			task{TaskSSE, iv.SSE, 0, s.sseRun})
 	}
 	return s, nil
 }
@@ -287,8 +304,10 @@ func (s *Scheduler) runTask(ctx context.Context, t task, now time.Time) (count, 
 	return count, errs, ""
 }
 
-// Run calls Tick at once and then every Intervals.Tick until ctx ends.
+// Run calls Tick at once and then every Intervals.Tick until ctx ends; it
+// returns once the notification streams have ended too.
 func (s *Scheduler) Run(ctx context.Context) {
+	defer s.Close()
 	t := time.NewTicker(s.c.Intervals.Tick)
 	defer t.Stop()
 	for {

@@ -104,3 +104,43 @@ func TestAnApprovedWriteIntoAWatchFolderIsNotAFileChange(t *testing.T) {
 		t.Fatalf("baseline %q before, %q after, folder now %q, dirty %v", before, c.WatchETags["/Documents"], now, c.WatchDirtySince)
 	}
 }
+
+// The worker role opens the notification stream of a user who watches
+// folders and closes it when Run returns; AGENT_SSE_ENABLED=false opens none.
+func TestTheWorkerRoleFollowsTheNotificationStream(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		env := map[string]string{}
+		if !enabled {
+			env["AGENT_SSE_ENABLED"] = "false"
+		}
+		f := newFixture(t, env)
+		a := f.build(llmtest.New())
+		f.enroll(a)
+		f.watchDocuments()
+		r := start(t, a)
+		if enabled {
+			deadline := time.Now().Add(10 * time.Second)
+			for f.fake.OpenStreams(login) != 1 {
+				if time.Now().After(deadline) {
+					t.Fatal("no stream")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		} else {
+			time.Sleep(200 * time.Millisecond)
+			if n := f.fake.OpenStreams(login); n != 0 {
+				t.Fatalf("%d streams with AGENT_SSE_ENABLED=false", n)
+			}
+		}
+		if err := r.stop(t, 15*time.Second); err != nil {
+			t.Errorf("Run = %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for f.fake.OpenStreams(login) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the stream outlived Run")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

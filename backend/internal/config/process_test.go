@@ -25,6 +25,9 @@ func TestProcessDefaults(t *testing.T) {
 		WatchPollInterval: 5 * time.Minute,
 		WatchDebounce:     time.Minute,
 		WatchPollsPerTick: 50,
+
+		SSEEnabled:          true,
+		SSEMaxSubscriptions: 200,
 	}
 	if !reflect.DeepEqual(cfg.Process, want) {
 		t.Errorf("Process = %+v, want %+v", cfg.Process, want)
@@ -47,6 +50,8 @@ func TestProcessOverrides(t *testing.T) {
 		"AGENT_WATCH_POLL_INTERVAL":      " 24h ",
 		"AGENT_WATCH_DEBOUNCE":           "10m",
 		"AGENT_WATCH_MAX_POLLS_PER_TICK": " 1000 ",
+		"AGENT_SSE_ENABLED":              " false ",
+		"AGENT_SSE_MAX_SUBSCRIPTIONS":    " 10000 ",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -64,6 +69,9 @@ func TestProcessOverrides(t *testing.T) {
 		WatchPollInterval: 24 * time.Hour,
 		WatchDebounce:     10 * time.Minute,
 		WatchPollsPerTick: 1000,
+
+		SSEEnabled:          false,
+		SSEMaxSubscriptions: 10000,
 	}
 	if !reflect.DeepEqual(cfg.Process, want) {
 		t.Errorf("Process = %+v, want %+v", cfg.Process, want)
@@ -168,6 +176,8 @@ func TestProcessInvalidValues(t *testing.T) {
 		"AGENT_WATCH_POLL_INTERVAL":      {"x", "59s", "0s", "-1m", "24h1s", "5"},
 		"AGENT_WATCH_DEBOUNCE":           {"x", "9s", "0s", "-1s", "10m1s", "5"},
 		"AGENT_WATCH_MAX_POLLS_PER_TICK": {"x", "0", "-1", "1001", "1.5"},
+		"AGENT_SSE_ENABLED":              {"x", "yes", "on", "2"},
+		"AGENT_SSE_MAX_SUBSCRIPTIONS":    {"x", "-1", "10001", "1.5"},
 	}
 	for name, vals := range bad {
 		for _, v := range vals {
@@ -204,6 +214,8 @@ func TestProcessErrorsNeverEchoTheValue(t *testing.T) {
 		{"AGENT_WATCH_POLL_INTERVAL", "zq7-dur"},
 		{"AGENT_WATCH_DEBOUNCE", "7777777h"},
 		{"AGENT_WATCH_MAX_POLLS_PER_TICK", "7777777"},
+		{"AGENT_SSE_ENABLED", "zq7-bool"},
+		{"AGENT_SSE_MAX_SUBSCRIPTIONS", "7777777"},
 	} {
 		_, err := Load(llmEnv(map[string]string{c.name: c.val}))
 		if err == nil {
@@ -258,6 +270,22 @@ func TestProcessDormancyDaysEdges(t *testing.T) {
 	for _, in := range []string{"-1", "3651"} {
 		if _, err := Load(llmEnv(map[string]string{"AGENT_DORMANCY_DAYS": in})); err == nil {
 			t.Errorf("%s: no error", in)
+		}
+	}
+}
+
+func TestProcessSSESubscriptionEdges(t *testing.T) {
+	// 0 keeps the streams off, like AGENT_SSE_ENABLED=false
+	for in, want := range map[string]int{"0": 0, "1": 1, "10000": 10000} {
+		cfg, err := Load(llmEnv(map[string]string{"AGENT_SSE_MAX_SUBSCRIPTIONS": in}))
+		if err != nil || cfg.Process.SSEMaxSubscriptions != want {
+			t.Errorf("%s: %d, %v", in, cfg.Process.SSEMaxSubscriptions, err)
+		}
+	}
+	for in, want := range map[string]bool{"true": true, "1": true, "false": false, "0": false} {
+		cfg, err := Load(llmEnv(map[string]string{"AGENT_SSE_ENABLED": in}))
+		if err != nil || cfg.Process.SSEEnabled != want {
+			t.Errorf("%s: %v, %v", in, cfg.Process.SSEEnabled, err)
 		}
 	}
 }

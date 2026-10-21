@@ -23,6 +23,9 @@ type ProcessConfig struct {
 	WatchPollInterval time.Duration // how often each user's watch folders are checked
 	WatchDebounce     time.Duration // how long the watch folders must stay unchanged before a file-change job
 	WatchPollsPerTick int           // users whose watch folders one scheduler run checks
+
+	SSEEnabled          bool // subscribe to the users' oCIS notification streams to check sooner
+	SSEMaxSubscriptions int  // at most this many streams at once (0: none)
 }
 
 // Has reports whether the process runs the given role.
@@ -117,6 +120,23 @@ func loadProcess(getenv func(string) string) (ProcessConfig, error) {
 			return ProcessConfig{}, fmt.Errorf("AGENT_WATCH_MAX_POLLS_PER_TICK must be an integer from 1 to 1000")
 		}
 		p.WatchPollsPerTick = n
+	}
+
+	p.SSEEnabled = true
+	if raw := get("AGENT_SSE_ENABLED"); raw != "" {
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			return ProcessConfig{}, fmt.Errorf("AGENT_SSE_ENABLED must be a boolean")
+		}
+		p.SSEEnabled = b
+	}
+	p.SSEMaxSubscriptions = 200
+	if raw := get("AGENT_SSE_MAX_SUBSCRIPTIONS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 || n > 10000 {
+			return ProcessConfig{}, fmt.Errorf("AGENT_SSE_MAX_SUBSCRIPTIONS must be an integer from 0 to 10000")
+		}
+		p.SSEMaxSubscriptions = n
 	}
 
 	p.LogLevel = "info"
