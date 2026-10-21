@@ -124,6 +124,12 @@ describe('useAuditStore: reading', () => {
     expect(seqs(audit.events)).toEqual([3, 2, 1])
   })
 
+  it('reports an unreachable service to the agent store when loading fails', async () => {
+    const { audit } = await setup(auditState(), (c) => (c.path === '/audit' ? apiErr(0, 'unavailable') : undefined))
+    await audit.refresh()
+    expect(useAgentStore().serviceDown).toBe(true)
+  })
+
   it.each([
     ['not a page', { nope: true }],
     ['an ascending cursor on a newest-first page', { events: [eventOf(2)], next_cursor: '2' }],

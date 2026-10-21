@@ -122,14 +122,95 @@ describe('StatusBanner', () => {
     expect(banner(w).text()).toContain('Daily token budget used up; the agent continues tomorrow')
   })
 
-  it('adds a small connection note next to a banner', () => {
+  it('adds a small chip next to a banner', () => {
     const { w } = mountWith(statusOf({ paused: true, pause_reason: 'dormant' }), 'polling')
     expect(w.findAll('.agent-banner')).toHaveLength(1)
-    expect(w.find('.agent-connection').text()).toContain('Live updates are unavailable')
+    const chip = w.find('.agent-connection')
+    expect(chip.classes()).toEqual(expect.arrayContaining(['agent-chip', 'agent-chip--neutral']))
+    expect(chip.text()).toContain('Live updates paused')
+    expect(chip.attributes('title')).toBe('Live updates are unavailable; refreshing regularly.')
+    expect(chip.find('[data-stub=OcIcon]').attributes('data-icon-file')).toBe('pause-circle-fill')
   })
 
-  it('notes an offline connection', () => {
+  it('shows only the chip when polling and all is well', () => {
+    const { w } = mountWith(statusOf(), 'polling')
+    expect(w.find('.agent-banner').exists()).toBe(false)
+    expect(w.find('.agent-connection').text()).toContain('Live updates paused')
+    expect(w.text()).not.toContain('Live updates are unavailable')
+  })
+
+  it('shows a spinning reconnecting chip when offline', () => {
     const { w } = mountWith(statusOf(), 'offline')
-    expect(w.find('.agent-connection').text()).toContain('Connection lost')
+    const chip = w.find('.agent-connection')
+    expect(chip.text()).toContain('Reconnecting…')
+    expect(chip.find('[data-stub=OcIcon]').classes()).toContain('agent-spin')
+  })
+})
+
+describe('StatusBanner: outage and errors', () => {
+  const outage = (over: { reconnecting?: boolean; statusError?: string | null; status?: Status | null } = {}) => {
+    const r = mountWith(over.status === undefined ? statusOf() : over.status, 'offline')
+    r.store.serviceDown = true
+    r.store.reconnecting = over.reconnecting ?? false
+    if (over.statusError !== undefined) r.store.errors.status = over.statusError
+    return r
+  }
+
+  it('shows one unreachable banner with a retry, over the kill switch, and no chip', async () => {
+    const { w, store } = outage({ status: statusOf({ kill_switch: { database: true, environment: false } }) })
+    await w.vm.$nextTick()
+    expect(w.findAll('.agent-banner')).toHaveLength(1)
+    const b = banner(w)
+    expect(b.classes()).toEqual(
+      expect.arrayContaining(['agent-banner-warning', 'agent-banner-unreachable'])
+    )
+    expect(b.text()).toContain("The agent service can't be reached.")
+    expect(b.find('.agent-banner-sub').text()).toContain('Showing what was loaded before. Retrying automatically.')
+    expect(b.find('[data-stub=OcSpinner]').exists()).toBe(false)
+    expect(b.find('[data-stub=OcIcon]').attributes('data-icon-file')).toBe('wifi-off-fill')
+    expect(w.find('.agent-connection').exists()).toBe(false)
+    const retry = vi.spyOn(store, 'retryNow').mockResolvedValue()
+    const button = b.find('button')
+    expect(button.text()).toBe('Retry')
+    await button.trigger('click')
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('says Reconnecting… with a spinner and disables Retry while a retry runs', async () => {
+    const { w } = outage({ reconnecting: true })
+    await w.vm.$nextTick()
+    const b = banner(w)
+    expect(b.find('.agent-banner-sub').text()).toContain('Reconnecting…')
+    expect(b.find('[data-stub=OcSpinner]').exists()).toBe(true)
+    expect(b.find('button').attributes('disabled')).toBeDefined()
+  })
+
+  it('does not repeat the status error text during an outage', async () => {
+    const { w } = outage({ statusError: 'The agent service is not reachable right now. Try again later.' })
+    await w.vm.$nextTick()
+    expect(w.findAll('.agent-banner')).toHaveLength(1)
+    expect(w.text()).not.toContain('The agent service is not reachable right now')
+    expect(w.text()).not.toContain('may be out of date')
+  })
+
+  it('shows another status error as the one danger banner, with Try again', async () => {
+    const { w, store } = mountWith(statusOf())
+    store.errors.status = 'Something went wrong in the agent service.'
+    await w.vm.$nextTick()
+    expect(w.findAll('.agent-banner')).toHaveLength(1)
+    const b = banner(w)
+    expect(b.classes()).toEqual(expect.arrayContaining(['agent-banner-danger', 'agent-banner-status_error']))
+    expect(b.text()).toContain('Something went wrong in the agent service.')
+    expect(b.find('.agent-banner-sub').text()).toBe('What is shown may be out of date.')
+    const refresh = vi.spyOn(store, 'refreshStatus').mockResolvedValue()
+    expect(b.find('button').text()).toBe('Try again')
+    await b.find('button').trigger('click')
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no status-error banner without a status', () => {
+    const { w, store } = mountWith(null)
+    store.errors.status = 'Something went wrong in the agent service.'
+    return w.vm.$nextTick().then(() => expect(w.find('.agent-banner').exists()).toBe(false))
   })
 })

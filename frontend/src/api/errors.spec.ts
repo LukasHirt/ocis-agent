@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, describeError, isAbortError, KNOWN_CODES } from './errors'
+import { ApiError, describeError, isAbortError, isUnavailable, KNOWN_CODES } from './errors'
 
 const gettext = (s: string) => s
 
@@ -106,5 +106,22 @@ describe('isAbortError', () => {
     expect(isAbortError(new ApiError(0, 'unavailable'))).toBe(false)
     expect(isAbortError(new Error('AbortError'))).toBe(false)
     expect(isAbortError(undefined)).toBe(false)
+  })
+})
+
+describe('isUnavailable', () => {
+  it.each([
+    [new ApiError(0, 'unavailable'), true],
+    [new ApiError(503, 'unavailable'), true],
+    [new ApiError(0, 'anything'), true],
+    [new ApiError(502, 'internal'), true],
+    [new ApiError(504, 'internal'), true],
+    [new ApiError(500, 'internal'), false],
+    [new ApiError(404, 'not_found'), false],
+    [new ApiError(429, 'rate_limited'), false],
+    [new Error('unavailable'), false],
+    [undefined, false]
+  ])('%#', (e, want) => {
+    expect(isUnavailable(e)).toBe(want)
   })
 })

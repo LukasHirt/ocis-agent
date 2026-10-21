@@ -98,25 +98,40 @@ describe('Layout', () => {
 })
 
 describe('Layout after the first load', () => {
-  it('shows a non-blocking error with a retry when a status refresh fails', async () => {
+  it('shows a failed status refresh once, as the danger banner, and keeps the page', async () => {
     let fail = false
-    const w = mountLayout(serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf()))))
+    const w = mountLayout(serve(() => (fail ? apiErr(500, 'internal') : json(statusOf()))))
     await flushPromises()
-    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    expect(w.find('.agent-banner').exists()).toBe(false)
     fail = true
     const store = useAgentStore()
     await store.refreshStatus()
     await flushPromises()
-    const line = w.find('.agent-layout-top .agent-layout-stale')
-    expect(line.exists()).toBe(true)
-    expect(line.attributes('role')).toBe('alert')
-    expect(line.text()).toContain('The agent service is not reachable right now. Try again later.')
-    expect(line.text()).toContain('may be out of date')
+    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    const banners = w.findAll('.agent-layout-top .agent-banner')
+    expect(banners).toHaveLength(1)
+    expect(banners[0].classes()).toContain('agent-banner-status_error')
+    expect(banners[0].text()).toContain('Something went wrong in the agent service.')
+    expect(banners[0].text()).toContain('may be out of date')
     expect(w.find('.host-rv').exists()).toBe(true) // the page stays
     fail = false
-    await line.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
+    await banners[0].findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
-    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    expect(w.find('.agent-banner').exists()).toBe(false)
+  })
+
+  it('shows an unreachable service once, as the unreachable banner, and keeps the page', async () => {
+    let fail = false
+    const w = mountLayout(serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf()))))
+    await flushPromises()
+    fail = true
+    await useAgentStore().refreshStatus()
+    await flushPromises()
+    const banners = w.findAll('.agent-banner')
+    expect(banners).toHaveLength(1)
+    expect(banners[0].classes()).toContain('agent-banner-unreachable')
+    expect(w.text()).not.toContain('may be out of date')
+    expect(w.find('.host-rv').exists()).toBe(true)
   })
 
   it('Reconnect enrols again and clears the credential pause', async () => {

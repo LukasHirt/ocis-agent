@@ -3,7 +3,7 @@ import { ApiError } from '../api/errors'
 import type { EventClient, EventClientOptions, Timers } from '../api/events'
 import { apiErr, approvalOf, json, settingsOf, statusOf } from '../test/fixtures'
 import { makePlatform, type FakePlatform } from '../test/platform'
-import { FULL_REFRESH_MIN_MS, VERIFY_HEAD_PAGES, useAgentStore } from './agent'
+import { FULL_REFRESH_MIN_MS, SERVICE_RETRY_MS, VERIFY_HEAD_PAGES, useAgentStore } from './agent'
 
 const gettext = (s: string) => s
 
@@ -904,5 +904,205 @@ describe('useAgentStore', () => {
     const s = (current = setup())
     await s.store.refreshAll()
     expect(s.server.calls).toHaveLength(0)
+  })
+})
+
+// recordingTimers records every timer with its delay, so a test can fire the
+// one it wants.
+const recordingTimers = () => {
+  let next = 1
+  const all = new Map<number, { fn: () => void; ms: number }>()
+  const timers: Timers = {
+    setTimeout: (fn, ms) => {
+      const h = next++
+      all.set(h, { fn, ms })
+      return h
+    },
+    clearTimeout: (h) => {
+      all.delete(h as number)
+    }
+  }
+  // retry is the pending timer for the service retry (the only one that
+  // is not a refresh deferral of 1s or less)
+  const retries = () => [...all.entries()].filter(([, t]) => t.ms >= SERVICE_RETRY_MS[0])
+  const fireRetry = () => {
+    const [h, t] = retries()[0]
+    all.delete(h)
+    t.fn()
+  }
+  return { timers, retries, fireRetry, all }
+}
+
+describe('useAgentStore: service state', () => {
+  const down = (over: Record<string, Handler> = {}) => {
+    const state = { fail: true }
+    const rt = recordingTimers()
+    const server = fakeServer(
+      defaultHandlers({
+        'GET /status': () => (state.fail ? apiErr(503, 'unavailable') : json(statusOf())),
+        ...over
+      })
+    )
+    let clock = Date.UTC(2026, 0, 1, 12, 0, 0)
+    const platform: FakePlatform = makePlatform({ fetch: server.fetch as unknown as typeof fetch })
+    platform.now.mockImplementation(() => clock)
+    const store = useAgentStore()
+    const events = fakeEvents()
+    store.start({ platform, gettext, createEvents: events.create, timers: rt.timers })
+    return {
+      state,
+      rt,
+      server,
+      store,
+      events,
+      advance: (ms: number) => {
+        clock += ms
+      }
+    }
+  }
+  let ctx: ReturnType<typeof down> | undefined
+  afterEach(() => {
+    ctx?.store.stop()
+    ctx = undefined
+  })
+
+  it('exports the retry delays', () => {
+    expect([...SERVICE_RETRY_MS]).toEqual([2000, 4000, 8000, 16000, 30000])
+  })
+
+  it('marks the service down on an unavailable status read and retries at 2s, 4s, 8s, 16s, 30s, 30s', async () => {
+    const c = (ctx = down())
+    await flush()
+    expect(c.store.serviceDown).toBe(true)
+    expect(c.store.reconnecting).toBe(false)
+    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([2000])
+    const seen: number[] = []
+    for (let i = 0; i < 6; i++) {
+      c.advance(60_000)
+      c.rt.fireRetry()
+      await flush()
+      expect(c.store.serviceDown).toBe(true)
+      seen.push(...c.rt.retries().map(([, t]) => t.ms))
+    }
+    expect(seen).toEqual([4000, 8000, 16000, 30000, 30000, 30000])
+  })
+
+  it('is reconnecting while a retry is in flight', async () => {
+    let hold: Promise<void> | null = null
+    let release!: () => void
+    const c = (ctx = down({
+      'GET /status': async () => {
+        if (hold) await hold
+        return apiErr(503, 'unavailable')
+      }
+    }))
+    await flush()
+    hold = new Promise<void>((r) => (release = r))
+    c.advance(60_000)
+    c.rt.fireRetry()
+    await flush()
+    expect(c.store.reconnecting).toBe(true)
+    release()
+    await flush()
+    expect(c.store.reconnecting).toBe(false)
+    expect(c.store.serviceDown).toBe(true)
+  })
+
+  it('recovers: clears the flags, reads everything again and tells the screens to refresh', async () => {
+    const c = (ctx = down())
+    await flush()
+    const seen: Array<{ type: string; fresh?: boolean }> = []
+    c.store.subscribe((e) => {
+      seen.push(e as { type: string; fresh?: boolean })
+    })
+    c.state.fail = false
+    c.advance(60_000)
+    const before = c.server.count('GET /settings')
+    c.rt.fireRetry()
+    await flush()
+    c.advance(60_000)
+    for (const [h, t] of [...c.rt.all.entries()]) {
+      c.rt.all.delete(h)
+      t.fn()
+    }
+    await flush()
+    expect(c.store.serviceDown).toBe(false)
+    expect(c.store.reconnecting).toBe(false)
+    expect(c.store.status?.enrolled).toBe(true)
+    expect(c.store.errors.status).toBeNull()
+    expect(c.rt.retries()).toHaveLength(0)
+    expect(c.server.count('GET /settings')).toBeGreaterThan(before)
+    expect(seen).toContainEqual({ type: 'refresh', fresh: true })
+  })
+
+  it('retryNow runs a retry at once and restarts the delays', async () => {
+    const c = (ctx = down())
+    await flush()
+    c.advance(60_000)
+    c.rt.fireRetry()
+    await flush()
+    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([4000])
+    const reads = c.server.count('GET /status')
+    c.advance(60_000)
+    await c.store.retryNow()
+    expect(c.server.count('GET /status')).toBe(reads + 1)
+    expect(c.store.serviceDown).toBe(true)
+    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([2000])
+  })
+
+  it('retryNow brings the service back when it answers', async () => {
+    const c = (ctx = down())
+    await flush()
+    c.state.fail = false
+    c.advance(60_000)
+    await c.store.retryNow()
+    expect(c.store.serviceDown).toBe(false)
+    expect(c.store.status?.enrolled).toBe(true)
+    expect(c.rt.retries()).toHaveLength(0)
+  })
+
+  it('shares one retry in flight between retryNow calls', async () => {
+    const c = (ctx = down())
+    await flush()
+    const reads = c.server.count('GET /status')
+    c.advance(60_000)
+    await Promise.all([c.store.retryNow(), c.store.retryNow()])
+    expect(c.server.count('GET /status')).toBe(reads + 1)
+  })
+
+  it('stop clears the timer and both flags', async () => {
+    const c = (ctx = down())
+    await flush()
+    expect(c.rt.retries()).toHaveLength(1)
+    c.store.stop()
+    expect(c.rt.retries()).toHaveLength(0)
+    expect(c.store.serviceDown).toBe(false)
+    expect(c.store.reconnecting).toBe(false)
+  })
+
+  it('never marks the service down for another error', async () => {
+    const c = (ctx = down({ 'GET /status': () => apiErr(500, 'internal') }))
+    await flush()
+    expect(c.store.errors.status).toBe('Something went wrong in the agent service.')
+    expect(c.store.serviceDown).toBe(false)
+    expect(c.rt.retries()).toHaveLength(0)
+  })
+
+  it('reportError from a screen store marks the service down, once', async () => {
+    const c = (ctx = down({ 'GET /status': () => json(statusOf()) }))
+    await flush()
+    expect(c.store.serviceDown).toBe(false)
+    c.store.reportError(new ApiError(0, 'unavailable'))
+    c.store.reportError(new ApiError(503, 'unavailable'))
+    expect(c.store.serviceDown).toBe(true)
+    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([2000])
+    c.store.reportError(new ApiError(500, 'internal'))
+    expect(c.rt.retries()).toHaveLength(1)
+  })
+
+  it('ignores reportError of an unavailable error without a session', () => {
+    const store = useAgentStore()
+    store.reportError(new ApiError(0, 'unavailable'))
+    expect(store.serviceDown).toBe(false)
   })
 })

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { statusOf } from '../test/fixtures'
-import { bannerOf, budgetUsedUp, connectionNoteOf } from './banner'
+import { bannerOf, budgetUsedUp, connectionChipOf, connectionNoteOf, topBannerOf } from './banner'
 
 const killed = { database: true, environment: false }
 const used = { used_tokens: 100, daily_tokens: 100, resets_at: '2026-01-02T00:00:00Z' }
@@ -44,5 +44,39 @@ describe('connectionNoteOf', () => {
     expect(connectionNoteOf('streaming')).toBeNull()
     expect(connectionNoteOf('polling')).toBe('polling')
     expect(connectionNoteOf('offline')).toBe('offline')
+  })
+})
+
+describe('topBannerOf', () => {
+  const none = { serviceDown: false, statusError: null, status: null }
+  it('is empty without anything to show', () => {
+    expect(topBannerOf(none)).toBeNull()
+    expect(topBannerOf({ ...none, status: statusOf() })).toBeNull()
+  })
+  it('puts an unreachable service over everything', () => {
+    const status = statusOf({ kill_switch: killed })
+    expect(topBannerOf({ serviceDown: true, statusError: 'x', status })).toBe('unreachable')
+    expect(topBannerOf({ serviceDown: true, statusError: null, status: null })).toBe('unreachable')
+  })
+  it('shows a status error only together with a status, over the status banners', () => {
+    expect(topBannerOf({ ...none, statusError: 'x' })).toBeNull()
+    expect(topBannerOf({ ...none, statusError: 'x', status: statusOf() })).toBe('status_error')
+    expect(topBannerOf({ ...none, statusError: 'x', status: statusOf({ kill_switch: killed }) })).toBe('status_error')
+  })
+  it('falls back to the status banner', () => {
+    expect(topBannerOf({ ...none, status: statusOf({ kill_switch: killed }) })).toBe('killswitch')
+    expect(topBannerOf({ ...none, status: statusOf({ budget: used }) })).toBe('budget')
+  })
+})
+
+describe('connectionChipOf', () => {
+  it('shows polling and offline while the service is up', () => {
+    expect(connectionChipOf('streaming', false)).toBeNull()
+    expect(connectionChipOf('polling', false)).toBe('polling')
+    expect(connectionChipOf('offline', false)).toBe('offline')
+  })
+  it('shows nothing while the service is down', () => {
+    expect(connectionChipOf('polling', true)).toBeNull()
+    expect(connectionChipOf('offline', true)).toBeNull()
   })
 })

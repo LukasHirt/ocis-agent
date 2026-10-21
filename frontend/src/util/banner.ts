@@ -37,6 +37,24 @@ export const bannerOf = (s: Status | null): BannerKind | null => {
   return null
 }
 
+// TopBanner is the one banner shown at the top: the service state first,
+// then a failed status refresh (only while a status is shown), then the
+// state of the agent.
+export type TopBanner = 'unreachable' | 'status_error' | BannerKind
+
+export const topBannerOf = (o: {
+  serviceDown: boolean
+  statusError: string | null
+  status: Status | null
+}): TopBanner | null => {
+  if (o.serviceDown) return 'unreachable'
+  if (o.status && o.statusError) return 'status_error'
+  return bannerOf(o.status)
+}
+
+export const connectionChipOf = (c: StreamState, serviceDown: boolean): 'polling' | 'offline' | null =>
+  serviceDown ? null : connectionNoteOf(c)
+
 export const connectionNoteOf = (c: StreamState): 'polling' | 'offline' | null =>
   c === 'polling' || c === 'offline' ? c : null
 

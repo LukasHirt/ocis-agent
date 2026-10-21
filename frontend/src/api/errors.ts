@@ -75,3 +75,8 @@ export const describeError = (e: unknown, gettext: Gettext): string => {
 // not a failure to show.
 export const isAbortError = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError'
+
+// isUnavailable reports that the agent service itself could not be reached
+// (no response, or a gateway error), as opposed to an answer of the service.
+export const isUnavailable = (e: unknown): boolean =>
+  e instanceof ApiError && (e.code === 'unavailable' || e.status === 0 || e.status === 502 || e.status === 504)

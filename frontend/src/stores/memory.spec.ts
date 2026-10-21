@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { apiErr, json } from '../test/fixtures'
+import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { MAX_FILE, memoryHandler, memoryState, setFile, type MemoryState } from '../test/memory'
 import { useMemoryStore } from './memory'
@@ -59,6 +60,12 @@ describe('useMemoryStore', () => {
       await mem.refreshList()
       expect(mem.listError).toBe('ownCloud could not be reached. Try again later.')
       expect(names(mem.files)).toEqual(['profile.md'])
+    })
+
+    it('reports an unreachable service to the agent store when loading fails', async () => {
+      const { mem } = await setup(memoryState(), (c) => (c.path === '/memory' ? apiErr(0, 'unavailable') : undefined))
+      await mem.refreshList()
+      expect(useAgentStore().serviceDown).toBe(true)
     })
 
     it('refreshes on an activity change and on a refresh, not on other kinds', async () => {

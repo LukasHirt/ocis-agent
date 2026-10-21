@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { apiErr, approvalOf, json, statusOf } from '../test/fixtures'
+import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import {
   answer,
@@ -84,6 +85,18 @@ describe('useChatStore', () => {
     fail = false
     await chat.loadConversations()
     expect(chat.conversationsError).toBeNull()
+  })
+
+  it('reports an unreachable service to the agent store when loading fails', async () => {
+    const { chat } = await setup(chatState(), (c) => (c.path === '/conversations' ? apiErr(0, 'unavailable') : undefined))
+    await chat.loadConversations()
+    expect(useAgentStore().serviceDown).toBe(true)
+  })
+
+  it('does not report other errors as an outage', async () => {
+    const { chat } = await setup(chatState(), (c) => (c.path === '/conversations' ? apiErr(500, 'internal') : undefined))
+    await chat.loadConversations()
+    expect(useAgentStore().serviceDown).toBe(false)
   })
 
   it('opens a conversation and shows the thread oldest first', async () => {

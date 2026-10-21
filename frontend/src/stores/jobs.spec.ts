@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { apiErr, approvalOf, json } from '../test/fixtures'
+import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { jobOf, jobsHandler, jobsState, stepOf, type JobsState } from '../test/jobs'
 import { JOB_FILTERS, JOB_PAGE, useJobsStore } from './jobs'
@@ -133,6 +134,12 @@ describe('useJobsStore', () => {
     fail = false
     await jobs.refresh()
     expect(jobs.error).toBeNull()
+  })
+
+  it('reports an unreachable service to the agent store when loading fails', async () => {
+    const { jobs } = await setup(jobsState(), (c) => (c.path === '/jobs' ? apiErr(0, 'unavailable') : undefined))
+    await jobs.refresh()
+    expect(useAgentStore().serviceDown).toBe(true)
   })
 
   it('merges a fresh first page into the pages read before', async () => {

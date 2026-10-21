@@ -2,17 +2,6 @@
   <div class="agent-layout">
     <div class="agent-layout-top">
       <StatusBanner />
-      <div v-if="store.status && store.errors.status" class="agent-layout-stale" role="alert">
-        <oc-icon name="error-warning" size="small" />
-        <span v-text="store.errors.status" />
-        <span v-text="$gettext('What is shown may be out of date.')" />
-        <oc-button
-          size="small"
-          :disabled="store.loading.status"
-          @click="store.refreshStatus()"
-          v-text="$gettext('Try again')"
-        />
-      </div>
     </div>
     <main class="agent-main">
       <div v-if="!store.status" class="agent-layout-loading">
@@ -52,15 +41,6 @@ onBeforeUnmount(() => store.stop())
 </script>
 
 <style>
-.agent-layout-stale {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.25rem 0.5rem;
-  font-size: 0.85em;
-  margin: 0 0 0.5rem;
-  color: var(--oc-color-swatch-danger-default, #b00020);
-}
 .agent-layout-loading {
   display: flex;
   flex-direction: column;

@@ -6,9 +6,32 @@
       role="status"
     >
       <oc-icon :name="view.icon" :fill-type="view.fillType ?? 'fill'" />
-      <span class="agent-banner-text" v-text="view.text" />
+      <div class="agent-banner-text">
+        <span v-text="view.text" />
+        <span v-if="view.sub" class="agent-banner-sub">
+          <oc-spinner v-if="view.spinner" size="small" :aria-label="view.sub" />
+          <span v-text="view.sub" />
+        </span>
+      </div>
       <oc-button
-        v-if="kind === 'user'"
+        v-if="kind === 'unreachable'"
+        appearance="outline"
+        size="small"
+        :disabled="store.reconnecting"
+        @click="store.retryNow()"
+        v-text="$gettext('Retry')"
+      />
+      <oc-button
+        v-else-if="kind === 'status_error'"
+        appearance="outline"
+        size="small"
+        :disabled="store.loading.status"
+        @click="store.refreshStatus()"
+        v-text="$gettext('Try again')"
+      />
+      <oc-button
+        v-else-if="kind === 'user'"
+        appearance="outline"
         size="small"
         :disabled="busy"
         @click="act(() => store.resume('user'))"
@@ -16,6 +39,7 @@
       />
       <oc-button
         v-else-if="kind === 'reconnect'"
+        appearance="outline"
         size="small"
         :disabled="busy"
         @click="act(() => store.enrol())"
@@ -23,15 +47,25 @@
       />
       <oc-button
         v-else-if="kind === 'token_anomaly'"
+        appearance="outline"
         size="small"
         @click="$router.push({ name: 'agent-settings' })"
         v-text="$gettext('Open settings')"
       />
     </div>
-    <p v-if="note" class="agent-connection" role="status">
-      <oc-icon :name="note === 'offline' ? 'wifi-off' : 'refresh'" size="small" />
-      <span v-text="noteText" />
-    </p>
+    <span
+      v-if="chip"
+      class="agent-connection agent-chip agent-chip--neutral"
+      role="status"
+      :title="chip === 'polling' ? $gettext('Live updates are unavailable; refreshing regularly.') : undefined"
+    >
+      <oc-icon
+        :name="chip === 'offline' ? 'refresh' : 'pause-circle'"
+        :class="{ 'agent-spin': chip === 'offline' }"
+        size="small"
+      />
+      <span v-text="chip === 'offline' ? $gettext('Reconnecting…') : $gettext('Live updates paused')" />
+    </span>
   </div>
 </template>
 
@@ -41,23 +75,49 @@ import { useGettext } from 'vue3-gettext'
 import { useAgentStore } from '../stores/agent'
 import { usePlatform } from '../platform'
 import { describeError } from '../api/errors'
-import { bannerOf, connectionNoteOf, utcTime, type BannerKind } from '../util/banner'
+import { connectionChipOf, topBannerOf, utcTime, type TopBanner } from '../util/banner'
 import { formatTime } from '../util/format'
 
-// StatusBanner shows the single most severe state of the agent (text and
-// icon, never colour alone) and a small note while live updates are down.
+// StatusBanner shows the single most important state of the agent (text and
+// icon, never colour alone) and a small chip while live updates are down.
+// An unreachable service is shown here once; screens keep their data.
 const store = useAgentStore()
 const platform = usePlatform()
 const { $gettext, interpolate } = useGettext()
 const busy = ref(false)
 
-const kind = computed(() => bannerOf(store.status))
-const note = computed(() => connectionNoteOf(store.connection))
+const kind = computed(() =>
+  topBannerOf({ serviceDown: store.serviceDown, statusError: store.errors.status, status: store.status })
+)
+const chip = computed(() => connectionChipOf(store.connection, store.serviceDown))
 
 type Severity = 'danger' | 'warning' | 'info'
+interface View {
+  severity: Severity
+  icon: string
+  fillType?: 'none'
+  text: string
+  sub?: string
+  spinner?: boolean
+}
 
 // fillType 'none' for icons the design system ships without a -fill variant
-const views: Record<BannerKind, () => { severity: Severity; icon: string; fillType?: 'none'; text: string }> = {
+const views: Record<TopBanner, () => View> = {
+  unreachable: () => ({
+    severity: 'warning',
+    icon: 'wifi-off',
+    text: $gettext("The agent service can't be reached."),
+    sub: store.reconnecting
+      ? $gettext('Reconnecting…')
+      : $gettext('Showing what was loaded before. Retrying automatically.'),
+    spinner: store.reconnecting
+  }),
+  status_error: () => ({
+    severity: 'danger',
+    icon: 'error-warning',
+    text: store.errors.status ?? '',
+    sub: $gettext('What is shown may be out of date.')
+  }),
   killswitch: () => ({
     severity: 'danger',
     icon: 'stop-circle',
@@ -100,12 +160,6 @@ const views: Record<BannerKind, () => { severity: Severity; icon: string; fillTy
 
 const view = computed(() => (kind.value ? views[kind.value]() : null))
 
-const noteText = computed(() =>
-  note.value === 'offline'
-    ? $gettext('Connection lost; reconnecting…')
-    : $gettext('Live updates are unavailable; refreshing regularly.')
-)
-
 const act = async (fn: () => Promise<unknown>) => {
   if (busy.value) return
   busy.value = true
@@ -120,35 +174,55 @@ const act = async (fn: () => Promise<unknown>) => {
 </script>
 
 <style>
+.agent-banners {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--agent-space-3);
+}
+.agent-banners > .agent-chip {
+  flex: none;
+  margin: var(--agent-space-1) var(--agent-space-5) var(--agent-space-1) 0;
+}
 .agent-banner {
+  --agent-tone: var(--oc-color-swatch-primary-default);
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2.75rem;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
-  border-left: 4px solid currentColor;
-  margin-bottom: 0.5rem;
+  gap: var(--agent-space-3);
+  padding: var(--agent-space-2) var(--agent-space-5);
+  border-bottom: var(--agent-line);
+  border-left: 4px solid var(--agent-tone);
+  background: color-mix(in srgb, var(--agent-tone) 10%, var(--oc-color-background-default));
+  color: var(--oc-color-text-default);
+  box-sizing: border-box;
 }
+.agent-banner > .oc-icon {
+  flex: none;
+}
+.agent-banner > .oc-icon svg {
+  fill: var(--agent-tone);
+}
+.agent-banner-danger { --agent-tone: var(--oc-color-swatch-danger-default); }
+.agent-banner-warning { --agent-tone: var(--oc-color-swatch-warning-default); }
+.agent-banner-info { --agent-tone: var(--oc-color-swatch-primary-default); }
 .agent-banner-text {
-  flex: 1;
-}
-.agent-banner-danger {
-  color: var(--oc-color-swatch-danger-default, #b00020);
-  background: var(--oc-color-swatch-danger-muted, #fdecee);
-}
-.agent-banner-warning {
-  color: var(--oc-color-swatch-warning-default, #8a5a00);
-  background: var(--oc-color-swatch-warning-muted, #fff4e0);
-}
-.agent-banner-info {
-  color: var(--oc-color-swatch-passive-default, #333);
-  background: var(--oc-color-background-muted, #f2f2f2);
-}
-.agent-connection {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+.agent-banner-sub {
+  display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  font-size: 0.85em;
-  margin: 0 0 0.5rem;
-  color: var(--oc-color-text-muted, #666);
+  gap: var(--agent-space-1);
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
+}
+.agent-banner > .oc-button {
+  flex: none;
 }
 </style>

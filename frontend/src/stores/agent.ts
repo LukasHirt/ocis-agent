@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, shallowRef } from 'vue'
 import type { Platform } from '../platform'
 import { createClient, type ApiClient, type ResumeReason } from '../api/client'
-import { ApiError, describeError, isAbortError, type Gettext } from '../api/errors'
+import { ApiError, describeError, isAbortError, isUnavailable, type Gettext } from '../api/errors'
 import {
   createEventClient,
   type ChangeKind,
@@ -37,6 +37,10 @@ export const APPROVAL_MAX_PAGES = 10
 // the candidates one request examines, so a page may be empty and carry a
 // cursor) up to VERIFY_HEAD_PAGES, stopping at the first non-empty page.
 export const VERIFY_HEAD_PAGES = 5
+
+// While the service cannot be reached the status is read again after these
+// delays (ms); after the last one it repeats.
+export const SERVICE_RETRY_MS = [2000, 4000, 8000, 16000, 30000] as const
 
 export type Resource = 'status' | 'approvals' | 'settings'
 const RESOURCES: readonly Resource[] = ['status', 'approvals', 'settings']
@@ -155,8 +159,16 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   const error = computed(() => errors.status ?? errors.approvals ?? errors.settings ?? null)
   const connection = ref<StreamState>('streaming')
   const lastRefreshed = ref<number | null>(null)
+  // serviceDown: the sidecar cannot be reached; the banner says so once and
+  // the status is read again with backoff until it answers.
+  const serviceDown = ref(false)
+  const reconnecting = ref(false)
 
   let session: Session | null = null
+  let retryTimer: unknown = null
+  let retryTimerOf: Session | null = null
+  let retryAttempt = 0
+  let retryInflight: Promise<void> | null = null
   const listeners = new Set<StoreListener>()
 
   // subscribe registers a screen store for the session's events; it
@@ -234,6 +246,74 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     }
   }
 
+  const clearRetryTimer = () => {
+    if (retryTimer !== null && retryTimerOf) retryTimerOf.timers.clearTimeout(retryTimer)
+    retryTimer = null
+    retryTimerOf = null
+  }
+
+  const scheduleRetry = (s: Session) => {
+    clearRetryTimer()
+    const ms = SERVICE_RETRY_MS[Math.min(retryAttempt, SERVICE_RETRY_MS.length - 1)]
+    retryAttempt++
+    retryTimerOf = s
+    retryTimer = s.timers.setTimeout(() => {
+      retryTimer = null
+      retryTimerOf = null
+      if (session === s && serviceDown.value) void retry(s)
+    }, ms)
+  }
+
+  // retry reads the status once; markUp (in load) ends the outage, else the
+  // next delay is scheduled. One retry at a time.
+  const retry = (s: Session): Promise<void> => {
+    if (retryInflight) return retryInflight
+    reconnecting.value = true
+    const p = refresh('status', true).then(() => {
+      if (session !== s) return
+      reconnecting.value = false
+      if (serviceDown.value && retryTimer === null) scheduleRetry(s)
+    })
+    const done = p.finally(() => {
+      if (retryInflight === done) retryInflight = null
+    })
+    retryInflight = done
+    return done
+  }
+
+  function markDown(s: Session) {
+    if (session !== s || serviceDown.value) return
+    serviceDown.value = true
+    retryAttempt = 0
+    scheduleRetry(s)
+  }
+
+  function markUp(s: Session) {
+    if (session !== s || !serviceDown.value) return
+    clearRetryTimer()
+    serviceDown.value = false
+    reconnecting.value = false
+    retryAttempt = 0
+    void refreshAll({ fresh: true })
+    void tell({ type: 'refresh', fresh: true })
+  }
+
+  // reportError lets a screen store tell that one of its reads found the
+  // service unreachable.
+  const reportError = (e: unknown): void => {
+    if (session && isUnavailable(e)) markDown(session)
+  }
+
+  // retryNow reads the status at once (a retry in flight is reused) and
+  // restarts the delays.
+  const retryNow = async (): Promise<void> => {
+    const s = session
+    if (!s || !serviceDown.value) return
+    clearRetryTimer()
+    retryAttempt = 0
+    await retry(s)
+  }
+
   const load = (key: Resource, depth: Depth): Promise<void> => {
     const s = session
     if (!s) return Promise.resolve()
@@ -250,10 +330,12 @@ export const useAgentStore = defineStore('ocis-agent', () => {
           writes[key]++
         }
         errors[key] = null
+        if (key === 'status') markUp(s)
       },
       (e: unknown) => {
         if (session !== s || isAbortError(e)) return
         errors[key] = describeError(e, s.gettext)
+        if (isUnavailable(e)) markDown(s)
       }
     )
     const done = p.then(() => {
@@ -378,6 +460,11 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     lastFull = -Infinity
     lastRefreshed.value = null
     connection.value = 'streaming'
+    clearRetryTimer()
+    retryAttempt = 0
+    retryInflight = null
+    serviceDown.value = false
+    reconnecting.value = false
   }
 
   const start = (opts: StartOptions) => {
@@ -604,6 +691,10 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     error,
     connection,
     lastRefreshed,
+    serviceDown,
+    reconnecting,
+    reportError,
+    retryNow,
     refreshAll,
     refreshStatus,
     refreshApprovals,
