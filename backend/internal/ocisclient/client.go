@@ -19,6 +19,9 @@ const (
 	requestTimeout = 30 * time.Second
 	// maxBody caps buffered JSON and PROPFIND responses.
 	maxBody = 4 << 20
+	// drainLimit caps how much of an error body is read (and discarded) to
+	// keep the connection reusable
+	drainLimit = 64 << 10
 )
 
 // Client talks to one oCIS instance.
@@ -146,6 +149,9 @@ func (c *Client) do(ctx context.Context, cr Creds, method, escPath string, query
 	defer resp.Body.Close()
 	out := response{status: resp.StatusCode, header: resp.Header}
 	if resp.StatusCode/100 != 2 {
+		// drained (a little), so the connection can be reused, e.g. by the
+		// retries of a 425
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, drainLimit))
 		return out, nil
 	}
 	if resp.ContentLength > limit {

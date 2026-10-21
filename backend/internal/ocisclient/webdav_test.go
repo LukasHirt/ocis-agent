@@ -3,6 +3,7 @@ package ocisclient
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -521,5 +522,36 @@ func TestGetWaitsOutPostprocessing(t *testing.T) {
 	start := time.Now()
 	if _, _, err := f.c.Get(ctx, f.cr, testDrive, "/c.md", 10); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
 		t.Fatalf("the wait does not end with the context: %v after %v", err, time.Since(start))
+	}
+}
+
+// The 425 bodies are drained, so the retries reuse the connection instead of
+// opening a new TLS connection each time.
+func TestTooEarlyRetriesReuseTheConnection(t *testing.T) {
+	var gets, conns int
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		if gets <= 3 {
+			w.WriteHeader(http.StatusTooEarly)
+			_, _ = w.Write([]byte(strings.Repeat("x", 8<<10)))
+			return
+		}
+		w.Header().Set("ETag", `"1"`)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			conns++
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	c := mustClient(t, srv.URL)
+	c.tooEarlyWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	if data, _, err := c.Get(bg, AppToken("u", "t"), "dr", "/a.md", 10); err != nil || string(data) != "ok" {
+		t.Fatalf("get = %q %v", data, err)
+	}
+	if conns != 1 {
+		t.Fatalf("%d connections for %d requests, want 1", conns, gets)
 	}
 }

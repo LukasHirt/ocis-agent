@@ -56,6 +56,7 @@ func TestErrorMappingTable(t *testing.T) {
 		{ocisclient.ErrTooLarge, 502, "upstream_unavailable"},
 		{ocisclient.ErrNoPersonalDrive, 502, "upstream_unavailable"},
 		{&ocisclient.StatusError{Method: "GET", Path: "/x", Status: 503}, 502, "upstream_unavailable"},
+		{ocisclient.ErrTooEarly, 503, "unavailable"},
 		{fakeNetErr{}, 502, "upstream_unavailable"},
 		{context.DeadlineExceeded, 503, "unavailable"},
 		{context.Canceled, 503, "unavailable"},
@@ -161,5 +162,20 @@ func TestDecodeBodyStructure(t *testing.T) {
 	var dst map[string]any
 	if err := decodeBody(httptest.NewRecorder(), r, &dst); err != nil || dst["a"] == nil {
 		t.Errorf("valid: %v %v", dst, err)
+	}
+}
+
+// A file oCIS still postprocesses is a passing state: 503 with Retry-After,
+// not a failure of oCIS.
+func TestTooEarlyIsUnavailableWithRetryAfter(t *testing.T) {
+	s := &Server{}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/agent-api/v1/memory/profile.md", nil)
+	s.fail(rec, r, fmt.Errorf("memory: read profile.md: %w", ocisclient.ErrTooEarly))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "5" {
+		t.Fatalf("got %d Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if !strings.Contains(rec.Body.String(), `"unavailable"`) {
+		t.Fatalf("body %s", rec.Body.String())
 	}
 }

@@ -393,8 +393,15 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		}
 		return
 	}
+	if errors.Is(err, ocisclient.ErrTooEarly) && w.Header().Get("Retry-After") == "" {
+		w.Header().Set("Retry-After", strconv.Itoa(tooEarlyRetryAfter))
+	}
 	writeError(w, r, status, code, msg)
 }
+
+// tooEarlyRetryAfter is the Retry-After (seconds) of a file oCIS still
+// postprocesses after the client already waited about three seconds.
+const tooEarlyRetryAfter = 5
 
 func validatorError(err error) (int, string) {
 	switch {

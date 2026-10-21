@@ -164,6 +164,10 @@ func classify(err error) (int, string) {
 		return http.StatusBadGateway, "upstream_rejected"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusServiceUnavailable, "unavailable"
+	case errors.Is(err, ocisclient.ErrTooEarly):
+		// oCIS still postprocesses a fresh upload: a passing state (fail
+		// adds Retry-After)
+		return http.StatusServiceUnavailable, "unavailable"
 	case errors.As(err, &se), errors.As(err, &ne), isOCISSentinel(err):
 		return http.StatusBadGateway, "upstream_unavailable"
 	}
