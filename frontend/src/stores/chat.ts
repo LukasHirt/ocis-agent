@@ -522,6 +522,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
         dropConversation(id)
       }
       if (open) sendError.value = err
+      else if (starting.value) landingError.value = err // the route never landed
       return false
     } finally {
       if (g === sessionGen) sendingIn.delete(id)

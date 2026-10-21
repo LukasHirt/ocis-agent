@@ -16,7 +16,7 @@
         <ReplyState
           v-if="m.role === 'system' && m.job_id"
           :reply="replyForSystem(m, stateByJob)"
-          :announce="announced(m.id)"
+          :announce="announced(m)"
         />
         <MessageBubble v-else :message="m" />
         <PartialBubble v-if="partials[m.id]" :partial="partials[m.id]" />
@@ -25,7 +25,7 @@
           :reply="questionReply(m)!"
           :notice="notices[m.id]"
           :approvals="m.job ? jobApprovals[m.job.id] : undefined"
-          :announce="announced(m.id)"
+          :announce="announced(m)"
           @settled="emit('approvals-settled')"
         />
       </template>
@@ -90,7 +90,29 @@ const markInitial = (ms: Message[]) => {
   for (const m of ms) initial.add(m.id)
 }
 markInitial(props.messages)
-const announced = (id: string) => !initial.has(id)
+
+// A question that was shown running and then fails is announced (its reply
+// carries role=alert) even though it was listed at the start; the runner's
+// message that replaces that reply is then not announced a second time.
+const liveSeen = new Set<string>()
+const alertedJobs = new Set<string>()
+const LIVE = ['queued', 'running', 'waiting_approval']
+watch(
+  () => props.messages,
+  (ms) => {
+    for (const m of ms) {
+      const j = m.role === 'user' ? m.job : undefined
+      if (!j) continue
+      if (LIVE.includes(j.state)) liveSeen.add(j.id)
+      else if (j.state === 'failed' && liveSeen.has(j.id) && !replied.value.has(j.id)) alertedJobs.add(j.id)
+    }
+  },
+  { immediate: true }
+)
+const announced = (m: Message) =>
+  m.role === 'user'
+    ? !initial.has(m.id) || Boolean(m.job && alertedJobs.has(m.job.id))
+    : !initial.has(m.id) && !alertedJobs.has(m.job_id ?? '')
 
 // within this many pixels of the end counts as at the bottom
 const BOTTOM_SLACK = 24

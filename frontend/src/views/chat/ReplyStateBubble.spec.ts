@@ -68,6 +68,17 @@ describe('ReplyState', () => {
     expect(mountReply({ reply: replyOf('working'), notice: 'paused' }).find('.agent-msg-notice').exists()).toBe(false)
   })
 
+  it('announces a single pending approval in the singular', async () => {
+    const approvals: JobApprovals = { items: [approvalOf('a1', { job_id: 'j1' })], more: false, error: null }
+    const { platform } = await startStore(fakeServer())
+    const w = mount(ReplyState, {
+      props: { reply: replyOf('approval'), approvals } as never,
+      global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+    })
+    expect(w.find('.agent-sr-only[aria-live="polite"]').text()).toBe('The agent needs your approval for 1 action.')
+    w.unmount()
+  })
+
   it('shows the pending approvals inline with decisions and the inbox link', async () => {
     const approvals: JobApprovals = {
       items: [
@@ -84,6 +95,11 @@ describe('ReplyState', () => {
       global: { provide: { [PLATFORM_KEY as symbol]: platform } }
     })
     expect(w.find('.agent-msg-reply-title').text()).toContain('Needs your approval')
+    // the cards are not read aloud by the log; one short sentence is
+    expect(w.find('article').attributes('aria-live')).toBe('off')
+    const note = w.find('.agent-sr-only[aria-live="polite"]')
+    expect(note.text()).toBe('The agent needs your approval for 2 actions.')
+    expect(note.text()).not.toContain('files.write')
     expect(w.find('.agent-msg-reply-title [data-icon]').exists()).toBe(true)
     expect(w.find('.agent-msg-approvals .agent-inline-approvals').exists()).toBe(true)
     const cards = w.findAll('.agent-card--compact')

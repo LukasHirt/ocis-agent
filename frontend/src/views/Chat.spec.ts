@@ -101,6 +101,27 @@ describe('Chat', () => {
     expect(w.find('.agent-landing .agent-composer-error').text()).toBe(
       'You have 200 conversations, the most there can be. Delete one to start a new one.'
     )
+    expect(document.activeElement).toBe(w.find('.agent-landing textarea').element)
+  })
+
+  it('shows a refused send on the landing when the route never lands', async () => {
+    vi.useFakeTimers()
+    try {
+      const { w, push } = await setup(withThread(), {}, (c) =>
+        c.method === 'POST' && c.path === '/conversations/c100/messages' ? apiErr(429, 'budget_exhausted') : undefined
+      )
+      const ta = w.find('.agent-landing textarea')
+      await ta.setValue('Hello there')
+      ta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
+      await vi.advanceTimersByTimeAsync(2500)
+      await flushPromises()
+      expect(push).toHaveBeenCalledTimes(1)
+      expect(w.find('.agent-landing').exists()).toBe(true)
+      expect(w.find('.agent-landing .agent-composer-error').exists()).toBe(true)
+      expect(document.activeElement).toBe(w.find('.agent-landing textarea').element)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('fills the box from an example without sending', async () => {

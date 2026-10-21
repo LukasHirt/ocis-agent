@@ -17,7 +17,8 @@ const setup = async (items: Approval[], handler?: Handler, extra: Record<string,
   const { platform, store } = await startStore(server)
   wrapper = mount(InlineApprovals, {
     props: { jobId: 'j1', items, more: false, error: null, ...extra },
-    global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+    global: { provide: { [PLATFORM_KEY as symbol]: platform } },
+    attachTo: document.body
   })
   return { w: wrapper, server, platform, store }
 }
@@ -69,6 +70,60 @@ describe('InlineApprovals', () => {
     expect(w.find('.agent-inline-decided').text()).toBe('Approved: files.write_new "/x.txt"')
     expect(w.find('.agent-card').exists()).toBe(false)
     expect(w.emitted('settled')).toHaveLength(1)
+  })
+
+  it('moves the focus to the decided line, then to the next pending card when the line goes', async () => {
+    const a1 = approvalOf('a1', { tool: 'files.write_new' })
+    const a2 = approvalOf('a2', { tool: 'files.write_new' })
+    const { w } = await setup([a1], (c) =>
+      c.path === '/approvals/a1/decision' ? json({ ...a1, state: 'approved' }) : undefined
+    )
+    await w.setProps({ items: [a1, a2] })
+    const first = w.findAll('.agent-card')[0]
+    const approve = first.findAll('button').find((b) => b.text() === 'Approve')!
+    ;(approve.element as HTMLElement).focus()
+    await approve.trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(w.find('.agent-inline-decided').element)
+    await w.setProps({ items: [a2] })
+    await flushPromises()
+    expect(w.find('.agent-inline-decided').exists()).toBe(false)
+    expect(w.find('.agent-card').element.contains(document.activeElement)).toBe(true)
+  })
+
+  it('moves the focus to the composer when the last card is decided and the list goes', async () => {
+    const composer = document.createElement('div')
+    composer.className = 'agent-composer'
+    composer.innerHTML = '<textarea></textarea>'
+    document.body.appendChild(composer)
+    const a = approvalOf('a1', { tool: 'files.write_new' })
+    const { w } = await setup([a], (c) =>
+      c.path === '/approvals/a1/decision' ? json({ ...a, state: 'approved' }) : undefined
+    )
+    await button(w, 'Approve').trigger('click')
+    await flushPromises()
+    await w.setProps({ items: [] })
+    await flushPromises()
+    expect(document.activeElement).toBe(composer.querySelector('textarea'))
+    composer.remove()
+  })
+
+  it('moves the focus to the composer when the component goes while it holds the focus', async () => {
+    const composer = document.createElement('div')
+    composer.className = 'agent-composer'
+    composer.innerHTML = '<textarea></textarea>'
+    document.body.appendChild(composer)
+    const a = approvalOf('a1', { tool: 'files.write_new' })
+    const { w } = await setup([a], (c) =>
+      c.path === '/approvals/a1/decision' ? json({ ...a, state: 'approved' }) : undefined
+    )
+    await button(w, 'Approve').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(w.find('.agent-inline-decided').element)
+    w.unmount()
+    wrapper = undefined
+    expect(document.activeElement).toBe(composer.querySelector('textarea'))
+    composer.remove()
   })
 
   it('shows a rejected line after Reject', async () => {

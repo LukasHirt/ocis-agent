@@ -174,14 +174,22 @@ const onLandingInput = (v: string) => {
 }
 
 // startFromLanding creates the conversation, opens it and sends the text
-// there; the conversation's box takes the focus afterwards.
+// there; the conversation's box takes the focus afterwards (the landing's
+// box when the landing is still shown).
 const startFromLanding = async () => {
   const sent = await chat.startConversation(chat.landingDraft, (cid) =>
     navigate({ name: `${APPID}-chat-conversation`, params: { id: cid } })
   )
   await nextTick()
   if (sent) threadView.value?.toBottom()
-  composer.value?.focus()
+  if (props.id) {
+    composer.value?.focus()
+    return
+  }
+  // the route never landed or the create failed: the landing is still the
+  // screen, so it shows a refused send and keeps the focus
+  await nextTick()
+  landing.value?.focus()
 }
 const threadView = ref<{ toBottom: () => void } | null>(null)
 

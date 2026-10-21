@@ -1,7 +1,7 @@
 <template>
   <article
     :class="['agent-msg', 'agent-msg-assistant', 'agent-msg-reply', `agent-msg-reply--${reply.kind}`]"
-    :aria-live="busy ? 'off' : undefined"
+    :aria-live="busy || reply.kind === 'approval' ? 'off' : undefined"
     :aria-busy="busy ? 'true' : undefined"
     :role="reply.kind === 'error' && announce ? 'alert' : undefined"
   >
@@ -56,6 +56,7 @@
             <oc-icon name="hourglass" size="small" />
             <span class="agent-msg-state" v-text="$gettext('Needs your approval')" />
           </p>
+          <p v-if="pendingText" class="agent-sr-only" aria-live="polite" v-text="pendingText" />
           <div class="agent-msg-approvals">
             <InlineApprovals
               :job-id="reply.jobId"
@@ -111,6 +112,16 @@ const emit = defineEmits<{ settled: [] }>()
 const { $gettext } = useGettext()
 
 const busy = computed(() => props.reply.kind === 'working' || props.reply.kind === 'waiting')
+
+// one short sentence for screen readers; the cards themselves are not read
+// out by the log (aria-live off)
+const pendingText = computed(() => {
+  if (props.reply.kind !== 'approval') return ''
+  const n = (props.approvals?.items ?? []).filter((a) => a.state === 'pending' && !a.job_ended).length
+  if (n === 0) return ''
+  if (n === 1) return $gettext('The agent needs your approval for 1 action.')
+  return $gettext('The agent needs your approval for %{n} actions.').replace('%{n}', String(n))
+})
 
 // the fixed reasons are translated; any other text is shown as it is
 const reasonText = computed(() => errorText(props.reply.text, $gettext))

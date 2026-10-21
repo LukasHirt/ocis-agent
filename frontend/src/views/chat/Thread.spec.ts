@@ -193,6 +193,34 @@ describe('Thread', () => {
     w.unmount()
   })
 
+  it('alerts for a question that was listed while running and fails afterwards, once', async () => {
+    const q = userMessage('m1', running())
+    const w = mountThread([q])
+    expect(w.find('.agent-msg-reply--working').exists()).toBe(true)
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Late' })
+    await w.setProps({ messages: [failed] })
+    const errors = w.findAll('.agent-msg-reply--error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].attributes('role')).toBe('alert')
+    // the runner's message that replaces the reply does not alert a second time
+    const sys = messageOf('s1', { role: 'system', content: 'Late', job_id: 'j1' })
+    await w.setProps({ messages: [failed, sys] })
+    expect(w.findAll('.agent-msg-reply--error')).toHaveLength(1)
+    expect(w.findAll('[role="alert"]')).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('alerts for the runner message of a job that ran while the conversation was open', async () => {
+    const w = mountThread([userMessage('m1', running())])
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Late' })
+    const sys = messageOf('s1', { role: 'system', content: 'Late', job_id: 'j1' })
+    await w.setProps({ messages: [failed, sys] })
+    const errors = w.findAll('.agent-msg-reply--error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].attributes('role')).toBe('alert')
+    w.unmount()
+  })
+
   it('replaces the partial answer by the answer once, in one update', async () => {
     const w = mountThread([userMessage('m1', running())], { partials: writing('Hello') })
     const answered = { ...userMessage('m1', { ...running(), state: 'succeeded' }) }
