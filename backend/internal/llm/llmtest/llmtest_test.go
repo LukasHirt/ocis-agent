@@ -87,3 +87,45 @@ func TestProviderFuncAdapter(t *testing.T) {
 		t.Fatalf("got %+v, %v", r, err)
 	}
 }
+
+func TestStreamingProviderPlaysDeltasThenTheResponse(t *testing.T) {
+	p := NewStreaming(
+		Streamed(Say("Hello", 3, 2), llm.Delta{Thinking: true}, llm.Delta{Text: "Hel"}, llm.Delta{Text: "lo"}),
+		Say("plain", 1, 1),
+		Streamed(Fail(llm.ErrUnavailable), llm.Delta{Text: "half"}),
+	)
+	var _ llm.Streamer = p
+	var _ llm.Provider = p
+	var got []llm.Delta
+	r, err := p.CompleteStream(context.Background(), req("a"), func(d llm.Delta) { got = append(got, d) })
+	if err != nil || r.Message.Content != "Hello" || len(got) != 3 || !got[0].Thinking || got[1].Text != "Hel" || got[2].Text != "lo" {
+		t.Fatalf("first = %+v, %v, deltas %+v", r, err, got)
+	}
+	got = nil
+	if r, err := p.Complete(context.Background(), req("b")); err != nil || r.Message.Content != "plain" {
+		t.Fatalf("second = %+v, %v", r, err)
+	}
+	if _, err := p.CompleteStream(context.Background(), req("c"), nil); !errors.Is(err, llm.ErrUnavailable) {
+		t.Fatalf("third err = %v", err)
+	}
+	if len(p.Requests()) != 3 || p.Remaining() != 0 {
+		t.Errorf("requests %d, remaining %d", len(p.Requests()), p.Remaining())
+	}
+}
+
+func TestStreamingProviderStopsOnACancelledContext(t *testing.T) {
+	p := NewStreaming(Streamed(Say("x", 1, 1), llm.Delta{Text: "a"}, llm.Delta{Text: "b"}))
+	ctx, cancel := context.WithCancel(context.Background())
+	var got []llm.Delta
+	_, err := p.CompleteStream(ctx, req("a"), func(d llm.Delta) { got = append(got, d); cancel() })
+	if !errors.Is(err, context.Canceled) || len(got) != 1 {
+		t.Fatalf("err = %v, deltas %+v", err, got)
+	}
+}
+
+func TestThePlainProviderDoesNotStream(t *testing.T) {
+	var p llm.Provider = New()
+	if _, ok := p.(llm.Streamer); ok {
+		t.Error("the plain scripted provider must not implement Streamer")
+	}
+}

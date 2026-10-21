@@ -13,7 +13,13 @@ type wireRequest struct {
 	Tools     []wireTool    `json:"tools,omitempty"`
 	MaxTokens int           `json:"max_tokens,omitempty"`
 	// ReasoningEffort is omitted unless the operator configured it.
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	Stream          bool               `json:"stream,omitempty"`
+	StreamOptions   *wireStreamOptions `json:"stream_options,omitempty"`
+}
+
+type wireStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type wireMessage struct {
@@ -126,30 +132,44 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 		return CompletionResponse{}, malformed("no choices")
 	}
 	ch := w.Choices[0] // only the first choice is used
-	if len(ch.Message.ToolCalls) > o.maxCalls {
-		return CompletionResponse{}, malformed("too many tool calls")
+	msg, stop, err := o.decodeChoice(ch.Message.Content, ch.Message.ToolCalls, ch.FinishReason)
+	if err != nil {
+		return CompletionResponse{}, err
+	}
+	return CompletionResponse{
+		Message: msg,
+		Stop:    stop,
+		Usage:   Usage{In: clampUsage(w.Usage.PromptTokens), Out: clampUsage(w.Usage.CompletionTokens)},
+	}, nil
+}
+
+// decodeChoice checks the model's message and maps the finish reason; the
+// streaming and the plain path share it.
+func (o *OpenAI) decodeChoice(content *string, calls []wireCall, finish string) (Message, StopReason, error) {
+	if len(calls) > o.maxCalls {
+		return Message{}, "", malformed("too many tool calls")
 	}
 	msg := Message{Role: RoleAssistant}
-	if ch.Message.Content != nil {
-		msg.Content = *ch.Message.Content
+	if content != nil {
+		msg.Content = *content
 	}
-	seen := make(map[string]bool, len(ch.Message.ToolCalls))
-	for i, c := range ch.Message.ToolCalls {
+	seen := make(map[string]bool, len(calls))
+	for i, c := range calls {
 		if c.Type != "" && c.Type != "function" {
-			return CompletionResponse{}, malformed("unsupported tool call type")
+			return Message{}, "", malformed("unsupported tool call type")
 		}
 		id := c.ID
 		if id == "" {
 			id = fmt.Sprintf("call_%d", i) // per response; the runner derives its own ids
 		} else if !callIDRE.MatchString(id) {
-			return CompletionResponse{}, malformed("bad tool call id")
+			return Message{}, "", malformed("bad tool call id")
 		}
 		if seen[id] {
-			return CompletionResponse{}, malformed("bad tool call id")
+			return Message{}, "", malformed("bad tool call id")
 		}
 		seen[id] = true
 		if c.Function.Name == "" {
-			return CompletionResponse{}, malformed("tool call without a name")
+			return Message{}, "", malformed("tool call without a name")
 		}
 		args := c.Function.Arguments
 		if strings.TrimSpace(args) == "" {
@@ -159,28 +179,23 @@ func (o *OpenAI) decode(raw []byte) (CompletionResponse, error) {
 	}
 
 	var stop StopReason
-	switch ch.FinishReason {
+	switch finish {
 	case "length":
 		stop = StopLength
 	case "content_filter":
-		return CompletionResponse{}, fmt.Errorf("%w: content filtered", ErrRejected)
+		return Message{}, "", fmt.Errorf("%w: content filtered", ErrRejected)
 	case "", "stop", "tool_calls", "function_call":
 		stop = StopEnd
 		if len(msg.ToolCalls) > 0 {
 			stop = StopToolCalls
 		}
-		if ch.FinishReason == "tool_calls" && len(msg.ToolCalls) == 0 {
-			return CompletionResponse{}, malformed("tool_calls without calls")
+		if finish == "tool_calls" && len(msg.ToolCalls) == 0 {
+			return Message{}, "", malformed("tool_calls without calls")
 		}
 	default:
-		return CompletionResponse{}, malformed("unknown finish reason")
+		return Message{}, "", malformed("unknown finish reason")
 	}
-
-	return CompletionResponse{
-		Message: msg,
-		Stop:    stop,
-		Usage:   Usage{In: clampUsage(w.Usage.PromptTokens), Out: clampUsage(w.Usage.CompletionTokens)},
-	}, nil
+	return msg, stop, nil
 }
 
 const maxUsage = 100_000_000

@@ -155,6 +155,13 @@ func TestLLMRefusals(t *testing.T) {
 		{"unknown reasoning effort", with(map[string]string{"AGENT_LLM_REASONING_EFFORT": "max"}), "AGENT_LLM_REASONING_EFFORT"},
 		{"upper-case reasoning effort", with(map[string]string{"AGENT_LLM_REASONING_EFFORT": "LOW"}), "AGENT_LLM_REASONING_EFFORT"},
 		{"reasoning effort without base url", map[string]string{"AGENT_LLM_REASONING_EFFORT": "low"}, "AGENT_LLM_BASE_URL"},
+		{"stream not a boolean", with(map[string]string{"AGENT_LLM_STREAM": "yes"}), "AGENT_LLM_STREAM"},
+		{"stream without base url", map[string]string{"AGENT_LLM_STREAM": "false"}, "AGENT_LLM_BASE_URL"},
+		{"idle timeout not a duration", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "a minute"}), "AGENT_LLM_IDLE_TIMEOUT"},
+		{"idle timeout too short", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "4s"}), "AGENT_LLM_IDLE_TIMEOUT"},
+		{"idle timeout too long", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "11m"}), "AGENT_LLM_IDLE_TIMEOUT"},
+		{"idle timeout negative", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "-1m"}), "AGENT_LLM_IDLE_TIMEOUT"},
+		{"idle timeout without base url", map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "1m"}, "AGENT_LLM_BASE_URL"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
@@ -241,6 +248,38 @@ func TestLLMTimeoutAndReasoningEffort(t *testing.T) {
 		}
 		if cfg.LLM.Timeout != c.want || cfg.LLM.ReasoningEffort != strings.TrimSpace(c.effort) {
 			t.Errorf("Load(%q, %q): Timeout = %v, ReasoningEffort = %q", c.timeout, c.effort, cfg.LLM.Timeout, cfg.LLM.ReasoningEffort)
+		}
+	}
+}
+
+func TestLLMStreamingDefaultsAndOverrides(t *testing.T) {
+	base := map[string]string{"AGENT_LLM_BASE_URL": "http://localhost:11434/v1", "AGENT_LLM_MODEL": "qwen3"}
+	cfg, err := Load(llmEnv(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LLM.Stream || cfg.LLM.IdleTimeout != 60*time.Second || cfg.LLM.Timeout != 120*time.Second {
+		t.Errorf("defaults: stream %v, idle %v, timeout %v", cfg.LLM.Stream, cfg.LLM.IdleTimeout, cfg.LLM.Timeout)
+	}
+	for _, c := range []struct {
+		stream, idle string
+		wantStream   bool
+		wantIdle     time.Duration
+	}{
+		{" false ", "5s", false, 5 * time.Second},
+		{"true", " 10m ", true, 10 * time.Minute},
+		{"0", "90s", false, 90 * time.Second},
+	} {
+		m := map[string]string{"AGENT_LLM_STREAM": c.stream, "AGENT_LLM_IDLE_TIMEOUT": c.idle}
+		for k, v := range base {
+			m[k] = v
+		}
+		cfg, err := Load(llmEnv(m))
+		if err != nil {
+			t.Fatalf("%v: %v", c, err)
+		}
+		if cfg.LLM.Stream != c.wantStream || cfg.LLM.IdleTimeout != c.wantIdle {
+			t.Errorf("%v: stream %v, idle %v", c, cfg.LLM.Stream, cfg.LLM.IdleTimeout)
 		}
 	}
 }

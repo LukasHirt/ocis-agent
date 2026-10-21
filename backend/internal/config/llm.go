@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,11 @@ type LLMConfig struct {
 	AllowHTTP    bool        // true only for an http:// loopback endpoint
 	// Timeout bounds one model call (AGENT_LLM_TIMEOUT, default 120s).
 	Timeout time.Duration
+	// Stream requests streamed answers (AGENT_LLM_STREAM, default true).
+	Stream bool
+	// IdleTimeout ends a streamed call that receives nothing for this long
+	// (AGENT_LLM_IDLE_TIMEOUT, default 60s).
+	IdleTimeout time.Duration
 	// ReasoningEffort is sent as reasoning_effort when not empty
 	// (AGENT_LLM_REASONING_EFFORT).
 	ReasoningEffort string
@@ -43,9 +49,12 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	hostsRaw := getenv("AGENT_LLM_ALLOWED_HOSTS")
 	timeoutRaw := strings.TrimSpace(getenv("AGENT_LLM_TIMEOUT"))
 	effort := strings.TrimSpace(getenv("AGENT_LLM_REASONING_EFFORT"))
+	streamRaw := strings.TrimSpace(getenv("AGENT_LLM_STREAM"))
+	idleRaw := strings.TrimSpace(getenv("AGENT_LLM_IDLE_TIMEOUT"))
 
 	if baseRaw == "" {
-		if provider != "" || keyRaw != "" || keyFile != "" || model != "" || modelsRaw != "" || hostsRaw != "" || timeoutRaw != "" || effort != "" {
+		if provider != "" || keyRaw != "" || keyFile != "" || model != "" || modelsRaw != "" || hostsRaw != "" || timeoutRaw != "" || effort != "" ||
+			streamRaw != "" || idleRaw != "" {
 			return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL is required when other AGENT_LLM_ variables are set")
 		}
 		return LLMConfig{}, nil
@@ -132,5 +141,18 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 		return LLMConfig{}, errors.New("AGENT_LLM_REASONING_EFFORT must be none, low, medium or high")
 	}
 	l.ReasoningEffort = effort
+
+	l.Stream = true
+	if streamRaw != "" {
+		if l.Stream, err = strconv.ParseBool(streamRaw); err != nil {
+			return LLMConfig{}, errors.New("AGENT_LLM_STREAM must be a boolean")
+		}
+	}
+	l.IdleTimeout = 60 * time.Second
+	if idleRaw != "" {
+		if l.IdleTimeout, err = time.ParseDuration(idleRaw); err != nil || l.IdleTimeout < 5*time.Second || l.IdleTimeout > 10*time.Minute {
+			return LLMConfig{}, errors.New("AGENT_LLM_IDLE_TIMEOUT must be a duration from 5s to 10m")
+		}
+	}
 	return l, nil
 }

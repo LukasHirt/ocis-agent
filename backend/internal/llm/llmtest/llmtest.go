@@ -9,10 +9,18 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
 
-// Step is one scripted answer.
+// Step is one scripted answer. Deltas are reported by a StreamProvider
+// before it returns Resp or Err.
 type Step struct {
-	Resp llm.CompletionResponse
-	Err  error
+	Resp   llm.CompletionResponse
+	Err    error
+	Deltas []llm.Delta
+}
+
+// Streamed adds the deltas a StreamProvider reports before it answers s.
+func Streamed(s Step, deltas ...llm.Delta) Step {
+	s.Deltas = append(append([]llm.Delta(nil), s.Deltas...), deltas...)
+	return s
 }
 
 // Say answers with plain text.
@@ -47,13 +55,22 @@ type Provider struct {
 // New returns a provider that plays steps in order.
 func New(steps ...Step) *Provider { return &Provider{steps: steps} }
 
-// Complete implements llm.Provider.
+// Complete implements llm.Provider; it ignores the deltas of a step.
 func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.CompletionResponse, error) {
-	if err := ctx.Err(); err != nil {
+	s, err := p.next(ctx, req)
+	if err != nil {
 		return llm.CompletionResponse{}, err
 	}
+	return s.Resp, s.Err
+}
+
+// next validates and records req and takes the next step.
+func (p *Provider) next(ctx context.Context, req llm.CompletionRequest) (Step, error) {
+	if err := ctx.Err(); err != nil {
+		return Step{}, err
+	}
 	if err := req.Validate(); err != nil {
-		return llm.CompletionResponse{}, err
+		return Step{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -71,10 +88,40 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	req.Tools = tools
 	p.seen = append(p.seen, req)
 	if len(p.steps) == 0 {
-		return llm.CompletionResponse{}, errors.New("llmtest: script exhausted")
+		return Step{}, errors.New("llmtest: script exhausted")
 	}
 	s := p.steps[0]
 	p.steps = p.steps[1:]
+	return s, nil
+}
+
+// StreamProvider is a Provider that also implements llm.Streamer: it reports
+// a step's deltas, stopping with the context error when ctx ends between
+// them, then answers like Provider.
+type StreamProvider struct {
+	*Provider
+}
+
+// NewStreaming returns a streaming provider that plays steps in order.
+func NewStreaming(steps ...Step) *StreamProvider { return &StreamProvider{New(steps...)} }
+
+// CompleteStream implements llm.Streamer.
+func (p *StreamProvider) CompleteStream(ctx context.Context, req llm.CompletionRequest, onDelta func(llm.Delta)) (llm.CompletionResponse, error) {
+	s, err := p.next(ctx, req)
+	if err != nil {
+		return llm.CompletionResponse{}, err
+	}
+	for _, d := range s.Deltas {
+		if err := ctx.Err(); err != nil {
+			return llm.CompletionResponse{}, err
+		}
+		if onDelta != nil {
+			onDelta(d)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return llm.CompletionResponse{}, err
+	}
 	return s.Resp, s.Err
 }
 

@@ -75,11 +75,32 @@ type CompletionResponse struct {
 	Message Message
 	Usage   Usage
 	Stop    StopReason
+	// UsageEstimated means the provider streamed no usage and Usage is a
+	// conservative estimate (about four bytes a token, never zero).
+	UsageEstimated bool
 }
 
 // Provider is a model backend.
 type Provider interface {
 	Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
+}
+
+// Delta is a piece of a streamed answer: visible text the model wrote, or
+// Thinking when the model started its hidden reasoning (reported once; the
+// reasoning text itself is never passed on). Text is untrusted model output
+// and may belong to a call that fails later: it is never the final answer.
+type Delta struct {
+	Text     string
+	Thinking bool
+}
+
+// Streamer is a Provider that can report the answer while it is written.
+// CompleteStream calls onDelta (which may be nil) on the caller's goroutine,
+// so onDelta must return quickly; it returns the same response as Complete.
+// onDelta may never be called, for example when the endpoint does not stream.
+type Streamer interface {
+	Provider
+	CompleteStream(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error)
 }
 
 // ProviderFunc adapts a function to Provider (handy for scripted models that

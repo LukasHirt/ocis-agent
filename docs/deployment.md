@@ -196,7 +196,9 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_LLM_API_KEY` | none | The model key. Required unless the host is loopback. Printable ASCII without spaces. |
 | `AGENT_LLM_API_KEY_FILE` | none | A file holding the model key (for docker or Kubernetes secrets); exclusive with `AGENT_LLM_API_KEY`. |
 | `AGENT_LLM_ALLOWED_HOSTS` | the base URL's host | Comma-separated egress allow-list for the model client; must contain the base URL's host. |
-| `AGENT_LLM_TIMEOUT` | `120s` | Bound of one model call, reading the response included (10s to 30m). |
+| `AGENT_LLM_TIMEOUT` | `120s` | Bound of one whole model call, reading the response included (10s to 30m). With streaming the idle timeout guards against stalls, so this can be generous (for example `30m` for slow local models). |
+| `AGENT_LLM_STREAM` | `true` | Request streamed answers (`stream: true`, with `stream_options.include_usage`). An endpoint that refuses `stream_options` (400) is asked again without it, and one that refuses streaming (400, 404 or 501) once more without streaming; the client remembers both until the sidecar restarts. An endpoint that answers with plain JSON is read as such. `false` waits for each whole answer. |
+| `AGENT_LLM_IDLE_TIMEOUT` | `60s` | With streaming, how long a model call may receive nothing (not a single byte, the wait for the response headers included) before it fails as an outage (5s to 10m). The wait for the first byte covers loading the model and reading the prompt, so raise it for a large local model with long prompts. |
 | `AGENT_LLM_REASONING_EFFORT` | not sent | `none`, `low`, `medium` or `high`, sent as `reasoning_effort`. |
 | `AGENT_LLM_MAX_TOKENS` | `4096` | Output token limit per model call (64 to 100000). |
 
@@ -224,7 +226,8 @@ Local [Ollama](https://ollama.com) on the same host as a sidecar binary:
 ```
 AGENT_LLM_BASE_URL=http://localhost:11434/v1
 AGENT_LLM_MODEL=qwen3:14b
-AGENT_LLM_TIMEOUT=10m
+AGENT_LLM_TIMEOUT=30m
+AGENT_LLM_IDLE_TIMEOUT=3m
 ```
 
 Plain http and no key are allowed only because the host is loopback. Notes:
@@ -250,9 +253,16 @@ Plain http and no key are allowed only because the host is loopback. Notes:
     private-CA certificate mount the CA and set `SSL_CERT_FILE=/path/to/ca.pem` (or `SSL_CERT_DIR`).
     Without that, every call fails at TLS, counts as an outage and the jobs end as "restarted too
     many times", exactly like a timeout.
-- **Timeouts.** Local models are slow; a call that exceeds `AGENT_LLM_TIMEOUT` counts as an outage
-  and the job is requeued with a delay, until `AGENT_MAX_RUNS` ends it ("restarted too many
-  times"). Raise the timeout to a few minutes for local models.
+- **Timeouts.** Local models are slow; a call that exceeds `AGENT_LLM_TIMEOUT`, or a streamed call
+  that receives nothing for `AGENT_LLM_IDLE_TIMEOUT`, counts as an outage and the job is requeued
+  with a delay, until `AGENT_MAX_RUNS` ends it ("restarted too many times"). With streaming on (the
+  default) every token, and the hidden reasoning of a thinking model, keeps the call alive, so set
+  `AGENT_LLM_TIMEOUT` generously and let the idle timeout catch stalls. Without streaming
+  (`AGENT_LLM_STREAM=false`) raise `AGENT_LLM_TIMEOUT` to cover the slowest whole answer. A stream
+  that ends before the model finished is an outage too, never a half answer.
+- **Token usage.** When a stream carries no usage, the sidecar estimates it (about four bytes a token
+  of the request and of the answer, the hidden reasoning included) and counts the estimate against
+  the daily budget.
 - **Context length.** The system prompt with the memory excerpt and the tool definitions is
   several thousand tokens, and every tool result adds to it. Ollama's default context window is
   small and it silently drops the start of a longer prompt, which shows up as the model ignoring
