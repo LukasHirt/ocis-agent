@@ -198,9 +198,7 @@ func TestBackupDoesNotMigrateTheSource(t *testing.T) {
 	old := supportedVersion(t) - 1
 	// undo the latest migration (0016)
 	for _, q := range []string{
-		`ALTER TABLE jobs DROP COLUMN partial`,
-		`ALTER TABLE jobs DROP COLUMN partial_state`,
-		`ALTER TABLE jobs DROP COLUMN partial_at`,
+		`DROP TABLE job_partials`,
 		`PRAGMA user_version = 15`,
 		`UPDATE system SET value = '15' WHERE key = 'schema_version'`,
 	} {

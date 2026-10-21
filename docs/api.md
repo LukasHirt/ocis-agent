@@ -292,8 +292,9 @@ Query: `state` (`queued`, `running`, `waiting_approval`, `succeeded`, `failed`, 
   `partial_state` what it is doing: `thinking` (no visible text yet), `writing` or `""`. Both are
   empty unless `state` is `running`. The text is unfinished and never the final answer (that is
   `answer` or the chat's `assistant` message); it is cleared when the job leaves `running`. Writing
-  it moves the `jobs` change (and `messages` for a chat job), at most about twice a second, so the
-  events stream delivers it at the poll's 2 s granularity.
+  it moves the `messages` change of a chat job (no change for other jobs: refetch a running job
+  yourself or wait for the full refresh), at most about twice a second, so the events stream
+  delivers it at the poll's 2 s granularity.
 
 ### GET /agent-api/v1/jobs/{id}
 
@@ -308,7 +309,9 @@ The job (fields as above) plus its timeline and final answer:
 }
 ```
 
-`kind` is `llm` (a model turn, with its token usage) or `tool` (a tool call, with `status` such as
+`kind` is `llm` (a model turn, with its token usage; `status` is `ok`, `cut_off` for an answer cut
+off by the length limit, or `failed` for a call that failed but still reported usage, which is
+charged like any other) or `tool` (a tool call, with `status` such as
 `done`, `failed`, `unknown`, `rejected` or `denied`). `summary` (untrusted, capped) is tool-made text; `answer` (untrusted, capped) is the model's final
 answer, empty while there is none.
 

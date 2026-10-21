@@ -23,6 +23,9 @@ type partialWrite struct {
 }
 
 func (t faultTx) SetJobPartial(userID, jobID string, fence int64, state store.PartialState, text string) error {
+	t.s.mu.Lock()
+	t.s.order = append(t.s.order, "partial")
+	t.s.mu.Unlock()
 	err := t.s.hit("SetJobPartial")
 	if err == nil {
 		err = t.Tx.SetJobPartial(userID, jobID, fence, state, text)
@@ -31,6 +34,13 @@ func (t faultTx) SetJobPartial(userID, jobID string, fence int64, state store.Pa
 	t.s.partials = append(t.s.partials, partialWrite{state: state, text: text, at: t.s.now(), err: err})
 	t.s.mu.Unlock()
 	return err
+}
+
+func (t faultTx) AppendStep(step store.JobStep, fence int64) (store.JobStep, error) {
+	t.s.mu.Lock()
+	t.s.order = append(t.s.order, "step")
+	t.s.mu.Unlock()
+	return t.Tx.AppendStep(step, fence)
 }
 
 // writes returns the recorded SetJobPartial calls.
@@ -629,4 +639,63 @@ func TestTheUsageOfAFailedStreamIsCharged(t *testing.T) {
 			t.Errorf("steps = %+v", s)
 		}
 	})
+}
+
+// Text held back by the throttle is stored on the next heartbeat (an empty
+// delta: the client reports chunks of only tool-call fragments or reasoning
+// that way), not only when the stream ends.
+func TestHeldBackTextIsStoredOnAHeartbeat(t *testing.T) {
+	f := newFixture(t)
+	f.enqueue("g")
+	var mid store.JobPartial
+	beat := pacedDelta{after: 6 * ms100}
+	_, r := f.streaming(pacedStep{
+		deltas: []pacedDelta{text(0, "I'll save"), text(ms100, " it:"), beat, beat},
+		during: func(context.Context) { mid = f.partialNow() },
+		resp:   calls(1, 1, list("x1", "/")),
+	}, pacedStep{resp: say("saved", 1, 1)})
+	start := f.clk.Now()
+	if err := r.Run(bg, f.claim()); err != nil {
+		t.Fatal(err)
+	}
+	f.noWriterLeft(r)
+	if mid.Partial != "I'll save it:" {
+		t.Errorf("before the stream ended: %+v", mid)
+	}
+	wantWrites(t, f.writesSince(start), []seenWrite{
+		{store.PartialWriting, "I'll save", 0},
+		{store.PartialWriting, "I'll save it:", 7 * ms100}, // the first heartbeat
+		{store.PartialNone, "", 13 * ms100},                // cleared after the calls
+	})
+}
+
+// complete joins a write that is still running when the stream returns: it
+// lands before the turn's step (here the final answer's release), never
+// after it.
+func TestTheWriteIsJoinedBeforeTheTurnGoesOn(t *testing.T) {
+	f := newFixture(t)
+	f.enqueue("g")
+	f.provider = llm.StreamFunc(func(_ context.Context, _ llm.CompletionRequest, onDelta func(llm.Delta)) (llm.CompletionResponse, error) {
+		onDelta(llm.Delta{Text: "x"}) // starts the write and returns at once
+		return say("x", 1, 1), nil
+	})
+	r := f.runner()
+	// the write goroutine starts late, after the stream returned
+	r.beforePartialWrite = func() { time.Sleep(100 * time.Millisecond) }
+	if err := r.Run(bg, f.claim()); err != nil {
+		t.Fatal(err)
+	}
+	f.noWriterLeft(r)
+	f.faults.mu.Lock()
+	order := strings.Join(f.faults.order, ",")
+	f.faults.mu.Unlock()
+	if order != "partial,step" {
+		t.Errorf("order = %s, want the partial write before the step", order)
+	}
+	if w := f.writes(); len(w) != 1 || w[0].err != nil {
+		t.Errorf("writes = %+v", w)
+	}
+	if j := f.job(); j.State != store.JobSucceeded || j.JobPartial != (store.JobPartial{}) {
+		t.Errorf("job %s with %+v", j.State, j.JobPartial)
+	}
 }

@@ -81,7 +81,10 @@ const MaxPartialBytes = MaxAnswerMessageBytes
 type JobPartial struct {
 	Partial      string
 	PartialState PartialState
-	PartialAt    time.Time // the last SetJobPartial; zero when cleared
+	// PartialAt is the time of the last SetJobPartial. It is zero after a
+	// state transition; a SetJobPartial clear (PartialNone) keeps its time,
+	// so the change marks move.
+	PartialAt time.Time
 }
 
 // JobFilter narrows ListJobs and ListJobSummaries.

@@ -203,8 +203,8 @@ func TestPartialViewIsCappedAndChecked(t *testing.T) {
 	}
 }
 
-// A partial write moves the jobs mark, and the messages mark too for a
-// chat job.
+// A chat job's partial write moves the messages mark only; another job's
+// moves no mark.
 func TestEventsReportPartialWrites(t *testing.T) {
 	s := newWorkStack(t)
 	ft := installTimers(s.srv)
@@ -224,7 +224,7 @@ func TestEventsReportPartialWrites(t *testing.T) {
 		s.fake.Advance(time.Second)
 		s.setPartial(t, claim, store.PartialWriting, text)
 		st.pollOnce(t)
-		c.want(changedFrame("jobs", "messages"))
+		c.want(changedFrame("messages"))
 	}
 	quiet()
 
@@ -234,14 +234,12 @@ func TestEventsReportPartialWrites(t *testing.T) {
 	st.pollOnce(t)
 	c.want(changedFrame("jobs", "messages"))
 
-	// a proactive job's partial moves only the jobs mark
+	// a proactive job's partial moves no mark
 	s.fake.Advance(time.Second)
 	p := s.startJob(t, einsteinID, store.TriggerManual, "review")
 	st.pollOnce(t)
 	c.want(changedFrame("jobs"))
 	s.fake.Advance(time.Second)
 	s.setPartial(t, p, store.PartialWriting, "draft")
-	st.pollOnce(t)
-	c.want(changedFrame("jobs"))
 	quiet()
 }

@@ -90,6 +90,9 @@ func (p *partial) add(d llm.Delta) {
 	go func() {
 		defer p.r.partialWriters.Add(-1)
 		defer close(done)
+		if h := p.r.beforePartialWrite; h != nil {
+			h()
+		}
 		p.write(s)
 	}()
 }

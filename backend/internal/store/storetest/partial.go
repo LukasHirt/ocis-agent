@@ -46,25 +46,26 @@ func changeMarks(t *testing.T, st store.Store, user string) store.ChangeMarks {
 }
 
 func runJobPartial(t *testing.T, f Factory) {
-	t.Run("a running job's partial is stored, read back and moves its updated_at", func(t *testing.T) {
+	t.Run("a running job's partial is stored and read back without changing the job", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u1")
 		j := addJob(t, st, "u1", "g")
 		c := mustClaim(t, st, "w1")
+		claimedAt := clk.Now()
 		if got := getJob(t, st, "u1", j.ID); got.JobPartial != (store.JobPartial{}) {
 			t.Fatalf("fresh claim: %+v", got.JobPartial)
 		}
 		clk.Advance(time.Second)
 		mustPartial(t, st, c, store.PartialThinking, "")
 		got := getJob(t, st, "u1", j.ID)
-		if got.PartialState != store.PartialThinking || got.Partial != "" || !got.PartialAt.Equal(clk.Now()) || !got.UpdatedAt.Equal(clk.Now()) {
+		if got.PartialState != store.PartialThinking || got.Partial != "" || !got.PartialAt.Equal(clk.Now()) || !got.UpdatedAt.Equal(claimedAt) {
 			t.Fatalf("thinking: %+v, updated %v", got.JobPartial, got.UpdatedAt)
 		}
 		clk.Advance(time.Second)
 		text := "Hello ‮ world\x00 <b>"
 		mustPartial(t, st, c, store.PartialWriting, text)
 		got = getJob(t, st, "u1", j.ID)
-		if got.PartialState != store.PartialWriting || got.Partial != text || !got.PartialAt.Equal(clk.Now()) || !got.UpdatedAt.Equal(clk.Now()) {
+		if got.PartialState != store.PartialWriting || got.Partial != text || !got.PartialAt.Equal(clk.Now()) || !got.UpdatedAt.Equal(claimedAt) {
 			t.Fatalf("writing: %+v", got.JobPartial)
 		}
 		if got.State != store.JobRunning || string(got.Checkpoint) != "{}" {
@@ -219,7 +220,7 @@ func runJobPartial(t *testing.T, f Factory) {
 		wantNoPartial(t, st, "u1", j.ID, "reaper fail")
 	})
 
-	t.Run("a running chat job's partial moves the jobs and messages marks", func(t *testing.T) {
+	t.Run("a running chat job's partial moves only the messages mark, other jobs' none", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u1")
 		mustUser(t, st, "u2")
@@ -230,32 +231,38 @@ func runJobPartial(t *testing.T, f Factory) {
 		clk.Advance(time.Second)
 		mustPartial(t, st, c, store.PartialWriting, "a")
 		m1 := changeMarks(t, st, "u1")
-		if m1.JobsAt != clk.Now().UnixMilli() || m1.MessagesAt != clk.Now().UnixMilli() || m1.AuditSeq != base.AuditSeq || m1.PolicyAt != base.PolicyAt {
+		if m1.MessagesAt != clk.Now().UnixMilli() || m1.JobsAt != base.JobsAt || m1.AuditSeq != base.AuditSeq || m1.PolicyAt != base.PolicyAt {
 			t.Errorf("after a partial = %+v (before %+v)", m1, base)
+		}
+		// a clear keeps its time: the mark moves again
+		clk.Advance(time.Second)
+		mustPartial(t, st, c, store.PartialNone, "")
+		m2 := changeMarks(t, st, "u1")
+		if m2.MessagesAt != clk.Now().UnixMilli() || m2.JobsAt != base.JobsAt {
+			t.Errorf("after a clear = %+v", m2)
 		}
 		clk.Advance(time.Second)
 		release(t, st, c, store.JobQueued)
-		m2 := changeMarks(t, st, "u1")
-		if m2.MessagesAt == m1.MessagesAt || m2.JobsAt != clk.Now().UnixMilli() {
-			t.Errorf("after the release = %+v (before %+v)", m2, m1)
+		m3 := changeMarks(t, st, "u1")
+		if m3.MessagesAt == m2.MessagesAt || m3.JobsAt != clk.Now().UnixMilli() {
+			t.Errorf("after the release = %+v (before %+v)", m3, m2)
 		}
 		if got := changeMarks(t, st, "u2"); got != other {
 			t.Errorf("another user's marks moved: %+v -> %+v", other, got)
 		}
 
-		// a proactive job's partial moves the jobs mark only
+		// a proactive job's partial moves no mark
 		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", c.Job.ID) })
 		mustTx(t, st, func(tx store.Tx) error {
 			_, err := tx.InsertJob(store.Job{UserID: "u1", TriggerKind: store.TriggerSchedule, Goal: "review"})
 			return err
 		})
 		pc := mustClaim(t, st, "w1")
-		m3 := changeMarks(t, st, "u1")
+		m4 := changeMarks(t, st, "u1")
 		clk.Advance(time.Second)
 		mustPartial(t, st, pc, store.PartialWriting, "b")
-		m4 := changeMarks(t, st, "u1")
-		if m4.MessagesAt != m3.MessagesAt || m4.JobsAt != clk.Now().UnixMilli() {
-			t.Errorf("proactive partial = %+v (before %+v)", m4, m3)
+		if m5 := changeMarks(t, st, "u1"); m5 != m4 {
+			t.Errorf("proactive partial = %+v (before %+v)", m5, m4)
 		}
 	})
 }

@@ -311,9 +311,9 @@ func (t *tx) CountConversations(userID string) (int, error) {
 	return n, err
 }
 
-// partialMarkQuery is the newest partial write of the user's running chat
-// jobs (a range on jobs_user_state).
-const partialMarkQuery = `SELECT COALESCE(MAX(partial_at), 0) FROM jobs WHERE user_id = ? AND state = 'running' AND trigger_kind = 'chat'`
+// partialMarkQuery is the newest partial write of the user's chat jobs
+// (only running jobs have a job_partials row; index only).
+const partialMarkQuery = `SELECT COALESCE(MAX(at), 0) FROM job_partials WHERE user_id = ? AND chat = 1`
 
 // ChangeMarks implements store.Tx. Each mark is an indexed MAX; the message
 // mark also covers conversation creation and renames through the

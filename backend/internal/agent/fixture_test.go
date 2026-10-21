@@ -123,6 +123,9 @@ type faultStore struct {
 	// time of now
 	partials []partialWrite
 	now      func() time.Time
+	// order records the SetJobPartial ("partial") and AppendStep ("step")
+	// calls in turn
+	order []string
 }
 
 // afterCommit runs fn once, outside any transaction, right after the next

@@ -16,14 +16,26 @@ const (
 	defaultJobLimit = 50
 	maxJobLimit     = 500
 
-	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at, ` + partialColumns
+	// insertJobColumns are the columns of the jobs table InsertJob fills.
+	insertJobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at`
+	jobColumns       = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at, ` + partialColumns
 
-	// partialColumns are the columns of a store.JobPartial (scanPartial).
-	partialColumns = `partial, partial_state, partial_at`
-	// partialCleared is the SET clause that clears them: every state
-	// transition includes it.
-	partialCleared = `partial = '', partial_state = '', partial_at = 0`
+	// partialColumns read the job's store.JobPartial from job_partials (by
+	// primary key; zero values without a row) in a query over jobs
+	// (partialDest scans them).
+	partialColumns = `COALESCE((SELECT p.text FROM job_partials p WHERE p.job_id = jobs.id), ''),
+		COALESCE((SELECT p.state FROM job_partials p WHERE p.job_id = jobs.id), ''),
+		COALESCE((SELECT p.at FROM job_partials p WHERE p.job_id = jobs.id), 0)`
 )
+
+// dropPartial deletes the partial of a job: every state transition calls it
+// in its transaction.
+func (t *tx) dropPartial(jobID string) error {
+	if _, err := t.q.ExecContext(t.ctx, `DELETE FROM job_partials WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("sqlite: drop partial: %w", err)
+	}
+	return nil
+}
 
 // partialDest returns the scan destinations of partialColumns; set copies
 // them into p after the scan.
@@ -83,7 +95,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,'','',0)`,
+		`INSERT INTO jobs(`+insertJobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
 		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt, j.Runs,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
@@ -299,7 +311,7 @@ func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSumm
 // CancelJob implements store.Tx.
 func (t *tx) CancelJob(userID, jobID string) error {
 	res, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'cancelled', updated_at = ?1, ended_at = ?1, `+partialCleared+`
+		`UPDATE jobs SET state = 'cancelled', updated_at = ?1, ended_at = ?1
 		 WHERE id = ?2 AND user_id = ?3 AND state NOT IN `+terminalJobStates,
 		ms(t.now()), jobID, userID)
 	if err != nil {
@@ -308,7 +320,7 @@ func (t *tx) CancelJob(userID, jobID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return t.diagnoseJobWrite(userID, jobID, false)
 	}
-	return nil
+	return t.dropPartial(jobID)
 }
 
 // diagnoseJobWrite explains why a conditional job update changed nothing:
@@ -445,7 +457,10 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 		return store.Claim{}, false, err
 	}
 	if _, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'running', attempt = attempt + 1, runs = runs + 1, updated_at = ?, `+partialCleared+` WHERE id = ?`, ms(now), id); err != nil {
+		`UPDATE jobs SET state = 'running', attempt = attempt + 1, runs = runs + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
+		return store.Claim{}, false, err
+	}
+	if err := t.dropPartial(id); err != nil {
 		return store.Claim{}, false, err
 	}
 	job, err := t.GetJob(userID, id)
@@ -497,7 +512,7 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 	res, err = t.q.ExecContext(t.ctx,
 		`UPDATE jobs SET state = ?, checkpoint = CASE WHEN ? = '' THEN checkpoint ELSE ? END, error = ?,
 		     attempt = CASE WHEN ? IN ('queued','waiting_approval') AND attempt > 0 THEN attempt - 1 ELSE attempt END,
-		     updated_at = ?, `+endedAtSet+`, `+partialCleared+`
+		     updated_at = ?, `+endedAtSet+`
 		 WHERE id = ? AND user_id = ? AND state = 'running'`,
 		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), now, next.Terminal(), now,
 		c.Job.ID, c.Job.UserID)
@@ -505,7 +520,10 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	return true, t.dropPartial(c.Job.ID)
 }
 
 // ReapExpired implements store.Tx.
@@ -544,16 +562,19 @@ func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duratio
 	for _, s := range jobs {
 		if s.attempt >= maxAttempts {
 			_, err = t.q.ExecContext(t.ctx,
-				`UPDATE jobs SET state = 'failed', error = 'max attempts exceeded', updated_at = ?1, ended_at = ?1, `+partialCleared+` WHERE id = ?2`,
+				`UPDATE jobs SET state = 'failed', error = 'max attempts exceeded', updated_at = ?1, ended_at = ?1 WHERE id = ?2`,
 				ms(now), s.id)
 			res.Failed++
 		} else {
 			_, err = t.q.ExecContext(t.ctx,
-				`UPDATE jobs SET state = 'queued', not_before = ?, updated_at = ?, `+partialCleared+` WHERE id = ?`,
+				`UPDATE jobs SET state = 'queued', not_before = ?, updated_at = ? WHERE id = ?`,
 				ms(now.Add(backoff(s.attempt))), ms(now), s.id)
 			res.Requeued++
 		}
 		if err != nil {
+			return store.ReapResult{}, err
+		}
+		if err := t.dropPartial(s.id); err != nil {
 			return store.ReapResult{}, err
 		}
 		// blank the lease only if it still belongs to this job; keep the fence
@@ -566,7 +587,8 @@ func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duratio
 	return res, nil
 }
 
-// SetJobPartial implements store.Tx.
+// SetJobPartial implements store.Tx. It writes the job's job_partials row
+// only (never the jobs row), so the jobs mark does not move.
 func (t *tx) SetJobPartial(userID, jobID string, fence int64, state store.PartialState, text string) error {
 	switch {
 	case !state.Valid():
@@ -578,13 +600,14 @@ func (t *tx) SetJobPartial(userID, jobID string, fence int64, state store.Partia
 	case !utf8.ValidString(text):
 		return store.Invalid("the partial text is not valid UTF-8")
 	}
-	now := ms(t.now())
 	res, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET partial = ?, partial_state = ?, partial_at = ?, updated_at = ?
-		 WHERE id = ? AND user_id = ? AND state = 'running' AND `+leaseHeld,
-		text, string(state), now, now, jobID, userID, fence)
+		`INSERT INTO job_partials(job_id, user_id, chat, state, text, at)
+		 SELECT jobs.id, jobs.user_id, jobs.trigger_kind = ?, ?, ?, ? FROM jobs
+		 WHERE jobs.id = ? AND jobs.user_id = ? AND jobs.state = 'running' AND `+leaseHeld+`
+		 ON CONFLICT(job_id) DO UPDATE SET state = excluded.state, text = excluded.text, at = excluded.at`,
+		store.TriggerChat, string(state), text, ms(t.now()), jobID, userID, fence)
 	if err != nil {
-		return err
+		return fmt.Errorf("sqlite: set partial: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return t.diagnoseJobWrite(userID, jobID, true)

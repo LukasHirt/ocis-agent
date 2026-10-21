@@ -228,9 +228,7 @@ func TestJobEndedAtBackfill(t *testing.T) {
 	// back to the schema before the migration (0012, so the later ones are
 	// undone too), with an updated_at to copy
 	for _, q := range []string{
-		`ALTER TABLE jobs DROP COLUMN partial`,
-		`ALTER TABLE jobs DROP COLUMN partial_state`,
-		`ALTER TABLE jobs DROP COLUMN partial_at`,
+		`DROP TABLE job_partials`,
 		`DROP INDEX jobs_user_state`,
 		`ALTER TABLE cursors DROP COLUMN watch_etags`,
 		`ALTER TABLE cursors DROP COLUMN watch_dirty_since`,

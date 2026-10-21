@@ -58,6 +58,9 @@ type Runner struct {
 	// partialWriters counts the running partial-answer writes (tests check
 	// that none is left behind).
 	partialWriters atomic.Int32
+	// beforePartialWrite, if set (tests only), runs in a write goroutine
+	// before it writes
+	beforePartialWrite func()
 }
 
 // NewRunner checks the dependencies and the limits.

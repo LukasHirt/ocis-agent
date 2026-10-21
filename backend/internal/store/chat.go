@@ -69,7 +69,8 @@ type ChangeMarks struct {
 	JobsAt int64 // newest job update
 	// MessagesAt is the newest message or conversation change, or the
 	// newest SetJobPartial of a running chat job (it goes down again when
-	// that job leaves running: a change too).
+	// that job leaves running: a change too). Partial writes of other jobs
+	// move no mark.
 	MessagesAt int64
 	PolicyAt   int64 // policy update
 	AuditSeq   int64 // last audit sequence number
