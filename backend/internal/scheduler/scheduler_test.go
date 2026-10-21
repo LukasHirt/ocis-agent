@@ -30,7 +30,7 @@ var (
 
 // The database-only tasks run first, the oCIS-bound ones (each under its own
 // deadline) after them.
-var allTasks = []string{TaskReap, TaskExpire, TaskSettle, TaskDormant, TaskProactive, TaskReconcile, TaskRenew, TaskSweep}
+var allTasks = []string{TaskReap, TaskExpire, TaskSettle, TaskDormant, TaskProactive, TaskReconcile, TaskRenew, TaskSweep, TaskWatch}
 
 func TestTickRunsEveryTaskOnce(t *testing.T) {
 	fx := newFixture(t)
@@ -43,7 +43,7 @@ func TestTickRunsEveryTaskOnce(t *testing.T) {
 		t.Fatalf("result = %+v, want every task once and no failure", res)
 	}
 	for _, task := range allTasks {
-		if task == TaskProactive {
+		if task == TaskProactive || task == TaskWatch {
 			continue // reads the store, not a fake
 		}
 		want := 1

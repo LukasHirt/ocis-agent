@@ -196,17 +196,17 @@ func TestBackupDoesNotMigrateTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := supportedVersion(t) - 1
-	if _, err := s.w.Exec(`ALTER TABLE approvals DROP COLUMN acknowledged_at`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.w.Exec(`ALTER TABLE approvals DROP COLUMN acknowledged_by`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.w.Exec(`PRAGMA user_version = 12`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.w.Exec(`UPDATE system SET value = '12' WHERE key = 'schema_version'`); err != nil {
-		t.Fatal(err)
+	// undo the latest migration (0014)
+	for _, q := range []string{
+		`ALTER TABLE cursors DROP COLUMN watch_etags`,
+		`ALTER TABLE cursors DROP COLUMN watch_dirty_since`,
+		`ALTER TABLE cursors DROP COLUMN watch_changed_at`,
+		`PRAGMA user_version = 13`,
+		`UPDATE system SET value = '13' WHERE key = 'schema_version'`,
+	} {
+		if _, err := s.w.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
 	}
 	_ = s.Close()
 

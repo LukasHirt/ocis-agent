@@ -501,6 +501,17 @@ is recorded as `proactive_skipped` with the reason when the reason changes, and 
 while it stays the same; pauses (already audited) and quiet hours are not recorded. A started
 review is recorded as `proactive_started`.
 
+The agent also checks the `watch` folders for changes (every `AGENT_WATCH_POLL_INTERVAL`, 5 min)
+and starts a review (`trigger_kind` `file_event`) once they stayed unchanged for
+`AGENT_WATCH_DEBOUNCE` (1 min) after a change, or at the latest 10 minutes after the first change
+while they keep changing, under the same conditions as a scheduled one (a change that cannot
+start a review stays pending, is checked again at the next poll and is recorded like a skipped
+scheduled review). The first
+check of a folder only records its state, and switching proactive work on starts afresh, so
+earlier changes never start a review. Changes inside `/.ocis-agent` (the agent's memory) do not
+count. A folder that is missing or unreadable is skipped. Paused users are not checked: changes
+made while paused start one review after the resume.
+
 ### POST /agent-api/v1/proactive/run
 
 Empty body or `{}`. Starts a review now (`trigger_kind` `manual`), regardless of quiet hours and

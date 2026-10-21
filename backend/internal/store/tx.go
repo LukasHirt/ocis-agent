@@ -279,8 +279,13 @@ type Tx interface {
 	// after afterID; limit <= 0 means 100, the maximum is 1000.
 	ListProactiveDue(now time.Time, afterID string, limit int) ([]string, error)
 
+	// ListWatchUsers returns the ids of enrolled users with proactive work
+	// enabled, not paused, and at least one watch folder, in user id order
+	// after afterID; limit <= 0 means 100, the maximum is 1000.
+	ListWatchUsers(afterID string, limit int) ([]string, error)
+
 	// GetCursor returns the user's cursor; an absent cursor is a zero cursor
-	// with an empty, non-nil MemoryETags map.
+	// with empty, non-nil MemoryETags and WatchETags maps.
 	GetCursor(userID string) (Cursor, error)
 	// PutCursor inserts or replaces the user's cursor. ErrInvalid without a
 	// user id, ErrNotFound for an unknown user.

@@ -21,6 +21,10 @@ func TestProcessDefaults(t *testing.T) {
 		ShutdownDrain: 30 * time.Second,
 		SweepInterval: 15 * time.Minute,
 		LogLevel:      "info",
+
+		WatchPollInterval: 5 * time.Minute,
+		WatchDebounce:     time.Minute,
+		WatchPollsPerTick: 50,
 	}
 	if !reflect.DeepEqual(cfg.Process, want) {
 		t.Errorf("Process = %+v, want %+v", cfg.Process, want)
@@ -32,14 +36,17 @@ func TestProcessDefaults(t *testing.T) {
 
 func TestProcessOverrides(t *testing.T) {
 	cfg, err := Load(llmEnv(map[string]string{
-		"AGENT_ROLES":                " worker , api ,worker",
-		"AGENT_DEBUG_ADDR":           " 127.0.0.1:6060 ",
-		"AGENT_APPROVAL_TTL":         " 1m ",
-		"AGENT_TOKEN_TTL":            "720h",
-		"AGENT_DORMANCY_DAYS":        " 3650 ",
-		"AGENT_SHUTDOWN_DRAIN":       "10m",
-		"AGENT_TOKEN_SWEEP_INTERVAL": "24h",
-		"AGENT_LOG_LEVEL":            " debug ",
+		"AGENT_ROLES":                    " worker , api ,worker",
+		"AGENT_DEBUG_ADDR":               " 127.0.0.1:6060 ",
+		"AGENT_APPROVAL_TTL":             " 1m ",
+		"AGENT_TOKEN_TTL":                "720h",
+		"AGENT_DORMANCY_DAYS":            " 3650 ",
+		"AGENT_SHUTDOWN_DRAIN":           "10m",
+		"AGENT_TOKEN_SWEEP_INTERVAL":     "24h",
+		"AGENT_LOG_LEVEL":                " debug ",
+		"AGENT_WATCH_POLL_INTERVAL":      " 24h ",
+		"AGENT_WATCH_DEBOUNCE":           "10m",
+		"AGENT_WATCH_MAX_POLLS_PER_TICK": " 1000 ",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -53,6 +60,10 @@ func TestProcessOverrides(t *testing.T) {
 		ShutdownDrain: 10 * time.Minute,
 		SweepInterval: 24 * time.Hour,
 		LogLevel:      "debug",
+
+		WatchPollInterval: 24 * time.Hour,
+		WatchDebounce:     10 * time.Minute,
+		WatchPollsPerTick: 1000,
 	}
 	if !reflect.DeepEqual(cfg.Process, want) {
 		t.Errorf("Process = %+v, want %+v", cfg.Process, want)
@@ -146,14 +157,17 @@ func TestProcessLogLevel(t *testing.T) {
 
 func TestProcessInvalidValues(t *testing.T) {
 	bad := map[string][]string{
-		"AGENT_ROLES":                {"scheduler", ",", ",,"},
-		"AGENT_DEBUG_ADDR":           {"9301", ":0", ":65536"},
-		"AGENT_APPROVAL_TTL":         {"x", "59s", "0s", "-1h", "8761h", "5"},
-		"AGENT_TOKEN_TTL":            {"x", "59m", "0s", "-1h", "721h", "5"},
-		"AGENT_DORMANCY_DAYS":        {"x", "-1", "3651", "1.5", "30d"},
-		"AGENT_SHUTDOWN_DRAIN":       {"x", "-1s", "10m1s", "601s", "5"},
-		"AGENT_TOKEN_SWEEP_INTERVAL": {"x", "59s", "0s", "-1m", "24h1s", "1441m", "5"},
-		"AGENT_LOG_LEVEL":            {"trace", "INFO"},
+		"AGENT_ROLES":                    {"scheduler", ",", ",,"},
+		"AGENT_DEBUG_ADDR":               {"9301", ":0", ":65536"},
+		"AGENT_APPROVAL_TTL":             {"x", "59s", "0s", "-1h", "8761h", "5"},
+		"AGENT_TOKEN_TTL":                {"x", "59m", "0s", "-1h", "721h", "5"},
+		"AGENT_DORMANCY_DAYS":            {"x", "-1", "3651", "1.5", "30d"},
+		"AGENT_SHUTDOWN_DRAIN":           {"x", "-1s", "10m1s", "601s", "5"},
+		"AGENT_TOKEN_SWEEP_INTERVAL":     {"x", "59s", "0s", "-1m", "24h1s", "1441m", "5"},
+		"AGENT_LOG_LEVEL":                {"trace", "INFO"},
+		"AGENT_WATCH_POLL_INTERVAL":      {"x", "59s", "0s", "-1m", "24h1s", "5"},
+		"AGENT_WATCH_DEBOUNCE":           {"x", "9s", "0s", "-1s", "10m1s", "5"},
+		"AGENT_WATCH_MAX_POLLS_PER_TICK": {"x", "0", "-1", "1001", "1.5"},
 	}
 	for name, vals := range bad {
 		for _, v := range vals {
@@ -187,6 +201,9 @@ func TestProcessErrorsNeverEchoTheValue(t *testing.T) {
 		{"AGENT_TOKEN_SWEEP_INTERVAL", "zq7-dur"},
 		{"AGENT_TOKEN_SWEEP_INTERVAL", "7777777h"},
 		{"AGENT_LOG_LEVEL", "zq7-level"},
+		{"AGENT_WATCH_POLL_INTERVAL", "zq7-dur"},
+		{"AGENT_WATCH_DEBOUNCE", "7777777h"},
+		{"AGENT_WATCH_MAX_POLLS_PER_TICK", "7777777"},
 	} {
 		_, err := Load(llmEnv(map[string]string{c.name: c.val}))
 		if err == nil {
@@ -214,6 +231,8 @@ func TestProcessDurationEdges(t *testing.T) {
 		{"AGENT_TOKEN_TTL", time.Hour, 720 * time.Hour, func(p ProcessConfig) time.Duration { return p.TokenTTL }},
 		{"AGENT_SHUTDOWN_DRAIN", 0, 10 * time.Minute, func(p ProcessConfig) time.Duration { return p.ShutdownDrain }},
 		{"AGENT_TOKEN_SWEEP_INTERVAL", time.Minute, 24 * time.Hour, func(p ProcessConfig) time.Duration { return p.SweepInterval }},
+		{"AGENT_WATCH_POLL_INTERVAL", time.Minute, 24 * time.Hour, func(p ProcessConfig) time.Duration { return p.WatchPollInterval }},
+		{"AGENT_WATCH_DEBOUNCE", 10 * time.Second, 10 * time.Minute, func(p ProcessConfig) time.Duration { return p.WatchDebounce }},
 	} {
 		for _, ok := range []time.Duration{c.min, c.max} {
 			cfg, err := Load(llmEnv(map[string]string{c.name: ok.String()}))

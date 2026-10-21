@@ -58,6 +58,7 @@ type fakes struct {
 	sweepRes  auth.SweepResult
 	onCall    func(task string)
 	woken     int
+	unauth    []string
 }
 
 func newFakes() *fakes {
@@ -206,6 +207,19 @@ func (f *fakes) blockIfHung(ctx context.Context, task string) error {
 	}
 	<-ctx.Done()
 	return fmt.Errorf("hung call: %w", ctx.Err())
+}
+
+func (f *fakes) HandleUnauthorized(_ context.Context, userID string) error {
+	f.mu.Lock()
+	f.unauth = append(f.unauth, userID)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakes) unauthorizedUsers() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.unauth...)
 }
 
 func (f *fakes) PauseDormant(_ context.Context, limit int) (int, error) {

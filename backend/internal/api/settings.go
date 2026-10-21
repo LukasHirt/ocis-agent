@@ -246,13 +246,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 		}
 		if pol.ProactiveEnabled && slices.Contains(changed, "proactive_enabled") {
 			// switched on: the first scheduled sweep comes one interval
-			// from now, not at once
+			// from now, not at once, and the watch poll starts from fresh
+			// baselines (a change from before never fires a job)
 			c, err := tx.GetCursor(p.UserID)
 			if err != nil {
 				return err
 			}
 			at := s.d.Now()
 			c.LastSweepAt = &at
+			c.WatchETags, c.WatchDirtySince, c.WatchChangedAt = nil, nil, nil
 			if err := tx.PutCursor(c); err != nil {
 				return err
 			}

@@ -274,6 +274,9 @@ func (a *App) buildWorkers(opts Options) error {
 		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, RetrySettle: a.retrySettle,
 		SweepInterval: cfg.Process.SweepInterval,
 		Proactive:     scheduler.ProactiveConfig{Limits: proactiveLimits(cfg)},
+		Watch: scheduler.WatchConfig{
+			PollInterval: cfg.Process.WatchPollInterval, Debounce: cfg.Process.WatchDebounce, PerTick: cfg.Process.WatchPollsPerTick,
+		},
 	}); err != nil {
 		return fmt.Errorf("app: scheduler: %w", err)
 	}

@@ -1,9 +1,9 @@
 // Package scheduler runs the periodic maintenance of the sidecar: reaping
 // expired job leases, expiring and settling approvals, reconciling orphaned
 // calls, renewing and sweeping app tokens and pausing dormant users. It also
-// starts the scheduled proactive sweeps (proactive.go), which, unlike the
-// maintenance, never start anything while the kill switch is on or a user
-// is paused.
+// starts the scheduled proactive sweeps (proactive.go) and polls the users'
+// watch folders for changes (watch.go), which, unlike the maintenance, never
+// start anything while the kill switch is on or a user is paused.
 //
 // Every task has its own interval and runs from Tick when it is due. Tick is
 // synchronous and reads time only through Deps.Now, so tests drive it with a
@@ -11,7 +11,7 @@
 // switch and of user pauses: they keep the state consistent and the
 // credentials alive while the agent does no work. A task that fails or
 // panics is reported and does not stop the others. The tasks that call oCIS
-// (reconcile, renew, sweep) run last, each under Config.TaskTimeout, and
+// (reconcile, renew, sweep, watch) run last, each under Config.TaskTimeout, and
 // renew and sweep stop their batch at the first item that finds oCIS
 // unavailable; the rest is retried at the next run. Logs carry task names,
 // counts and fixed categories only, never error text (errors from oCIS, the
@@ -40,6 +40,7 @@ const (
 	TaskReconcile = "reconcile"
 	TaskRenew     = "renew"
 	TaskSweep     = "sweep"
+	TaskWatch     = "watch"
 )
 
 // Failure categories reported in TickResult.Failed and in the logs.
@@ -75,6 +76,8 @@ type Auth interface {
 	Renew(ctx context.Context, userID string) (auth.Renewed, error)
 	Sweep(ctx context.Context, userID string) (auth.SweepResult, error)
 	PauseDormant(ctx context.Context, limit int) (int, error)
+	// HandleUnauthorized is told about a 401 for the user's app credentials.
+	HandleUnauthorized(ctx context.Context, userID string) error
 }
 
 // Deps are the scheduler's collaborators; all are required.
@@ -99,6 +102,7 @@ type Intervals struct {
 	Sweep     time.Duration // one page of users per run; default 10s
 	Dormant   time.Duration // default 1h
 	Proactive time.Duration // default 1m
+	Watch     time.Duration // how often the watch poll looks for due users; default 10s
 	Tick      time.Duration // how often Run calls Tick; default 1s
 }
 
@@ -110,10 +114,11 @@ type Config struct {
 	RetrySettle   time.Duration // approvals.Config.RetrySettle (default 2m)
 	CallTimeout   time.Duration // the longest a tool call can take (default 5m)
 	SweepInterval time.Duration // how often each user's tokens are swept (default 15m)
-	TaskTimeout   time.Duration // deadline of one run of reconcile, renew and sweep (default 2m)
+	TaskTimeout   time.Duration // deadline of one run of reconcile, renew, sweep and watch (default 2m)
 	Intervals     Intervals
 	Batch         int // items per task run (default 100, at most 1000)
 	Proactive     ProactiveConfig
+	Watch         WatchConfig
 }
 
 const maxBatch = 1000
@@ -130,7 +135,7 @@ func (c Config) withDefaults() (Config, error) {
 		return c, fmt.Errorf("scheduler: batch above %d", maxBatch)
 	}
 	iv := &c.Intervals
-	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Proactive, iv.Tick} {
+	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Proactive, iv.Watch, iv.Tick} {
 		if d < 0 {
 			return c, errors.New("scheduler: negative interval")
 		}
@@ -152,6 +157,11 @@ func (c Config) withDefaults() (Config, error) {
 	if c.Proactive.Limits.DailyJobs == 0 {
 		c.Proactive.Limits.DailyJobs = 24
 	}
+	w, err := c.Watch.withDefaults()
+	if err != nil {
+		return c, err
+	}
+	c.Watch = w
 	def(&c.LeaseTTL, 2*time.Minute)
 	def(&c.RetrySettle, 2*time.Minute)
 	def(&c.CallTimeout, 5*time.Minute)
@@ -165,6 +175,7 @@ func (c Config) withDefaults() (Config, error) {
 	def(&iv.Sweep, 10*time.Second)
 	def(&iv.Dormant, time.Hour)
 	def(&iv.Proactive, time.Minute)
+	def(&iv.Watch, 10*time.Second)
 	def(&iv.Tick, time.Second)
 	return c, nil
 }
@@ -193,6 +204,7 @@ type Scheduler struct {
 	last  map[string]time.Time
 	sweep sweepState
 	pro   proactiveState
+	watch watchState
 }
 
 // New validates the dependencies and the configuration.
@@ -204,7 +216,7 @@ func New(d Deps, c Config) (*Scheduler, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState()}
+	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState(), watch: newWatchState()}
 	iv := c.Intervals
 	// The database-only tasks run first, so a slow or hung oCIS delays them
 	// by at most the three TaskTimeouts of the previous Tick.
@@ -217,6 +229,7 @@ func New(d Deps, c Config) (*Scheduler, error) {
 		{TaskReconcile, iv.Reconcile, true, s.reconcile},
 		{TaskRenew, iv.Renew, true, s.renew},
 		{TaskSweep, iv.Sweep, true, s.sweepRun},
+		{TaskWatch, iv.Watch, true, s.watchRun},
 	}
 	return s, nil
 }
