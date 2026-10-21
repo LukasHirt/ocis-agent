@@ -38,7 +38,8 @@ Every `/agent-api/v1` request passes these steps, in this order:
    8 KiB), the user's oCIS OIDC access token. oCIS itself decides: the sidecar asks Graph `/me`
    and the personal drive with it. Basic auth (an app token) is never accepted. Missing, malformed
    or rejected: `401 unauthenticated` with `WWW-Authenticate: Bearer`. oCIS unreachable:
-   `502 upstream_unavailable`; an account without a login name: `422 no_login_name`. The
+   `502 upstream_unavailable`; no answer from oCIS before the deadline: `503 unavailable`; an
+   account without a login name: `422 no_login_name`. The
    identity (user id, login name, drive) comes only from this validation, never from headers,
    the query or the body, and every lookup is scoped by it: another user's ids are `404`.
 5. **Per-user rate limit**: `AGENT_API_RATE` requests per second with a burst of
@@ -104,8 +105,9 @@ are exactly what executes, and the audit export is uncapped.
 
 No authentication and no rate limit. `200 {"status":"ok"}` while the API listener runs. The debug
 listener (`AGENT_DEBUG_ADDR`, default `:9301`) additionally serves `GET /healthz` and
-`GET /readyz` (`503 {"status":"not ready"}` while shutting down, before the secrets are ready or,
-with the worker role, without a live worker); see the deployment guide.
+`GET /readyz` (`503 {"status":"not ready"}` while shutting down, before the secrets are ready,
+when the database does not answer within 2 s or, with the worker role, without a live worker); see
+the deployment guide.
 
 ## Status and enrolment
 
@@ -157,8 +159,10 @@ failed the token creation), `429 rate_limited`.
 
 Body empty or `{"delete_memory": true|false}` (default false). Deletes every app token of this
 instance, optionally the memory folder `/.ocis-agent` (with the caller's bearer), audits
-`unenrolled` and deletes the user's state (policy, token, token labels, jobs); the audit log is
-kept. `204`. `404 not_found` when not enrolled. A failure before the last step leaves the user in
+`unenrolled` and deletes ALL of the user's state in the sidecar: policy, app token and token
+labels, jobs and their steps, approvals, idempotency records, cursors, and every conversation with
+its messages (the whole chat history). Only the audit log is kept. Memory files in oCIS stay
+unless `delete_memory` is true. `204`. `404 not_found` when not enrolled. A failure before the last step leaves the user in
 place, so the call can be repeated.
 
 ### DELETE /agent-api/v1/token
@@ -393,8 +397,11 @@ The same for `notes/<slug>`, where `{slug}` is the file name `<slug>.md`.
 Body `{"content": "…"}` (at most 64 KiB, else `413 too_large`) and the header
 `If-Match: <etag as loaded>` (exactly one ETag, no `*` and no list). `200 {"name", "etag", "diff"}`
 (`diff` untrusted, capped at 16 KiB). Errors: `428 precondition_required` without `If-Match`,
-`412 precondition_failed` when the file changed since it was loaded, `404 not_found` when it does
-not exist. The edit is audited as `memory_edited` with the name and the first 1500 bytes of the
+`400 invalid_request` for an `If-Match` that is `*`, a list, repeated or longer than 256 bytes,
+`400 invalid_request` for content that is not text (control characters other than tab, newline
+and carriage return), `412 precondition_failed` when the file changed since it was loaded,
+`404 not_found` when it does not exist, `422 file_too_large` when the existing file is larger
+than 2 MiB. The edit is audited as `memory_edited` with the name and the first 1500 bytes of the
 diff; a write whose outcome is uncertain is not audited.
 
 ### PUT /agent-api/v1/memory/notes/{slug}

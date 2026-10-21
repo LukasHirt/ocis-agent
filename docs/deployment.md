@@ -36,8 +36,8 @@ ocis-agent ── https ──> model endpoint (OpenAI-compatible chat completio
   Keep `AUTH_APP_ENABLE_IMPERSONATION=false`; the sidecar never needs it. Without app auth,
   enrolment fails or the agent's calls get `401` and the agent pauses itself with
   `credential_invalid`.
-- The sidecar's personal-drive and Graph calls use the user's login name; accounts without one
-  cannot enrol (`no_login_name`).
+- The agent calls oCIS with its app token by Basic auth, whose user name is the user's login name
+  (Graph `onPremisesSamAccountName`); accounts without one cannot enrol (`no_login_name`).
 
 ### The web extension
 
@@ -106,7 +106,8 @@ The worker role needs an OpenAI-compatible chat-completions endpoint with tool c
 docker build -t ocis-agent:dev .
 ```
 
-The image holds the static binary only and runs as uid/gid 10001 with its database in the `/data`
+The image is a small Alpine base (busybox `wget` serves the health check) with the static binary;
+it holds no configuration or secrets and runs as uid/gid 10001 with its database in the `/data`
 volume, so the root filesystem can be read-only. Port 9300 serves `/agent-api/`, port 9301 only the
 probes (`/healthz`, `/readyz`; never publish it). `deploy/docker-compose.example.yml` is a complete
 example next to an existing oCIS: env_file for the master key, a docker secret for the model key,
@@ -160,7 +161,7 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_MASTER_KEY` | required | Base64 of exactly 32 random bytes. Seals the app tokens in the database. Environment only (there is no file variant); see [Master key](#master-key). |
 | `AGENT_HTTP_ADDR` | `:9300` | The API listener. |
 | `AGENT_DEBUG_ADDR` | `:9301` | The probe listener (`GET /healthz`, `GET /readyz` only, no authentication); `off` disables it. |
-| `AGENT_DATA_DIR` | `/var/lib/ocis-agent` | Directory of the database (created with mode 0700). The image sets `/data`. |
+| `AGENT_DATA_DIR` | `/var/lib/ocis-agent` | Directory of the database. The image sets `/data`. At start-up the directory that holds the database file (this one, or that of `AGENT_SQLITE_PATH`) is created with mode 0700 if missing. |
 | `AGENT_SQLITE_PATH` | `<AGENT_DATA_DIR>/agent.db` | The database file, if it should live elsewhere. |
 | `AGENT_INSECURE` | `false` | Skip TLS certificate verification towards oCIS. Development with self-signed certificates only. |
 | `AGENT_ROLES` | `api,worker` | Comma-separated subset of `api` and `worker`. |
@@ -181,7 +182,7 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_API_STREAMS_PER_USER` | `3` | Open event streams per user (1 to 10). |
 | `AGENT_API_STREAMS_TOTAL` | `200` | Open event streams in the process (1 to 5000). |
 | `AGENT_USER_DAILY_TOKENS` | `200000` | The operator's cap and default of a user's daily model-token budget (1000 to 1000000000). |
-| `AGENT_LLM_BASE_URL` | none | The model endpoint, for example `https://api.openai.com/v1`. https, or http only for a loopback host. Required by the worker role and by every other `AGENT_LLM_*` variable. |
+| `AGENT_LLM_BASE_URL` | none | The model endpoint, for example `https://api.openai.com/v1`. https, or http only for a loopback host. Required by the worker role and by the other `AGENT_LLM_*` variables of this table except `AGENT_LLM_MAX_TOKENS`. |
 | `AGENT_LLM_PROVIDER` | `openai` | The wire protocol; only `openai` (OpenAI-compatible chat completions). |
 | `AGENT_LLM_MODEL` | none | The default model id; required with `AGENT_LLM_BASE_URL`. |
 | `AGENT_LLM_MODELS` | none | More models users may choose: comma-separated `id` or `id=Label`. |
@@ -192,7 +193,9 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_LLM_REASONING_EFFORT` | not sent | `none`, `low`, `medium` or `high`, sent as `reasoning_effort`. |
 | `AGENT_LLM_MAX_TOKENS` | `4096` | Output token limit per model call (64 to 100000). |
 
-A value outside its range stops the start with an error that names the variable (never its value).
+A value outside its range stops the start with an error that names the variable. Errors never
+contain the master key or the model key; an unreadable `AGENT_LLM_API_KEY_FILE` is reported with the
+operating system's error, which includes the file's path.
 
 ## Model setup
 
@@ -220,11 +223,26 @@ AGENT_LLM_TIMEOUT=10m
 Plain http and no key are allowed only because the host is loopback. Notes:
 
 - **Inside a container, the Docker host is not loopback.** `http://host.docker.internal:11434` is
-  refused (https required). Either run the sidecar in the host's network namespace
-  (`network_mode: host` on Linux) or in the Ollama container's (`network_mode: service:ollama`),
-  so `localhost` reaches Ollama, or put Ollama behind a TLS proxy and use its https URL; a
-  non-loopback endpoint then also needs an `AGENT_LLM_API_KEY`, which Ollama ignores, so any
-  placeholder value works.
+  refused (https required). The options:
+  - `network_mode: host` (Linux only; Docker Desktop on macOS and Windows does not share the
+    host's network this way): `localhost` is the host, and the sidecar's ports are the host's.
+  - `network_mode: service:ollama`, with Ollama in a container: the sidecar joins Ollama's network
+    namespace, so port 9300 must be published on (or reached through) the `ollama` service, not
+    the sidecar's. On a Mac, Ollama in a container has no GPU (Metal) acceleration.
+  - Run the sidecar binary on the host instead of in a container (`make sidecar` in development),
+    next to an Ollama on the host. This is the simplest choice on macOS.
+  - Development only: a loopback forwarder in the sidecar's network namespace, for example a
+    `socat` container with `network_mode: service:ocis-agent` running
+    `socat TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr TCP:host.docker.internal:11434`. The
+    sidecar then uses `http://127.0.0.1:11434/v1`, which is loopback for the configuration, but the
+    traffic crosses the Docker bridge in plain text. On Linux, add
+    `extra_hosts: ["host.docker.internal:host-gateway"]` to the sidecar service.
+  - Put Ollama behind a TLS proxy and use its https URL. A non-loopback endpoint also needs an
+    `AGENT_LLM_API_KEY`, which Ollama ignores, so any placeholder value works. The model client
+    trusts only the system CA bundle (`AGENT_INSECURE` does not apply to it): for a self-signed or
+    private-CA certificate mount the CA and set `SSL_CERT_FILE=/path/to/ca.pem` (or `SSL_CERT_DIR`).
+    Without that, every call fails at TLS, counts as an outage and the jobs end as "restarted too
+    many times", exactly like a timeout.
 - **Timeouts.** Local models are slow; a call that exceeds `AGENT_LLM_TIMEOUT` counts as an outage
   and the job is requeued with a delay, until `AGENT_MAX_RUNS` ends it ("restarted too many
   times"). Raise the timeout to a few minutes for local models.
@@ -281,8 +299,8 @@ user checks and resumes.
 - **There is no master-key rotation yet.** A changed key stops the start. If the key may have
   leaked, treat the sealed app tokens as compromised: users run the incident revoke (revoke all
   app tokens) or an oCIS admin deletes them, then start with a new key and a new database (keep a
-  backup of the old one for its audit log). The data-encryption keys inside the database can be
-  rotated, but that does not replace the master key.
+  backup of the old one for its audit log). An internal rotation of the data-encryption keys
+  exists, but no command exposes it, and it would not replace the master key anyway.
 
 ## Shutdown
 
@@ -302,7 +320,7 @@ Stops all agent work without stopping the process: no job is claimed and a runni
 next step. Maintenance (token renewal, expiry, dormancy) keeps running and the API keeps answering.
 
 ```
-ocis-agent killswitch on      # needs the same AGENT_DATA_DIR and a well-formed AGENT_MASTER_KEY
+ocis-agent killswitch on      # needs the same AGENT_DATA_DIR (or AGENT_SQLITE_PATH), a well-formed AGENT_MASTER_KEY
 ocis-agent killswitch status  # and AGENT_OCIS_URL, since the configuration is loaded first
 ocis-agent killswitch off
 ```
@@ -368,7 +386,8 @@ than this binary supports"), so a downgrade means restoring the backup taken bef
   missing (`AGENT_LLM_API_KEY` / `AGENT_LLM_API_KEY_FILE`).
 - **The extension keeps asking the user to log in, or every request is `401`.** The sidecar rejects
   bearers that oCIS does not accept for Graph `/me`. Check that the sidecar reaches oCIS at
-  `AGENT_OCIS_URL` (TLS errors with a private CA appear as `upstream_unavailable`, not `401`), that
+  `AGENT_OCIS_URL` (TLS errors with a private CA appear as `upstream_unavailable`, not `401`: mount
+  the CA and set `SSL_CERT_FILE` or `SSL_CERT_DIR`, or `AGENT_INSECURE=true` in development only), that
   `AGENT_OCIS_URL` is the same oCIS the browser is logged in to, and the proxy passes the
   `Authorization` header. A `403 origin_rejected` on every change means `AGENT_ALLOWED_ORIGIN` does
   not match the origin in the browser's address bar.

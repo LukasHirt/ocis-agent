@@ -8,6 +8,7 @@ package doccheck_test
 import (
 	"context"
 	"encoding/base64"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,6 +53,13 @@ func section(t *testing.T, doc, title string) string {
 
 func diff(t *testing.T, what string, code, doc []string) {
 	t.Helper()
+	seen := map[string]bool{}
+	for _, d := range doc {
+		if seen[d] {
+			t.Errorf("%s %q is documented more than once", what, d)
+		}
+		seen[d] = true
+	}
 	for _, c := range code {
 		if !slices.Contains(doc, c) {
 			t.Errorf("%s %q is not documented", what, c)
@@ -103,18 +111,30 @@ func TestAPIDocListsEveryErrorCode(t *testing.T) {
 // variable the configuration reads.
 func TestDeploymentDocListsEveryVariable(t *testing.T) {
 	read := map[string]bool{}
-	valid := map[string]string{
+	minimal := map[string]string{
 		"AGENT_OCIS_URL":   "https://ocis.example.com",
 		"AGENT_MASTER_KEY": base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}
-	getenv := func(name string) string {
-		read[name] = true
-		return valid[name]
+	// with a model configured, the reads of the LLM-enabled branch count too
+	withLLM := map[string]string{
+		"AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+		"AGENT_LLM_MODEL":    "example-model",
 	}
-	if _, err := config.Load(getenv); err != nil {
-		t.Fatalf("config.Load: %v", err)
+	maps.Copy(withLLM, minimal)
+	for _, env := range []map[string]string{minimal, withLLM} {
+		getenv := func(name string) string {
+			read[name] = true
+			return env[name]
+		}
+		cfg, err := config.Load(getenv)
+		if err != nil {
+			t.Fatalf("config.Load: %v", err)
+		}
+		if cfg.LLM.Enabled() != (env["AGENT_LLM_BASE_URL"] != "") {
+			t.Fatalf("the model is not configured as intended: %v", cfg.LLM.Enabled())
+		}
+		config.DatabasePath(getenv)
 	}
-	config.DatabasePath(getenv)
 	var names []string
 	for n := range read {
 		if strings.HasPrefix(n, "AGENT_") {
