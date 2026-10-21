@@ -122,28 +122,36 @@ func (c *Client) hrefToPath(href, drive string) (string, error) {
 	return rel, nil
 }
 
-func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string) ([]Entry, target, error) {
+// propfind sends a PROPFIND. In lenient mode a response entry whose href is
+// unusable (a control character in the name, outside the space, not
+// canonical) is left out and counted in dropped instead of failing the whole
+// listing; strict mode fails with ErrMalformed.
+func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string, lenient bool) (_ []Entry, dropped int, _ target, _ error) {
 	tg, err := davTarget(drive, p)
 	if err != nil {
-		return nil, target{}, err
+		return nil, 0, target{}, err
 	}
 	resp, err := c.do(ctx, cr, "PROPFIND", tg.esc, nil,
 		map[string]string{"Depth": depth, "Content-Type": "application/xml; charset=utf-8"}, []byte(propfindBody), maxBody)
 	if err != nil {
-		return nil, tg, err
+		return nil, 0, tg, err
 	}
 	if resp.status != http.StatusMultiStatus {
-		return nil, tg, statusError("PROPFIND", tg.log, resp.status, nil)
+		return nil, 0, tg, statusError("PROPFIND", tg.log, resp.status, nil)
 	}
 	var ms multistatus
 	if err := xml.Unmarshal(resp.body, &ms); err != nil {
-		return nil, tg, fmt.Errorf("ocisclient: PROPFIND: %w", ErrMalformed)
+		return nil, 0, tg, fmt.Errorf("ocisclient: PROPFIND: %w", ErrMalformed)
 	}
 	var out []Entry
 	for _, r := range ms.Responses {
 		ep, err := c.hrefToPath(r.Href, drive)
+		if err != nil && lenient {
+			dropped++
+			continue
+		}
 		if err != nil {
-			return nil, tg, err
+			return nil, 0, tg, err
 		}
 		e := Entry{Path: ep}
 		for _, ps := range r.Propstats {
@@ -163,14 +171,14 @@ func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string)
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return nil, tg, fmt.Errorf("ocisclient: PROPFIND: empty response: %w", ErrMalformed)
+		return nil, 0, tg, fmt.Errorf("ocisclient: PROPFIND: empty response: %w", ErrMalformed)
 	}
-	return out, tg, nil
+	return out, dropped, tg, nil
 }
 
 // Stat returns the entry at p (PROPFIND, depth 0).
 func (c *Client) Stat(ctx context.Context, cr Creds, drive, p string) (Entry, error) {
-	entries, tg, err := c.propfind(ctx, cr, drive, p, "0")
+	entries, _, tg, err := c.propfind(ctx, cr, drive, p, "0", false)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -182,11 +190,17 @@ func (c *Client) Stat(ctx context.Context, cr Creds, drive, p string) (Entry, er
 	return Entry{}, fmt.Errorf("ocisclient: PROPFIND: the response does not describe the requested path: %w", ErrMalformed)
 }
 
-// List returns the children of the folder at p, sorted by path.
+// List returns the children of the folder at p, sorted by path. Any unusable
+// entry fails the listing with ErrMalformed.
 func (c *Client) List(ctx context.Context, cr Creds, drive, p string) ([]Entry, error) {
-	entries, tg, err := c.propfind(ctx, cr, drive, p, "1")
+	children, _, err := c.list(ctx, cr, drive, p, false)
+	return children, err
+}
+
+func (c *Client) list(ctx context.Context, cr Creds, drive, p string, lenient bool) ([]Entry, int, error) {
+	entries, dropped, tg, err := c.propfind(ctx, cr, drive, p, "1", lenient)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var self *Entry
 	var children []Entry
@@ -199,13 +213,13 @@ func (c *Client) List(ctx context.Context, cr Creds, drive, p string) ([]Entry, 
 		}
 	}
 	if self == nil {
-		return nil, fmt.Errorf("ocisclient: PROPFIND: the response does not describe the requested path: %w", ErrMalformed)
+		return nil, 0, fmt.Errorf("ocisclient: PROPFIND: the response does not describe the requested path: %w", ErrMalformed)
 	}
 	if !self.Dir {
-		return nil, ErrNotDir
+		return nil, 0, ErrNotDir
 	}
 	sort.Slice(children, func(i, j int) bool { return children[i].Path < children[j].Path })
-	return children, nil
+	return children, dropped, nil
 }
 
 func etagFrom(h http.Header) string {

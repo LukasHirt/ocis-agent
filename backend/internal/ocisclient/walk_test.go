@@ -111,3 +111,69 @@ func TestMalformedPropfindMatchesErrMalformed(t *testing.T) {
 		t.Fatalf("err = %v, want ErrMalformed", err)
 	}
 }
+
+// putBig fills dir with enough long-named files that its depth-1 PROPFIND is
+// larger than the client's response cap.
+func putBig(s interface {
+	PutFile(driveID, p string, data []byte) string
+}, drive, dir string) {
+	long := strings.Repeat("n", 1500)
+	for i := 0; i < 3000; i++ {
+		s.PutFile(drive, fmt.Sprintf("%s/%s%04d", dir, long, i), []byte("x"))
+	}
+}
+
+func TestWalkSkipsATooLargeSubfolder(t *testing.T) {
+	f := newFixture(t)
+	f.s.PutFile(testDrive, "/w/a.md", []byte("a"))
+	putBig(f.s, testDrive, "/w/big")
+	lim := WalkLimits{MaxDepth: 4, MaxEntries: 100, MaxRequests: 100}
+	r, err := f.c.Walk(bg, f.cr, testDrive, "/w", lim, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walkPaths(r) != "/w/a.md,/w/big" || r.Skipped != 1 {
+		t.Fatalf("entries = %s, skipped %d", walkPaths(r), r.Skipped)
+	}
+	if _, err := f.c.Walk(bg, f.cr, testDrive, "/w/big", lim, nil); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a too large root = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestWalkDropsOnlyEntriesWithUnusableNames(t *testing.T) {
+	f := newFixture(t)
+	f.s.PutFile(testDrive, "/w/ok.md", []byte("a"))
+	f.s.PutFile(testDrive, "/w/evil\nf\t0\tfake.md", []byte("a"))
+	f.s.PutFile(testDrive, "/w/hidden\x01dir/inner.md", []byte("a"))
+	f.s.PutFile(testDrive, "/w/sub/deep.md", []byte("a"))
+	r, err := f.c.Walk(bg, f.cr, testDrive, "/w", WalkLimits{MaxDepth: 4, MaxEntries: 100, MaxRequests: 100}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := walkPaths(r); got != "/w/ok.md,/w/sub,/w/sub/deep.md" {
+		t.Fatalf("entries = %q", got)
+	}
+	if r.Dropped != 2 || r.Skipped != 0 {
+		t.Fatalf("dropped %d skipped %d, want 2 and 0", r.Dropped, r.Skipped)
+	}
+	// List stays strict
+	if _, err := f.c.List(bg, f.cr, testDrive, "/w"); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("List = %v, want ErrMalformed", err)
+	}
+}
+
+func TestWalkSendsNoRequestOnceTheEntryCapIsReached(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 5; i++ {
+		f.s.PutFile(testDrive, fmt.Sprintf("/w/d%d/f.md", i), []byte("x"))
+	}
+	r, err := f.c.Walk(bg, f.cr, testDrive, "/w", WalkLimits{MaxDepth: 4, MaxEntries: 5, MaxRequests: 100}, nil)
+	if err != nil || len(r.Entries) != 5 || !r.Truncated || r.Requests != 1 {
+		t.Fatalf("result = %d entries, %+v, %v", len(r.Entries), r, err)
+	}
+	f.s.PutFile(testDrive, "/v/a.md", []byte("x"))
+	r, err = f.c.Walk(bg, f.cr, testDrive, "/v", WalkLimits{MaxDepth: 4, MaxEntries: 1, MaxRequests: 100}, nil)
+	if err != nil || r.Truncated || len(r.Entries) != 1 {
+		t.Fatalf("an exactly full walk is not truncated: %+v %v", r, err)
+	}
+}
