@@ -33,25 +33,36 @@
         data-testid="agent-review-result"
         v-text="reviewResult"
       />
-      <p v-if="reviewError" class="agent-tasks-review-error" role="alert" data-testid="agent-review-error">
+      <p v-if="reviewError" class="agent-tasks-review-error agent-notice agent-notice--danger" role="alert" data-testid="agent-review-error">
         <span v-text="reviewError.message" />
         <span v-if="reviewError.detail" v-text="' ' + reviewError.detail" />
       </p>
 
-      <div v-if="jobs.error" class="agent-tasks-error">
-        <p role="alert" v-text="jobs.error" />
-        <oc-button size="small" :disabled="jobs.loading" @click="jobs.refresh()" v-text="$gettext('Try again')" />
-      </div>
-      <oc-spinner v-if="!jobs.loaded && !jobs.error" :aria-label="$gettext('Loading the tasks')" />
+      <ErrorState
+        v-if="jobs.error && (!jobs.loaded || !agent.serviceDown)"
+        class="agent-tasks-error"
+        :title="jobs.error"
+        :icon="agent.serviceDown ? 'wifi-off' : 'error-warning'"
+        :compact="jobs.loaded"
+        :busy="jobs.loading"
+        @retry="retry"
+      />
+      <LoadingState
+        v-if="!jobs.loaded && !jobs.error"
+        variant="rows"
+        :count="5"
+        :label="$gettext('Loading the tasks')"
+      />
 
       <template v-if="jobs.loaded">
         <ul class="agent-tasks-list">
           <li v-for="j in jobs.jobs" :key="j.id"><JobRow :job="j" /></li>
         </ul>
-        <p
+        <EmptyState
           v-if="jobs.jobs.length === 0 && !jobs.cursor"
           class="agent-tasks-empty"
-          v-text="jobs.filter === '' ? $gettext('No tasks yet.') : $gettext('No tasks in this state.')"
+          icon="task"
+          :title="jobs.filter === '' ? $gettext('No tasks yet.') : $gettext('No tasks in this state.')"
         />
         <oc-spinner v-if="jobs.moreLoading" size="small" :aria-label="$gettext('Loading more tasks')" />
         <oc-button
@@ -71,6 +82,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import JobRow from './tasks/JobRow.vue'
 import JobDetail from './tasks/JobDetail.vue'
+import EmptyState from '../components/state/EmptyState.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 import { JOB_FILTERS, useJobsStore } from '../stores/jobs'
 import { useAgentStore } from '../stores/agent'
 import { ApiError, describeError } from '../api/errors'
@@ -82,6 +96,11 @@ const props = defineProps<{ id?: string }>()
 const jobs = useJobsStore()
 const agent = useAgentStore()
 const { $gettext, interpolate } = useGettext()
+
+const retry = () => {
+  void jobs.refresh()
+  if (agent.serviceDown) void agent.retryNow()
+}
 
 // Review now: start a review (POST /proactive/run). The result and any
 // refusal are fixed texts; the server's own text is never shown.

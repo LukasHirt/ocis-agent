@@ -34,24 +34,35 @@
         <span v-text="$gettext('Export')" />
       </oc-button>
     </div>
-    <p v-if="audit.exportError" role="alert" class="agent-activity-export-error" v-text="audit.exportError" />
+    <p v-if="audit.exportError" role="alert" class="agent-activity-export-error agent-notice agent-notice--danger" v-text="audit.exportError" />
 
     <VerifyPanel />
 
-    <div v-if="audit.error" class="agent-activity-error">
-      <p role="alert" v-text="audit.error" />
-      <oc-button size="small" :disabled="audit.loading" @click="audit.refresh()" v-text="$gettext('Try again')" />
-    </div>
-    <oc-spinner v-if="!audit.loaded && !audit.error" :aria-label="$gettext('Loading the activity')" />
+    <ErrorState
+      v-if="audit.error && (!audit.loaded || !agent.serviceDown)"
+      class="agent-activity-error"
+      :title="audit.error"
+      :icon="agent.serviceDown ? 'wifi-off' : 'error-warning'"
+      :compact="audit.loaded"
+      :busy="audit.loading"
+      @retry="retry"
+    />
+    <LoadingState
+      v-if="!audit.loaded && !audit.error"
+      variant="rows"
+      :count="6"
+      :label="$gettext('Loading the activity')"
+    />
 
     <template v-if="audit.loaded">
       <ul class="agent-activity-list">
         <li v-for="e in audit.events" :key="e.seq"><EventRow :event="e" /></li>
       </ul>
-      <p
+      <EmptyState
         v-if="audit.events.length === 0"
         class="agent-activity-empty"
-        v-text="audit.kind === '' ? $gettext('No activity yet.') : $gettext('No events of this kind.')"
+        icon="history"
+        :title="audit.kind === '' ? $gettext('No activity yet.') : $gettext('No events of this kind.')"
       />
       <oc-spinner v-if="audit.olderLoading" size="small" :aria-label="$gettext('Loading older events')" />
       <oc-button
@@ -70,6 +81,10 @@ import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import EventRow from './activity/EventRow.vue'
 import VerifyPanel from './activity/VerifyPanel.vue'
+import EmptyState from '../components/state/EmptyState.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
+import { useAgentStore } from '../stores/agent'
 import { useAuditStore } from '../stores/audit'
 import { KNOWN_KINDS, kindLabel } from './activity/kinds'
 import { formatBytes } from '../util/format'
@@ -79,8 +94,14 @@ import { formatBytes } from '../util/format'
 // export. It listens for changes only while shown; leaving it stops a
 // running export.
 const audit = useAuditStore()
+const agent = useAgentStore()
 audit.syncSession() // the first render never shows an earlier session's events
 const { $gettext, interpolate } = useGettext()
+
+const retry = () => {
+  void audit.refresh()
+  if (agent.serviceDown) void agent.retryNow()
+}
 
 interface KindOption {
   value: string

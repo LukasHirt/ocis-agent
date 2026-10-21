@@ -70,7 +70,7 @@ describe('Layout', () => {
     const fetch = serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf())))
     const w = mountLayout(fetch)
     await flushPromises()
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await w.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
@@ -158,5 +158,16 @@ describe('Layout after the first load', () => {
     await useAgentStore().refreshStatus()
     await flushPromises()
     expect(w.find('.agent-banner').exists()).toBe(false)
+  })
+})
+
+describe('Layout before the first status', () => {
+  it('shows one error card and no banner when the service is down on the first load', async () => {
+    const w = mountLayout(serve(() => apiErr(503, 'unavailable')))
+    await flushPromises()
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('.agent-layout-loading [role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+    expect(w.find('.agent-banner').exists()).toBe(false)
+    expect(w.find('.host-rv').exists()).toBe(false)
   })
 })

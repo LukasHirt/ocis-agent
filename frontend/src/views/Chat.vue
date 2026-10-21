@@ -17,22 +17,39 @@
         <oc-button appearance="filled" size="small" :disabled="enrolling" @click="enable" v-text="$gettext('Enable agent')" />
       </div>
 
-      <p v-if="!id" class="agent-chat-pick" v-text="$gettext('Choose a conversation or start a new one.')" />
+      <EmptyState
+        v-if="!id"
+        class="agent-chat-pick"
+        icon="chat-3"
+        :title="$gettext('Choose a conversation or start a new one.')"
+      />
       <template v-else-if="chat.missing">
-        <p class="agent-chat-missing" role="alert" v-text="$gettext('This conversation no longer exists.')" />
+        <EmptyState
+          class="agent-chat-missing"
+          role="alert"
+          icon="chat-3"
+          :title="$gettext('This conversation no longer exists.')"
+        />
       </template>
       <template v-else>
         <h2 class="agent-chat-title">
           <TextBlock v-if="title" :text="title" />
           <span v-else v-text="$gettext('New conversation')" />
         </h2>
-        <div v-if="chat.messagesError" class="agent-chat-error">
-          <p role="alert" v-text="chat.messagesError" />
-          <oc-button size="small" :disabled="chat.messagesLoading" @click="chat.refreshOpen()" v-text="$gettext('Try again')" />
-        </div>
-        <oc-spinner
+        <ErrorState
+          v-if="chat.messagesError && (!chat.messagesLoaded || !agent.serviceDown)"
+          class="agent-chat-error"
+          :title="chat.messagesError"
+          :icon="agent.serviceDown ? 'wifi-off' : 'error-warning'"
+          :compact="chat.messagesLoaded"
+          :busy="chat.messagesLoading || chat.conversationsLoading"
+          @retry="retry"
+        />
+        <LoadingState
           v-if="!chat.messagesLoaded && !chat.messagesError"
-          :aria-label="$gettext('Loading the messages')"
+          variant="bubbles"
+          :count="3"
+          :label="$gettext('Loading the messages')"
         />
         <Thread
           v-if="chat.messagesLoaded"
@@ -67,6 +84,9 @@ import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref
 import { useGettext } from 'vue3-gettext'
 import type { RouteLocationRaw } from 'vue-router'
 import TextBlock from '../components/TextBlock.vue'
+import EmptyState from '../components/state/EmptyState.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 import ConversationList from './chat/ConversationList.vue'
 import Thread from './chat/Thread.vue'
 import Composer from './chat/Composer.vue'
@@ -134,6 +154,14 @@ const send = async () => {
   await nextTick()
   if (sent) threadView.value?.toBottom() // the new message, even when reading above
   composer.value?.focus() // the box was disabled while sending
+}
+
+// retry reads the open conversation again, and the list when that has no
+// data either (one failure, one error, one retry).
+const retry = () => {
+  void chat.refreshOpen()
+  if (!chat.conversationsLoaded) void chat.loadConversations()
+  if (agent.serviceDown) void agent.retryNow()
 }
 
 const creating = ref(false)
@@ -213,9 +241,5 @@ const enable = async () => {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
-}
-.agent-chat-error,
-.agent-chat-missing {
-  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 </style>

@@ -184,7 +184,7 @@ describe('JobDetail', () => {
     let fail = true
     const st = jobsState({ jobs: [jobOf('j1')] })
     const { w } = await setup(st, 'j1', (c) => (fail && c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined))
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()
@@ -218,4 +218,27 @@ describe('JobDetail', () => {
       expect(w.text()).not.toContain('stale')
     }
   )
+})
+
+describe('JobDetail during an outage', () => {
+  it('keeps the task and shows no inline error while the service is down', async () => {
+    let fail = false
+    const { w, jobs, store } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
+      fail && c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined
+    )
+    fail = true
+    await jobs.refreshDetail()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.find('.agent-job-detail-goal').text()).toBe('goal of j1')
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
+      c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined
+    )
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
 })

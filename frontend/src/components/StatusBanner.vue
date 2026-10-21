@@ -86,8 +86,11 @@ const platform = usePlatform()
 const { $gettext, interpolate } = useGettext()
 const busy = ref(false)
 
+// Before the first status the layout shows the one error card instead.
 const kind = computed(() =>
-  topBannerOf({ serviceDown: store.serviceDown, statusError: store.errors.status, status: store.status })
+  store.status
+    ? topBannerOf({ serviceDown: store.serviceDown, statusError: store.errors.status, status: store.status })
+    : null
 )
 const chip = computed(() => connectionChipOf(store.connection, store.serviceDown))
 

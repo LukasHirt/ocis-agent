@@ -28,7 +28,7 @@
           </oc-button>
         </li>
       </ul>
-      <p v-if="coreError" role="alert" class="agent-memory-error" v-text="coreError" />
+      <p v-if="coreError" role="alert" class="agent-memory-error agent-notice agent-notice--danger" v-text="coreError" />
     </section>
 
     <section data-testid="agent-memory-notes">
@@ -49,10 +49,11 @@
           </span>
         </li>
       </ul>
-      <p
+      <EmptyState
         v-if="mem.listLoaded && mem.notes.length === 0"
         class="agent-memory-empty"
-        v-text="$gettext('No notes yet.')"
+        icon="file-text"
+        :title="$gettext('No notes yet.')"
       />
     </section>
   </div>
@@ -61,6 +62,7 @@
 <script setup lang="ts">
 import { getCurrentInstance, ref } from 'vue'
 import { useGettext } from 'vue3-gettext'
+import EmptyState from '../../components/state/EmptyState.vue'
 import { useMemoryStore } from '../../stores/memory'
 import { formatBytes, formatTime } from '../../util/format'
 import { MAX_FILE_BYTES } from '../../util/memoryText'

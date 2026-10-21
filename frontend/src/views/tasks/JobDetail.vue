@@ -5,14 +5,24 @@
       <span v-text="$gettext('All tasks')" />
     </router-link>
 
-    <p v-if="jobs.actionError" class="agent-job-detail-alert" role="alert" v-text="jobs.actionError" />
+    <p v-if="jobs.actionError" class="agent-job-detail-alert agent-notice agent-notice--danger" role="alert" v-text="jobs.actionError" />
 
-    <p v-if="jobs.detailMissing" class="agent-job-detail-missing" v-text="$gettext('This task no longer exists.')" />
-    <div v-else-if="jobs.detailError" class="agent-job-detail-loaderror">
-      <p role="alert" v-text="jobs.detailError" />
-      <oc-button size="small" :disabled="jobs.detailLoading" @click="jobs.refreshDetail()" v-text="$gettext('Try again')" />
-    </div>
-    <oc-spinner v-else-if="!job" :aria-label="$gettext('Loading the task')" />
+    <EmptyState
+      v-if="jobs.detailMissing"
+      class="agent-job-detail-missing"
+      icon="task"
+      :title="$gettext('This task no longer exists.')"
+    />
+    <ErrorState
+      v-else-if="jobs.detailError && (!job || !agent.serviceDown)"
+      class="agent-job-detail-loaderror"
+      :title="jobs.detailError"
+      :icon="agent.serviceDown ? 'wifi-off' : 'error-warning'"
+      :compact="!!job"
+      :busy="jobs.detailLoading"
+      @retry="retry"
+    />
+    <LoadingState v-else-if="!job" variant="cards" :count="2" :label="$gettext('Loading the task')" />
 
     <template v-if="job && !jobs.detailMissing">
       <h2 v-text="$gettext('Task')" />
@@ -147,6 +157,10 @@ import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
 import RiskBadge from '../../components/RiskBadge.vue'
+import EmptyState from '../../components/state/EmptyState.vue'
+import ErrorState from '../../components/state/ErrorState.vue'
+import LoadingState from '../../components/state/LoadingState.vue'
+import { useAgentStore } from '../../stores/agent'
 import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
 import { isLiveState, useJobsStore } from '../../stores/jobs'
@@ -158,7 +172,13 @@ import type { JobState, PartialState } from '../../api/types'
 // a chat job links to its conversation.
 // Goal, answer, tools, statuses and summaries are untrusted text.
 const jobs = useJobsStore()
+const agent = useAgentStore()
 const { $gettext, interpolate } = useGettext()
+
+const retry = () => {
+  void jobs.refreshDetail()
+  if (agent.serviceDown) void agent.retryNow()
+}
 
 const detail = computed(() => jobs.detail)
 const job = computed(() => jobs.detail)

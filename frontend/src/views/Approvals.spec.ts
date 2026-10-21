@@ -124,7 +124,7 @@ describe('Approvals', () => {
       { job: 'j1' }
     )
     expect(w.text()).not.toContain('Nothing of this task needs your approval')
-    expect(w.find('.agent-approvals-job-error [role=alert]').text()).toBe(
+    expect(w.find('.agent-approvals-job-error .agent-state-title').text()).toBe(
       'The agent service is not reachable right now. Try again later.'
     )
     fail = false
@@ -163,7 +163,7 @@ describe('Approvals', () => {
         fail && c.path === '/approvals' ? apiErr(503, 'unavailable') : undefined
       )
     )
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     expect(w.text()).not.toContain('Nothing needs your approval')
     fail = false
     await button(w, 'Try again')!.trigger('click')
@@ -423,7 +423,7 @@ describe('Approvals', () => {
     )
     await button(w, 'History')!.trigger('click')
     await flushPromises()
-    expect(w.find('.agent-history [role=alert]').text()).toBe('Something went wrong in the agent service.')
+    expect(w.find('.agent-history [role=alert] .agent-state-title').text()).toBe('Something went wrong in the agent service.')
     fail = false
     await w.find('.agent-history').findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
@@ -669,5 +669,35 @@ describe('Approvals', () => {
     store.approvals = { ...store.approvals, complete: false }
     await flushPromises()
     expect(w.text()).toContain('More approvals are waiting than are shown here')
+  })
+})
+
+describe('Approvals during an outage', () => {
+  it('keeps the approvals and shows no inline error while the service is down', async () => {
+    let fail = false
+    const { w, store } = await setup(
+      serve({ pending: [approvalOf('a1')] }, {}, (c) =>
+        fail && c.path === '/approvals' ? apiErr(503, 'unavailable') : undefined
+      )
+    )
+    fail = true
+    await store.refreshApprovals()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.findAll('.agent-card')).toHaveLength(1)
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const { w } = await setup(
+      serve({ pending: [approvalOf('a1')] }, {}, (c) => (c.path === '/approvals' ? apiErr(503, 'unavailable') : undefined))
+    )
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
+
+  it('shows an empty state with an icon', async () => {
+    const { w } = await setup(serve({ pending: [] }))
+    expect(w.find('.agent-approvals-empty [data-stub=OcIcon]').attributes('data-icon')).toBe('checkbox-circle')
   })
 })

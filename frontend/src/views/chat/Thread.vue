@@ -1,7 +1,7 @@
 <template>
   <div ref="scroller" class="agent-thread-scroll" @scroll.passive="onScroll">
     <div v-if="olderCursor || olderError" class="agent-thread-older">
-      <p v-if="olderError" role="alert" v-text="olderError" />
+      <p v-if="olderError" class="agent-notice agent-notice--danger" role="alert" v-text="olderError" />
       <oc-spinner v-if="olderLoading" size="small" :aria-label="$gettext('Loading older messages')" />
       <oc-button
         v-else-if="olderCursor"
@@ -21,10 +21,11 @@
         <PartialBubble v-if="partials[m.id]" :partial="partials[m.id]" />
       </template>
     </div>
-    <p
+    <EmptyState
       v-if="loaded && messages.length === 0"
       class="agent-thread-empty"
-      v-text="$gettext('No messages yet. Ask the agent something.')"
+      icon="chat-3"
+      :title="$gettext('No messages yet. Ask the agent something.')"
     />
   </div>
 </template>
@@ -33,6 +34,7 @@
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import MessageBubble from './MessageBubble.vue'
+import EmptyState from '../../components/state/EmptyState.vue'
 import PartialBubble from './PartialBubble.vue'
 import type { Message } from '../../api/types'
 import type { AgentNotice, JobApprovals, PartialAnswer } from '../../stores/chat'
@@ -127,9 +129,5 @@ defineExpose({ toBottom })
   flex-direction: column;
   align-items: center;
   gap: 0.25rem;
-}
-.agent-thread-empty {
-  color: var(--oc-color-text-muted, #555);
-  text-align: center;
 }
 </style>

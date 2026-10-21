@@ -33,11 +33,21 @@
       </div>
       <NewFile v-if="creating" @created="opened" @cancel="creating = false" />
 
-      <div v-if="mem.listError" class="agent-memory-error">
-        <p role="alert" v-text="mem.listError" />
-        <oc-button size="small" :disabled="mem.listLoading" @click="mem.refreshList()" v-text="$gettext('Try again')" />
-      </div>
-      <oc-spinner v-if="!mem.listLoaded && !mem.listError" :aria-label="$gettext('Loading the memory files')" />
+      <ErrorState
+        v-if="mem.listError && (!mem.listLoaded || !agent.serviceDown)"
+        class="agent-memory-error"
+        :title="mem.listError"
+        :icon="agent.serviceDown ? 'wifi-off' : 'error-warning'"
+        :compact="mem.listLoaded"
+        :busy="mem.listLoading"
+        @retry="retry"
+      />
+      <LoadingState
+        v-if="!mem.listLoaded && !mem.listError"
+        variant="rows"
+        :count="3"
+        :label="$gettext('Loading the memory files')"
+      />
       <FileList v-if="mem.listLoaded" />
     </template>
   </section>
@@ -49,7 +59,10 @@ import { useGettext } from 'vue3-gettext'
 import FileList from './memory/FileList.vue'
 import NewFile from './memory/NewFile.vue'
 import Viewer from './memory/Viewer.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 import { useMemoryStore } from '../stores/memory'
+import { useAgentStore } from '../stores/agent'
 import { fileRoute } from './memory/route'
 
 // The memory screen: the memory files, or the route's file with its
@@ -57,7 +70,13 @@ import { fileRoute } from './memory/route'
 // only while shown.
 const props = defineProps<{ name?: string }>()
 const mem = useMemoryStore()
+const agent = useAgentStore()
 useGettext()
+
+const retry = () => {
+  void mem.refreshList()
+  if (agent.serviceDown) void agent.retryNow()
+}
 
 const creating = ref(false)
 const instance = getCurrentInstance()

@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Memory from './Memory.vue'
 import { PLATFORM_KEY } from '../platform'
 import { fakeServer, startStore } from '../test/server'
+import { apiErr } from '../test/fixtures'
 import { memoryHandler, memoryState, setFile, type MemoryState } from '../test/memory'
 import { useMemoryStore } from '../stores/memory'
 
@@ -97,5 +98,32 @@ describe('Memory without a session', () => {
     wrapper = mount(Memory, { global: { mocks: { $router: { push: vi.fn(), beforeEach: vi.fn(() => () => {}) } } } })
     await flushPromises()
     expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})
+
+describe('Memory during an outage', () => {
+  it('keeps the files and shows no inline error while the service is down', async () => {
+    const st = memoryState({ 'notes/a.md': 'a' })
+    const { w, store } = await setup(st)
+    st.list = apiErr(503, 'unavailable')
+    await useMemoryStore().refreshList()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('.agent-memory-error').exists()).toBe(false)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.findAll('.agent-memory-file-name')).toHaveLength(1)
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const st = memoryState()
+    st.list = apiErr(503, 'unavailable')
+    const { w } = await setup(st)
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
+
+  it('shows an empty state with an icon when there are no notes', async () => {
+    const { w } = await setup(memoryState())
+    expect(w.find('.agent-memory-empty [data-stub=OcIcon]').attributes('data-icon')).toBe('file-text')
   })
 })

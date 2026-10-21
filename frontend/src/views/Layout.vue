@@ -5,11 +5,14 @@
     </div>
     <main class="agent-main">
       <div v-if="!store.status" class="agent-layout-loading">
-        <template v-if="store.errors.status">
-          <p role="alert" v-text="store.errors.status" />
-          <oc-button :disabled="store.loading.status" @click="store.refreshStatus()" v-text="$gettext('Try again')" />
-        </template>
-        <oc-spinner v-else :aria-label="$gettext('Loading the agent')" />
+        <ErrorState
+          v-if="store.errors.status"
+          :title="store.errors.status"
+          :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+          :busy="store.loading.status || store.reconnecting"
+          @retry="retry"
+        />
+        <LoadingState v-else variant="spinner" :label="$gettext('Loading the agent')" />
       </div>
       <template v-else>
         <Enrol v-if="!store.status.enrolled" />
@@ -27,6 +30,8 @@ import { useAgentStore } from '../stores/agent'
 import { usePlatform } from '../platform'
 import StatusBanner from '../components/StatusBanner.vue'
 import Enrol from './Enrol.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 
 // Layout is the frame of every agent page: it keeps the store running while
 // the app is open, shows the status banner, and the enrolment until the
@@ -35,6 +40,11 @@ import Enrol from './Enrol.vue'
 const store = useAgentStore()
 const platform = usePlatform()
 const { $gettext } = useGettext()
+
+const retry = () => {
+  void store.refreshStatus()
+  if (store.serviceDown) void store.retryNow()
+}
 
 onMounted(() => store.start({ platform, gettext: $gettext }))
 onBeforeUnmount(() => store.stop())
@@ -45,7 +55,8 @@ onBeforeUnmount(() => store.stop())
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
-  padding: 2rem;
+  justify-content: center;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-5);
 }
 </style>

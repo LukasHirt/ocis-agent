@@ -70,7 +70,7 @@ describe('ConversationList', () => {
     let fail = true
     const st = chatState({ conversations: [conversationOf('c1')] })
     const { w } = await setup(st, (c) => (fail && c.path === '/conversations' ? apiErr(503, 'unavailable') : undefined))
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()

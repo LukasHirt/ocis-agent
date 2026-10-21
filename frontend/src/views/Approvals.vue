@@ -20,24 +20,31 @@
         <span v-text="$gettext('Showing the approvals of one task.')" />
         <router-link :to="{ name: `${APPID}-approvals` }" v-text="$gettext('Show all approvals')" />
       </p>
-      <div v-if="store.errors.approvals" class="agent-approvals-error">
-        <p role="alert" v-text="store.errors.approvals" />
-        <oc-button
-          :disabled="store.loading.approvals"
-          @click="store.refreshApprovals()"
-          v-text="$gettext('Try again')"
-        />
-      </div>
-      <div v-if="job && jobError" class="agent-approvals-job-error">
-        <p role="alert" v-text="jobError" />
-        <oc-button :disabled="jobLoading" @click="loadJob" v-text="$gettext('Try again')" />
-      </div>
-      <oc-spinner v-if="!shownLoaded" :aria-label="$gettext('Loading the approvals')" />
+      <ErrorState
+        v-if="store.errors.approvals && (!hasData || !store.serviceDown)"
+        class="agent-approvals-error"
+        :title="store.errors.approvals"
+        :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+        :compact="hasData"
+        :busy="store.loading.approvals"
+        @retry="retryInbox"
+      />
+      <ErrorState
+        v-if="job && jobError && !(store.errors.approvals && !hasData) && (jobList === null || !store.serviceDown)"
+        class="agent-approvals-job-error"
+        :title="jobError"
+        :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+        :compact="jobList !== null"
+        :busy="jobLoading"
+        @retry="retryJob"
+      />
+      <LoadingState v-if="!shownLoaded" variant="cards" :count="2" :label="$gettext('Loading the approvals')" />
       <template v-else>
-        <p
+        <EmptyState
           v-if="groups.length === 0 && !store.errors.approvals && !(job && (jobError || !jobComplete))"
           class="agent-approvals-empty"
-          v-text="
+          icon="checkbox-circle"
+          :title="
             job
               ? $gettext('Nothing of this task needs your approval')
               : verify.length > 0
@@ -78,11 +85,15 @@
           v-if="historyDone && !historyCursor && history.length === 0"
           v-text="$gettext('No decided approvals yet')"
         />
-        <div v-if="historyError">
-          <p role="alert" v-text="historyError" />
-          <oc-button :disabled="historyLoading" @click="loadHistory" v-text="$gettext('Try again')" />
-        </div>
-        <oc-spinner v-if="historyLoading" :aria-label="$gettext('Loading the history')" />
+        <ErrorState
+          v-if="historyError && (history.length === 0 || !store.serviceDown)"
+          class="agent-history-error"
+          :compact="history.length > 0"
+          :title="historyError"
+          :busy="historyLoading"
+          @retry="loadHistory"
+        />
+        <LoadingState v-if="historyLoading" variant="spinner" :label="$gettext('Loading the history')" />
         <oc-button
           v-else-if="historyCursor && !historyError"
           appearance="outline"
@@ -102,6 +113,9 @@ import { usePlatform } from '../platform'
 import { createClient } from '../api/client'
 import { describeError, isAbortError } from '../api/errors'
 import type { Approval, ApprovalState } from '../api/types'
+import EmptyState from '../components/state/EmptyState.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 import ApprovalCard from './approvals/ApprovalCard.vue'
 import JobGroup from './approvals/JobGroup.vue'
 import { provideDecisions } from './approvals/decisions'
@@ -215,6 +229,26 @@ watch(
     if (props.job) void loadJob()
   }
 )
+
+// hasData: the inbox list has been read successfully at least once in this
+// session (a failed first read leaves an empty list that is not data).
+const hasData = ref(store.status !== null && !store.loading.approvals && !store.errors.approvals)
+watch(
+  () => [store.status === null, store.loading.approvals, store.errors.approvals] as const,
+  ([reset, busy, err]) => {
+    if (reset) hasData.value = false
+    else if (!busy && !err) hasData.value = true
+  }
+)
+
+const retryInbox = () => {
+  void store.refreshApprovals()
+  if (store.serviceDown) void store.retryNow()
+}
+const retryJob = () => {
+  void loadJob()
+  if (store.serviceDown) void store.retryNow()
+}
 
 const shownLoaded = computed(() => (props.job ? jobList.value !== null || jobError.value !== null : loaded.value))
 

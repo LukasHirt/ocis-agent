@@ -95,7 +95,7 @@ describe('Settings', () => {
     let fail = true
     const s = settingsServer()
     const { w } = await setup((c) => (c.path === '/settings' && fail ? apiErr(503, 'unavailable') : s.handler(c)))
-    expect(w.find('[role="alert"]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role="alert"] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()
@@ -584,5 +584,26 @@ describe('Settings', () => {
       expect(JSON.stringify(s.put)).toBe('[{"proactive_enabled":true}]')
       expect(input(w, 'agent-quiet-hours').element.value).toBe('01:00-02:00')
     })
+  })
+})
+
+describe('Settings during an outage', () => {
+  it('shows no inline error while the service is down and the form is loaded', async () => {
+    let fail = false
+    const s = settingsServer()
+    const { w, store } = await setup((c) => (c.path === '/settings' && fail ? apiErr(503, 'unavailable') : s.handler(c)))
+    fail = true
+    await store.refreshSettings()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role="alert"]').exists()).toBe(false)
+    expect(button(w, 'Save')).toBeDefined()
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const s = settingsServer()
+    const { w } = await setup((c) => (c.path === '/settings' ? apiErr(503, 'unavailable') : s.handler(c)))
+    expect(w.findAll('[role="alert"]')).toHaveLength(1)
+    expect(w.find('[role="alert"] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
   })
 })

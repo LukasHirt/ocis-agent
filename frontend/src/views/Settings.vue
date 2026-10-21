@@ -4,21 +4,25 @@
     <AgentSection />
 
     <div v-if="!base" class="agent-settings-loading">
-      <template v-if="store.errors.settings">
-        <p role="alert" v-text="store.errors.settings" />
-        <oc-button
-          :disabled="store.loading.settings"
-          @click="store.refreshSettings()"
-          v-text="$gettext('Try again')"
-        />
-      </template>
-      <oc-spinner v-else :aria-label="$gettext('Loading the settings')" />
+      <ErrorState
+        v-if="store.errors.settings"
+        :title="store.errors.settings"
+        :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+        :busy="store.loading.settings"
+        @retry="retry"
+      />
+      <LoadingState v-else variant="cards" :count="3" :label="$gettext('Loading the settings')" />
     </div>
     <div v-else class="agent-settings-form">
-      <p v-if="store.errors.settings" class="agent-settings-error" role="alert">
-        <span v-text="store.errors.settings" />
-        <span v-text="' ' + $gettext('What is shown may be out of date.')" />
-      </p>
+      <ErrorState
+        v-if="store.errors.settings && !store.serviceDown"
+        compact
+        class="agent-settings-error"
+        :title="store.errors.settings"
+        :text="$gettext('What is shown may be out of date.')"
+        :busy="store.loading.settings"
+        @retry="retry"
+      />
       <p
         v-if="changedElsewhere"
         class="agent-settings-note"
@@ -32,7 +36,7 @@
       <BudgetSection />
       <ModelSection />
       <PolicySection />
-      <p v-if="saveError" class="agent-settings-error" data-testid="agent-save-error" role="alert">
+      <p v-if="saveError" class="agent-settings-error agent-notice agent-notice--danger" data-testid="agent-save-error" role="alert">
         <span v-text="saveError.message" />
         <span v-if="saveError.detail" v-text="' ' + saveError.detail" />
       </p>
@@ -58,6 +62,8 @@ import BudgetSection from './settings/BudgetSection.vue'
 import ModelSection from './settings/ModelSection.vue'
 import PolicySection from './settings/PolicySection.vue'
 import TokenSection from './settings/TokenSection.vue'
+import ErrorState from '../components/state/ErrorState.vue'
+import LoadingState from '../components/state/LoadingState.vue'
 import { provideSettingsForm } from './settings/form'
 import { buildUpdate, draftOf, draftsEqual, formProblems, sameSettings, type Draft } from './settings/rules'
 import { useReport, type ErrorText } from './settings/report'
@@ -70,6 +76,11 @@ const store = useAgentStore()
 const platform = usePlatform()
 const { $gettext } = useGettext()
 const { describe } = useReport()
+
+const retry = () => {
+  void store.refreshSettings()
+  if (store.serviceDown) void store.retryNow()
+}
 
 const base = shallowRef<Settings | null>(null)
 const draft = reactive<Draft>({
