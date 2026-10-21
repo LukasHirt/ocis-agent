@@ -4,7 +4,7 @@ import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
 import { ApiError, describeError, isAbortError } from '../api/errors'
 import { coalesce } from '../util/coalesce'
 import { byId, listOf, mergeHead } from '../util/lists'
-import type { Approval, Conversation, JobState, Message, PauseReason, Sent } from '../api/types'
+import type { Approval, Conversation, JobState, Message, PartialState, PauseReason, Sent } from '../api/types'
 import { MAX_MESSAGE_BYTES, MAX_TITLE_CHARS, checkMessage, checkTitle, type TextProblem } from '../util/chatText'
 import { formatDuration } from '../util/format'
 
@@ -41,6 +41,26 @@ const LIVE_STATES: readonly string[] = [
 ]
 
 export const isLiveJob = (state: string | undefined): boolean => state !== undefined && LIVE_STATES.includes(state)
+
+// The unfinished answer of a running question: its text so far (untrusted)
+// and whether the model is thinking (no text yet) or writing.
+export interface PartialAnswer {
+  text: string
+  state: 'thinking' | 'writing'
+}
+
+const PARTIAL_STATES: readonly string[] = ['thinking' satisfies PartialState, 'writing' satisfies PartialState]
+
+// partialOf is the unfinished answer to show under a question: only while
+// its job is running and says what it is doing (like the server, which
+// blanks it otherwise; a stale one is never shown as a result).
+const partialOf = (m: Message): PartialAnswer | null => {
+  const j = m.job
+  if (m.role !== 'user' || !j || j.state !== ('running' satisfies JobState)) return null
+  const state = String(j.partial_state ?? '')
+  if (!PARTIAL_STATES.includes(state)) return null
+  return { text: typeof j.partial === 'string' ? j.partial : '', state: state as PartialAnswer['state'] }
+}
 
 const noticeOf = (a: Sent['agent'] | undefined): AgentNotice | undefined => {
   if (!a || typeof a !== 'object') return undefined
@@ -95,6 +115,18 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
 
   // the chronological thread (oldest first)
   const thread = computed(() => [...messages.value].reverse())
+  // the unfinished answers by question id; a question whose answer is
+  // listed already shows none (the answer replaces it in the same read)
+  const partials = computed(() => {
+    const answered = new Set<string>()
+    for (const m of messages.value) if (m.role !== 'user' && m.job_id) answered.add(m.job_id)
+    const out: Record<string, PartialAnswer> = {}
+    for (const m of messages.value) {
+      const p = partialOf(m)
+      if (p && !answered.has(m.job!.id)) out[m.id] = p
+    }
+    return out
+  })
   const currentConversation = computed(
     () => conversations.value.find((c) => c.id === current.value) ?? detail.value ?? null
   )
@@ -680,6 +712,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     currentConversation,
     messages,
     thread,
+    partials,
     olderCursor,
     messagesLoading,
     messagesLoaded,

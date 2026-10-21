@@ -436,6 +436,8 @@ func (t *tx) ResumeJobIfSettled(userID, jobID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	return true, t.dropPartial(jobID)
 }

@@ -49,6 +49,13 @@ func conversationViewOf(c store.Conversation) conversationView {
 	return conversationView{ID: c.ID, Title: c.Title, CreatedAt: timeView(c.CreatedAt), UpdatedAt: timeView(c.UpdatedAt)}
 }
 
+// messageJobViewOf is the view of the job answering a user message.
+func messageJobViewOf(id string, js store.JobStatus) *messageJobView {
+	v := &messageJobView{ID: id, State: string(js.State), Error: capText(js.Error, maxReasonView)}
+	v.Partial, v.PartialState = partialView(js.State, js.JobPartial)
+	return v
+}
+
 // messageViewOf caps the content of every role (only assistant and system
 // messages can be longer than the cap in the store, but the cap holds for
 // all).
@@ -312,7 +319,7 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) error {
 			func(m store.Message) (any, error) {
 				v := messageViewOf(m)
 				if js, ok := jobs[m.JobID]; ok && m.Role == store.RoleUser {
-					v.Job = &messageJobView{ID: m.JobID, State: string(js.State), Error: capText(js.Error, maxReasonView)}
+					v.Job = messageJobViewOf(m.JobID, js)
 				}
 				return v, nil
 			})
@@ -465,7 +472,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		mv := messageViewOf(msg)
-		mv.Job = &messageJobView{ID: job.ID, State: string(job.State), Error: job.Error}
+		mv.Job = messageJobViewOf(job.ID, store.JobStatus{State: job.State, Error: job.Error})
 		v = sentView{
 			Message: mv,
 			Job:     sentJobView{ID: job.ID, State: string(job.State)},

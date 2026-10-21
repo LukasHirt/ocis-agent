@@ -572,3 +572,21 @@ func TestTheModelClientGetsTheTimeoutAndReasoningEffort(t *testing.T) {
 		t.Errorf("NewOpenAI: %v", err)
 	}
 }
+
+// Streaming and the idle timeout reach the OpenAI client.
+func TestTheModelClientGetsTheStreamingSettings(t *testing.T) {
+	cat, err := llm.NewCatalog("qwen3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := openAIConfig(config.LLMConfig{
+		BaseURL: "http://localhost:11434/v1", Catalog: cat, AllowHTTP: true,
+		Stream: true, IdleTimeout: 3 * time.Minute, PlainTimeout: 2 * time.Minute,
+	})
+	if !c.Stream || c.IdleTimeout != 3*time.Minute || c.PlainTimeout != 2*time.Minute {
+		t.Errorf("OpenAIConfig = %+v", c)
+	}
+	if c := openAIConfig(config.LLMConfig{BaseURL: "http://localhost:11434/v1", Catalog: cat}); c.Stream {
+		t.Errorf("streaming on although the configuration turned it off: %+v", c)
+	}
+}

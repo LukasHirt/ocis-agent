@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -15,8 +16,37 @@ const (
 	defaultJobLimit = 50
 	maxJobLimit     = 500
 
-	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at`
+	// insertJobColumns are the columns of the jobs table InsertJob fills.
+	insertJobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at`
+	jobColumns       = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at, ` + partialColumns
+
+	// partialColumns read the job's store.JobPartial from job_partials (by
+	// primary key; zero values without a row) in a query over jobs
+	// (partialDest scans them).
+	partialColumns = `COALESCE((SELECT p.text FROM job_partials p WHERE p.job_id = jobs.id), ''),
+		COALESCE((SELECT p.state FROM job_partials p WHERE p.job_id = jobs.id), ''),
+		COALESCE((SELECT p.at FROM job_partials p WHERE p.job_id = jobs.id), 0)`
 )
+
+// dropPartial deletes the partial of a job: every state transition calls it
+// in its transaction.
+func (t *tx) dropPartial(jobID string) error {
+	if _, err := t.q.ExecContext(t.ctx, `DELETE FROM job_partials WHERE job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("sqlite: drop partial: %w", err)
+	}
+	return nil
+}
+
+// partialDest returns the scan destinations of partialColumns; set copies
+// them into p after the scan.
+func partialDest(p *store.JobPartial) (dest []any, set func()) {
+	var state string
+	var at int64
+	return []any{&p.Partial, &state, &at}, func() {
+		p.PartialState = store.PartialState(state)
+		p.PartialAt = endedAt(at)
+	}
+}
 
 // leaseHeld is the fence condition shared by the fenced writes: the user's
 // lease row names this job, carries this fence and is not blank. The single
@@ -31,11 +61,13 @@ func scanJob(row scanner) (store.Job, error) {
 	var j store.Job
 	var state, checkpoint string
 	var notBefore, created, updated, ended int64
-	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
-		&notBefore, &checkpoint, &j.Error, &created, &updated, &ended)
+	pdest, pset := partialDest(&j.JobPartial)
+	err := row.Scan(append([]any{&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
+		&notBefore, &checkpoint, &j.Error, &created, &updated, &ended}, pdest...)...)
 	if err != nil {
 		return store.Job{}, err
 	}
+	pset()
 	j.State = store.JobState(state)
 	j.Checkpoint = json.RawMessage(checkpoint)
 	j.NotBefore, j.CreatedAt, j.UpdatedAt, j.EndedAt = fromMS(notBefore), fromMS(created), fromMS(updated), endedAt(ended)
@@ -54,7 +86,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	if j.ID == "" {
 		j.ID = store.NewID()
 	}
-	j.State, j.Attempt, j.Runs, j.Error, j.EndedAt = store.JobQueued, 0, 0, "", time.Time{}
+	j.State, j.Attempt, j.Runs, j.Error, j.EndedAt, j.JobPartial = store.JobQueued, 0, 0, "", time.Time{}, store.JobPartial{}
 	if j.NotBefore.IsZero() {
 		j.NotBefore = now
 	}
@@ -63,7 +95,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+		`INSERT INTO jobs(`+insertJobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
 		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt, j.Runs,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
@@ -89,17 +121,21 @@ func (t *tx) GetJob(userID, jobID string) (store.Job, error) {
 
 // GetJobStatus implements store.Tx.
 func (t *tx) GetJobStatus(userID, jobID string) (store.JobStatus, error) {
-	var state, errMsg string
+	var js store.JobStatus
+	var state string
 	var created, updated int64
-	err := t.q.QueryRowContext(t.ctx, `SELECT state, error, created_at, updated_at FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
-		Scan(&state, &errMsg, &created, &updated)
+	pdest, pset := partialDest(&js.JobPartial)
+	err := t.q.QueryRowContext(t.ctx, `SELECT state, error, created_at, updated_at, `+partialColumns+` FROM jobs WHERE id = ? AND user_id = ?`, jobID, userID).
+		Scan(append([]any{&state, &js.Error, &created, &updated}, pdest...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.JobStatus{}, store.ErrNotFound
 	}
 	if err != nil {
 		return store.JobStatus{}, err
 	}
-	return store.JobStatus{State: store.JobState(state), Error: errMsg, CreatedAt: fromMS(created), UpdatedAt: fromMS(updated)}, nil
+	pset()
+	js.State, js.CreatedAt, js.UpdatedAt = store.JobState(state), fromMS(created), fromMS(updated)
+	return js, nil
 }
 
 // JobStatuses implements store.Tx.
@@ -116,19 +152,23 @@ func (t *tx) JobStatuses(userID string, ids []string) (map[string]store.JobStatu
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	rows, err := t.q.QueryContext(t.ctx, `SELECT id, state, error, created_at, updated_at FROM jobs
+	rows, err := t.q.QueryContext(t.ctx, `SELECT id, state, error, created_at, updated_at, `+partialColumns+` FROM jobs
 		WHERE user_id = ? AND id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: job statuses: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, state, errMsg string
+		var js store.JobStatus
+		var id, state string
 		var created, updated int64
-		if err := rows.Scan(&id, &state, &errMsg, &created, &updated); err != nil {
+		pdest, pset := partialDest(&js.JobPartial)
+		if err := rows.Scan(append([]any{&id, &state, &js.Error, &created, &updated}, pdest...)...); err != nil {
 			return nil, err
 		}
-		out[id] = store.JobStatus{State: store.JobState(state), Error: errMsg, CreatedAt: fromMS(created), UpdatedAt: fromMS(updated)}
+		pset()
+		js.State, js.CreatedAt, js.UpdatedAt = store.JobState(state), fromMS(created), fromMS(updated)
+		out[id] = js
 	}
 	return out, rows.Err()
 }
@@ -207,7 +247,7 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 // selecting the checkpoint keeps it out of Go memory, but SQLite still
 // reads its overflow pages from disk for the columns stored after it in the
 // row.
-const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at, ended_at,
+const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at, ended_at, ` + partialColumns + `,
 	(SELECT COUNT(*) FROM job_steps s WHERE s.job_id = jobs.id),
 	(SELECT COALESCE(SUM(s.tokens_in), 0) FROM job_steps s WHERE s.job_id = jobs.id),
 	(SELECT COALESCE(SUM(s.tokens_out), 0) FROM job_steps s WHERE s.job_id = jobs.id)`
@@ -254,10 +294,13 @@ func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSumm
 		var j store.JobSummary
 		var state string
 		var notBefore, created, updated, ended int64
-		if err := rows.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
-			&notBefore, &j.Error, &created, &updated, &ended, &j.StepCount, &j.TokensIn, &j.TokensOut); err != nil {
+		pdest, pset := partialDest(&j.JobPartial)
+		dest := append([]any{&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
+			&notBefore, &j.Error, &created, &updated, &ended}, pdest...)
+		if err := rows.Scan(append(dest, &j.StepCount, &j.TokensIn, &j.TokensOut)...); err != nil {
 			return nil, err
 		}
+		pset()
 		j.State = store.JobState(state)
 		j.NotBefore, j.CreatedAt, j.UpdatedAt, j.EndedAt = fromMS(notBefore), fromMS(created), fromMS(updated), endedAt(ended)
 		out = append(out, j)
@@ -277,7 +320,7 @@ func (t *tx) CancelJob(userID, jobID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return t.diagnoseJobWrite(userID, jobID, false)
 	}
-	return nil
+	return t.dropPartial(jobID)
 }
 
 // diagnoseJobWrite explains why a conditional job update changed nothing:
@@ -417,6 +460,9 @@ func (t *tx) ClaimNextJob(worker string, ttl time.Duration) (store.Claim, bool, 
 		`UPDATE jobs SET state = 'running', attempt = attempt + 1, runs = runs + 1, updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
 		return store.Claim{}, false, err
 	}
+	if err := t.dropPartial(id); err != nil {
+		return store.Claim{}, false, err
+	}
 	job, err := t.GetJob(userID, id)
 	if err != nil {
 		return store.Claim{}, false, err
@@ -474,7 +520,10 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	return true, t.dropPartial(c.Job.ID)
 }
 
 // ReapExpired implements store.Tx.
@@ -525,6 +574,9 @@ func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duratio
 		if err != nil {
 			return store.ReapResult{}, err
 		}
+		if err := t.dropPartial(s.id); err != nil {
+			return store.ReapResult{}, err
+		}
 		// blank the lease only if it still belongs to this job; keep the fence
 		if _, err = t.q.ExecContext(t.ctx,
 			`UPDATE leases SET holder = '', job_id = '', expires_at = 0 WHERE user_id = ? AND job_id = ?`,
@@ -533,4 +585,32 @@ func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duratio
 		}
 	}
 	return res, nil
+}
+
+// SetJobPartial implements store.Tx. It writes the job's job_partials row
+// only (never the jobs row), so the jobs mark does not move.
+func (t *tx) SetJobPartial(userID, jobID string, fence int64, state store.PartialState, text string) error {
+	switch {
+	case !state.Valid():
+		return store.Invalid("unknown partial state")
+	case state == store.PartialNone && text != "":
+		return store.Invalid("a partial text needs a state")
+	case len(text) > store.MaxPartialBytes:
+		return store.Invalid("the partial text is longer than %d bytes", store.MaxPartialBytes)
+	case !utf8.ValidString(text):
+		return store.Invalid("the partial text is not valid UTF-8")
+	}
+	res, err := t.q.ExecContext(t.ctx,
+		`INSERT INTO job_partials(job_id, user_id, chat, state, text, at)
+		 SELECT jobs.id, jobs.user_id, jobs.trigger_kind = ?, ?, ?, ? FROM jobs
+		 WHERE jobs.id = ? AND jobs.user_id = ? AND jobs.state = 'running' AND `+leaseHeld+`
+		 ON CONFLICT(job_id) DO UPDATE SET state = excluded.state, text = excluded.text, at = excluded.at`,
+		store.TriggerChat, string(state), text, ms(t.now()), jobID, userID, fence)
+	if err != nil {
+		return fmt.Errorf("sqlite: set partial: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return t.diagnoseJobWrite(userID, jobID, true)
+	}
+	return nil
 }

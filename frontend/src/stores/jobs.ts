@@ -4,7 +4,7 @@ import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
 import { ApiError, describeError, isAbortError } from '../api/errors'
 import { coalesce } from '../util/coalesce'
 import { byId, listOf, mergeHead } from '../util/lists'
-import type { Approval, Job, JobDetail, JobState } from '../api/types'
+import type { Approval, Job, JobDetail, JobState, TriggerKind } from '../api/types'
 
 // Page sizes (the server caps job pages at 200, approval pages at 100).
 export const JOB_PAGE = 50
@@ -331,6 +331,9 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
 
   // --- live updates
 
+  const isRunningChat = (j: Job | null) =>
+    j !== null && j.state === ('running' satisfies JobState) && j.trigger_kind === ('chat' satisfies TriggerKind)
+
   const onEvent = async (e: StoreEvent) => {
     if (e.type === 'reset') {
       reset()
@@ -347,6 +350,9 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
       if (detailId.value !== null && (detail.value === null || isLiveState(detail.value.state))) {
         work.push(detailRefresh())
       }
+    } else if (e.kinds.includes('messages') && detailId.value !== null && isRunningChat(detail.value)) {
+      // a running chat job's partial answer moves only the messages mark
+      work.push(detailRefresh())
     }
     await Promise.all(work)
   }

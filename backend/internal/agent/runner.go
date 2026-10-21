@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
@@ -27,7 +29,7 @@ type OwnWrites interface {
 }
 
 // Deps are the runner's collaborators; every one is required except
-// OwnWrites.
+// OwnWrites and Log.
 type Deps struct {
 	Store    store.Store
 	Queue    *queue.Queue
@@ -42,6 +44,9 @@ type Deps struct {
 	// OwnWrites is optional: without it, the agent's approved writes into
 	// a watch folder start a follow-up file_event review.
 	OwnWrites OwnWrites
+	// Log defaults to slog.Default; the runner logs ids and fixed
+	// categories only.
+	Log *slog.Logger
 }
 
 // Runner runs one claimed job at a time: model turns, the gate and the tools.
@@ -49,6 +54,13 @@ type Runner struct {
 	d     Deps
 	cfg   Config
 	specs []llm.ToolSpec
+	log   *slog.Logger
+	// partialWriters counts the running partial-answer writes and stream
+	// checks (tests check that none is left behind).
+	partialWriters atomic.Int32
+	// beforePartialWrite, if set (tests only), runs in a write goroutine
+	// before it writes
+	beforePartialWrite func()
 }
 
 // NewRunner checks the dependencies and the limits.
@@ -68,7 +80,11 @@ func NewRunner(d Deps) (*Runner, error) {
 	for _, s := range d.Registry.Specs() {
 		specs = append(specs, llm.ToolSpec{Name: s.Name, Description: s.Description, Schema: s.Schema})
 	}
-	return &Runner{d: d, cfg: cfg, specs: specs}, nil
+	log := d.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Runner{d: d, cfg: cfg, specs: specs, log: log}, nil
 }
 
 // Run runs the claimed job until it is released (succeeded, failed,
@@ -112,6 +128,7 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 	if err != nil {
 		return err
 	}
+	shown := false // the last turn left a partial answer on the job
 	for {
 		// calls left from an earlier run (an approval, a crash) come first
 		if len(cp.Unresolved()) > 0 {
@@ -123,8 +140,15 @@ func (r *Runner) Run(ctx context.Context, claim store.Claim) error {
 			if stop, err := r.processCalls(ctx, claim, env, &cp); stop || err != nil {
 				return err
 			}
+			if shown {
+				// the text before the calls was not the answer
+				if err := r.clearPartial(ctx, claim); err != nil {
+					return err
+				}
+				shown = false
+			}
 		}
-		if stop, err := r.turn(ctx, claim, env, &cp); stop || err != nil {
+		if stop, err := r.turn(ctx, claim, env, &cp, &shown); stop || err != nil {
 			return err
 		}
 	}

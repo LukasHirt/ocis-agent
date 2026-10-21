@@ -10,6 +10,7 @@ import {
   chatState,
   conversationOf,
   errWithRetry,
+  jobOfMessage,
   userMessage,
   type ChatState
 } from '../test/chat'
@@ -40,7 +41,7 @@ const withThread = () =>
   chatState({
     conversations: [conversationOf('c1', { title: 'Plans' }), conversationOf('c2', { title: 'Other' })],
     messages: {
-      c1: [answer('m2', 'Here you go'), userMessage('m1', { id: 'j1', state: 'succeeded', error: '' }, 'Summarise')],
+      c1: [answer('m2', 'Here you go'), userMessage('m1', jobOfMessage('j1', 'succeeded'), 'Summarise')],
       c2: []
     }
   })
@@ -58,6 +59,41 @@ describe('Chat', () => {
     expect(w.find('.agent-chat-title').text()).toBe('Plans')
     expect(w.findAll('.agent-msg-content').map((m) => m.text())).toEqual(['Summarise', 'Here you go'])
     expect(w.find('textarea').exists()).toBe(true)
+  })
+
+  it('shows the partial answer while the question runs and drops it when the job pauses or fails', async () => {
+    const job = (state: string, partial: string, partial_state: string) => ({
+      id: 'j1',
+      state,
+      error: state === 'failed' ? 'The agent stopped because the usage budget is used up.' : '',
+      partial,
+      partial_state
+    })
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: { c1: [userMessage('m1', job('running', 'Half an ans', 'writing'), 'Summarise')] }
+    })
+    const { w, events } = await setup(st, { id: 'c1' })
+    expect(w.find('.agent-msg-partial .agent-msg-content').text()).toBe('Half an ans')
+    expect(w.find('.agent-msg-partial').attributes('aria-live')).toBe('off')
+
+    st.messages.c1 = [userMessage('m1', job('waiting_approval', 'Half an ans', 'writing'), 'Summarise')]
+    await events().onChanged(['jobs', 'messages'])
+    await flushPromises()
+    expect(w.find('.agent-msg-partial').exists()).toBe(false)
+
+    // a partial write moves only the messages mark
+    st.messages.c1 = [userMessage('m1', job('running', 'Half an answer', 'writing'), 'Summarise')]
+    await events().onChanged(['messages'])
+    await flushPromises()
+    expect(w.find('.agent-msg-partial .agent-msg-content').text()).toBe('Half an answer')
+
+    st.messages.c1 = [userMessage('m1', job('failed', 'Half an answer', 'writing'), 'Summarise')]
+    await events().onChanged(['jobs', 'messages'])
+    await flushPromises()
+    expect(w.find('.agent-msg-partial').exists()).toBe(false)
+    expect(w.text()).not.toContain('Half an answer')
+    expect(w.find('.agent-msg-error').text()).toBe('The agent stopped because the usage budget is used up.')
   })
 
   it('switches the thread when the route id changes', async () => {
@@ -203,7 +239,7 @@ describe('Chat', () => {
   it('shows the inline approvals of a waiting question', async () => {
     const st = chatState({
       conversations: [conversationOf('c1')],
-      messages: { c1: [userMessage('m1', { id: 'j1', state: 'waiting_approval', error: '' })] }
+      messages: { c1: [userMessage('m1', jobOfMessage('j1', 'waiting_approval'))] }
     })
     const { w } = await setup(st, { id: 'c1' }, (c) =>
       c.path === '/approvals' && c.query.get('job_id') === 'j1'

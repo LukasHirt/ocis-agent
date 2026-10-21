@@ -53,6 +53,38 @@ type Job struct {
 	// EndedAt is when the job reached a terminal state (set by the
 	// transition that ends it); zero while it is live.
 	EndedAt time.Time
+	JobPartial
+}
+
+// PartialState says what the model of a running job is doing.
+type PartialState string
+
+// Partial states.
+const (
+	PartialNone     PartialState = ""
+	PartialThinking PartialState = "thinking" // hidden reasoning, no text yet
+	PartialWriting  PartialState = "writing"  // Partial holds the text so far
+)
+
+// Valid reports whether s is a known partial state.
+func (s PartialState) Valid() bool {
+	return s == PartialNone || s == PartialThinking || s == PartialWriting
+}
+
+// MaxPartialBytes caps JobPartial.Text, like an answer message.
+const MaxPartialBytes = MaxAnswerMessageBytes
+
+// JobPartial is the answer the model of a running job is writing: untrusted
+// model text, never the final answer, set only by SetJobPartial and cleared
+// (zero) by every state transition (release, requeue, cancel, the reaper and
+// a new claim).
+type JobPartial struct {
+	Partial      string
+	PartialState PartialState
+	// PartialAt is the time of the last SetJobPartial. It is zero after a
+	// state transition; a SetJobPartial clear (PartialNone) keeps its time,
+	// so the change marks move.
+	PartialAt time.Time
 }
 
 // JobFilter narrows ListJobs and ListJobSummaries.
@@ -92,9 +124,10 @@ type JobSummary struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	EndedAt     time.Time
-	StepCount   int
-	TokensIn    int64
-	TokensOut   int64
+	JobPartial
+	StepCount int
+	TokensIn  int64
+	TokensOut int64
 }
 
 // JobStatus is the light lookup of a job (GetJobStatus): its state, its
@@ -105,6 +138,7 @@ type JobStatus struct {
 	Error     string // the runner's fixed reason text, or the reaper's
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	JobPartial
 }
 
 // MaxJobStatusIDs caps the ids of one JobStatuses call.

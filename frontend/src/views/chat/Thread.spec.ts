@@ -3,10 +3,15 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import Thread from './Thread.vue'
 import { answer, messageOf, userMessage } from '../../test/chat'
-import type { Message } from '../../api/types'
+import type { Message, MessageJob } from '../../api/types'
+import type { PartialAnswer } from '../../stores/chat'
+
+const running = (): MessageJob => ({ id: 'j1', state: 'running', error: '', partial: '', partial_state: '' })
+const writing = (text: string): Record<string, PartialAnswer> => ({ m1: { text, state: 'writing' } })
 
 const base = {
   notices: {},
+  partials: {},
   jobApprovals: {},
   olderCursor: null,
   olderLoading: false,
@@ -108,5 +113,65 @@ describe('Thread', () => {
       if (saved) Object.defineProperty(proto, 'scrollHeight', saved)
       else delete (proto as unknown as Record<string, unknown>).scrollHeight
     }
+  })
+
+  it('shows the partial answer under its question, not announced, with what the agent does', async () => {
+    const w = mountThread([userMessage('m1', running()), userMessage('m2', null, 'later')], {
+      partials: writing('Hel')
+    })
+    const bubbles = w.findAll('.agent-msg')
+    expect(bubbles).toHaveLength(3)
+    expect(bubbles[1].classes()).toContain('agent-msg-partial')
+    const partial = w.find('.agent-msg-partial')
+    expect(partial.attributes('aria-live')).toBe('off')
+    expect(partial.find('.agent-msg-content').text()).toBe('Hel')
+    expect(partial.find('.agent-msg-partial-state').text()).toBe('Writing…')
+    expect(partial.find('.agent-msg-partial-state [data-icon]').exists()).toBe(true)
+    await w.setProps({ partials: { m1: { text: '', state: 'thinking' } } })
+    expect(w.find('.agent-msg-partial .agent-msg-content').exists()).toBe(false)
+    expect(w.find('.agent-msg-partial-state').text()).toBe('Thinking…')
+    w.unmount()
+  })
+
+  it('renders a hostile partial answer as plain text with visible control characters', () => {
+    const hostile = '<img src=x onerror=alert(1)><b>bold</b>\u202eevil\u200b{{ 1 + 1 }}'
+    const w = mountThread([userMessage('m1', running())], { partials: writing(hostile) })
+    const content = w.find('.agent-msg-partial .agent-msg-content')
+    expect(content.find('img').exists()).toBe(false)
+    expect(content.find('b').exists()).toBe(false)
+    expect(content.text()).toBe('<img src=x onerror=alert(1)><b>bold</b>\\u{202E}evil\\u{200B}{{ 1 + 1 }}')
+    expect(content.findAll('.agent-ctl')).toHaveLength(2)
+    w.unmount()
+  })
+
+  it('replaces the partial answer by the answer once, in one update', async () => {
+    const w = mountThread([userMessage('m1', running())], { partials: writing('Hello') })
+    const answered = { ...userMessage('m1', { ...running(), state: 'succeeded' }) }
+    await w.setProps({ messages: [answered, { ...answer('m2', 'Hello world'), job_id: 'j1' }], partials: {} })
+    expect(w.find('.agent-msg-partial').exists()).toBe(false)
+    expect(w.findAll('.agent-msg-assistant').map((b) => b.find('.agent-msg-content').text())).toEqual(['Hello world'])
+    w.unmount()
+  })
+
+  it('follows a growing partial answer only while the reader is at the bottom', async () => {
+    const w = mountThread([userMessage('m1', running())], { partials: writing('a') })
+    const el = w.find('.agent-thread-scroll').element as HTMLElement
+    // 200px per bubble plus one per character of the partial answer
+    Object.defineProperty(el, 'scrollHeight', {
+      configurable: true,
+      get: () =>
+        el.querySelectorAll('.agent-msg').length * 200 +
+        (el.querySelector('.agent-msg-partial .agent-msg-content')?.textContent?.length ?? 0)
+    })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => 100 })
+    scrollTo(el, 301) // at the bottom (401 - 100)
+    await w.setProps({ messages: [userMessage('m1', running())], partials: writing('a'.repeat(50)) })
+    await nextTick()
+    expect(el.scrollTop).toBe(450)
+    scrollTo(el, 10) // reading further up
+    await w.setProps({ messages: [userMessage('m1', running())], partials: writing('a'.repeat(90)) })
+    await nextTick()
+    expect(el.scrollTop).toBe(10)
+    w.unmount()
   })
 })

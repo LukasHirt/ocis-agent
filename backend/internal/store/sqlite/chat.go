@@ -311,12 +311,16 @@ func (t *tx) CountConversations(userID string) (int, error) {
 	return n, err
 }
 
+// partialMarkQuery is the newest partial write of the user's chat jobs
+// (only running jobs have a job_partials row; index only).
+const partialMarkQuery = `SELECT COALESCE(MAX(at), 0) FROM job_partials WHERE user_id = ? AND chat = 1`
+
 // ChangeMarks implements store.Tx. Each mark is an indexed MAX; the message
 // mark also covers conversation creation and renames through the
-// conversation's updated_at.
+// conversation's updated_at and the partial answers of running chat jobs.
 func (t *tx) ChangeMarks(userID string) (store.ChangeMarks, error) {
 	var m store.ChangeMarks
-	var convAt int64
+	var convAt, partialAt int64
 	for _, q := range []struct {
 		dst *int64
 		sql string
@@ -324,6 +328,7 @@ func (t *tx) ChangeMarks(userID string) (store.ChangeMarks, error) {
 		{&m.JobsAt, `SELECT COALESCE(MAX(updated_at), 0) FROM jobs WHERE user_id = ?`},
 		{&m.MessagesAt, `SELECT COALESCE(MAX(created_at), 0) FROM messages WHERE user_id = ?`},
 		{&convAt, `SELECT COALESCE(MAX(updated_at), 0) FROM conversations WHERE user_id = ?`},
+		{&partialAt, partialMarkQuery},
 		{&m.PolicyAt, `SELECT COALESCE(MAX(updated_at), 0) FROM policies WHERE user_id = ?`},
 		{&m.AuditSeq, `SELECT COALESCE(MAX(seq), 0) FROM audit WHERE user_id = ?`},
 	} {
@@ -331,6 +336,6 @@ func (t *tx) ChangeMarks(userID string) (store.ChangeMarks, error) {
 			return store.ChangeMarks{}, fmt.Errorf("sqlite: change marks: %w", err)
 		}
 	}
-	m.MessagesAt = max(m.MessagesAt, convAt)
+	m.MessagesAt = max(m.MessagesAt, convAt, partialAt)
 	return m, nil
 }

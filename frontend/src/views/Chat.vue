@@ -40,6 +40,7 @@
           ref="threadView"
           :messages="chat.thread"
           :notices="chat.notices"
+          :partials="chat.partials"
           :job-approvals="chat.jobApprovals"
           :older-cursor="chat.olderCursor"
           :older-loading="chat.olderLoading"

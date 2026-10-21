@@ -176,6 +176,12 @@ type jobView struct {
 	StepsCount  int     `json:"steps_count"`
 	TokensIn    int64   `json:"tokens_in"`
 	TokensOut   int64   `json:"tokens_out"`
+	// Partial is the answer the model of a running job is writing
+	// (untrusted model text, capped at maxAnswerView, never the final
+	// answer) and PartialState what it is doing ("", "thinking" or
+	// "writing"); both are empty unless the job is running.
+	Partial      string `json:"partial"` // untrusted, capped
+	PartialState string `json:"partial_state"`
 }
 
 // jobDetailView is GET /jobs/{id}: the job, its timeline and the final
@@ -345,6 +351,10 @@ type messageJobView struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
 	Error string `json:"error"`
+	// Partial and PartialState as in jobView: empty unless the job is
+	// running.
+	Partial      string `json:"partial"` // untrusted, capped
+	PartialState string `json:"partial_state"`
 }
 
 // sentView is the 202 of POST /conversations/{id}/messages. The message is

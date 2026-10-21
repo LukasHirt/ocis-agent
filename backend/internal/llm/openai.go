@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,21 +20,49 @@ const (
 	defaultMaxToolCalls = 16
 	maxResponseCap      = 64 << 20
 	defaultTimeout      = 120 * time.Second
+	defaultStreamTimout = 30 * time.Minute
+	defaultIdleTimeout  = 60 * time.Second
+	// the wire of a stream carries an envelope per token: it may be this
+	// many times the kept size, up to maxWireCap
+	wireFactor = 16
+	maxWireCap = 256 << 20
+	// once the model finished, the rest of a stream (usage, [DONE]) must
+	// follow within this time
+	finishGrace = 3 * time.Second
+	// what was learnt about an endpoint is forgotten after this time
+	learntTTL  = time.Hour
+	learntKeep = 256
 )
 
 // OpenAIConfig configures an OpenAI-compatible chat-completions client.
 type OpenAIConfig struct {
-	BaseURL          string // e.g. https://api.openai.com/v1
-	APIKey           Secret // may be empty only for a loopback host
-	Model            string
-	AllowedHosts     []string // egress guard; empty means the base URL's host
-	AllowHTTP        bool     // permit http:// (loopback endpoints and tests)
-	HTTPClient       *http.Client
-	MaxResponseBytes int64 // default 4 MiB
-	MaxToolCalls     int   // default 16
+	BaseURL      string // e.g. https://api.openai.com/v1
+	APIKey       Secret // may be empty only for a loopback host
+	Model        string
+	AllowedHosts []string // egress guard; empty means the base URL's host
+	AllowHTTP    bool     // permit http:// (loopback endpoints and tests)
+	HTTPClient   *http.Client
+	// MaxResponseBytes caps a plain response, and of a stream what is kept
+	// (text, reasoning, tool names and arguments); the stream itself may be
+	// 16 times as large. Default 4 MiB.
+	MaxResponseBytes int64
+	MaxToolCalls     int // default 16
 	// Timeout bounds one whole call, reading the response included; 0 means
-	// the HTTPClient's timeout, or 120s. A slow local model may need more.
+	// the HTTPClient's timeout, or 30m with Stream and 120s without. A slow
+	// local model may need more without streaming.
 	Timeout time.Duration
+	// Stream requests a streamed response (stream: true); see
+	// CompleteStream. Off, every call waits for the whole answer.
+	Stream bool
+	// PlainTimeout bounds a call that is not streamed: streaming off or
+	// refused by the endpoint, or a streaming request answered with plain
+	// JSON (counted from the start of that request). 0 means 120s; it is
+	// capped by Timeout. An operator who sets AGENT_LLM_TIMEOUT explicitly
+	// gets that value here too.
+	PlainTimeout time.Duration
+	// IdleTimeout ends a streamed call that receives no byte for this long,
+	// the wait for the response headers included; 0 means 60s.
+	IdleTimeout time.Duration
 	// ReasoningEffort is sent as reasoning_effort when not empty; see
 	// ValidReasoningEffort.
 	ReasoningEffort string
@@ -59,7 +88,28 @@ type OpenAI struct {
 	maxResponse int64
 	maxCalls    int
 	effort      string
+	maxWire     int64
+	stream      bool
+	idle        time.Duration
+	plain       time.Duration // the bound of a call that is not streamed
+	finishGrace time.Duration
+	now         func() time.Time
+	// learnt from the endpoint per model, forgotten after learntTTL
+	mu     sync.Mutex
+	learnt map[learntKey]time.Time
 }
+
+type learntKey struct {
+	model string
+	what  refusal
+}
+
+type refusal uint8
+
+const (
+	refusesStream        refusal = iota + 1 // stream: true
+	refusesStreamOptions                    // stream_options
+)
 
 // NewOpenAI validates the configuration and returns the client.
 func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
@@ -96,7 +146,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		return nil, errors.New("llm: the reasoning effort must be none, low, medium or high")
 	}
 
-	client := &http.Client{Timeout: defaultTimeout}
+	client := &http.Client{}
 	if cfg.HTTPClient != nil {
 		c := *cfg.HTTPClient
 		client = &c
@@ -106,6 +156,9 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	}
 	if client.Timeout <= 0 {
 		client.Timeout = defaultTimeout
+		if cfg.Stream {
+			client.Timeout = defaultStreamTimout
+		}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
@@ -116,11 +169,25 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		maxResponse: cfg.MaxResponseBytes,
 		maxCalls:    cfg.MaxToolCalls,
 		effort:      cfg.ReasoningEffort,
+		stream:      cfg.Stream,
+		idle:        cfg.IdleTimeout,
+		plain:       cfg.PlainTimeout,
+		finishGrace: finishGrace,
+		now:         time.Now,
+		learnt:      map[learntKey]time.Time{},
 	}
+	if o.idle <= 0 {
+		o.idle = defaultIdleTimeout
+	}
+	if o.plain <= 0 {
+		o.plain = defaultTimeout
+	}
+	o.plain = min(o.plain, client.Timeout)
 	if o.maxResponse <= 0 {
 		o.maxResponse = defaultMaxResponse
 	}
 	o.maxResponse = min(o.maxResponse, maxResponseCap)
+	o.maxWire = min(o.maxResponse*wireFactor, maxWireCap)
 	if o.maxCalls <= 0 {
 		o.maxCalls = defaultMaxToolCalls
 	}
@@ -195,21 +262,115 @@ func statusError(code int) error {
 	}
 }
 
-// Complete implements Provider.
+// Complete implements Provider. With streaming on it streams too, so the
+// idle timeout applies, and reports no deltas.
 func (o *OpenAI) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	return o.CompleteStream(ctx, req, nil)
+}
+
+// CompleteStream implements Streamer. An endpoint that answers a streaming
+// request with 400 or 422 gets it once more without stream_options, and one
+// that answers 400, 404 or 501 then once without streaming; what worked is
+// remembered per model for an hour. Deltas of a call that fails are not the
+// answer. A stream that fails after it started returns, with the error, a
+// response whose only content is the estimated Usage of what it received
+// (UsageEstimated set), so that a caller can charge the tokens spent.
+func (o *OpenAI) CompleteStream(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error) {
 	if err := req.Validate(); err != nil {
 		return CompletionResponse{}, err
 	}
-	body, err := json.Marshal(o.encode(req))
-	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("%w: encoding failed", ErrInvalid)
+	model := o.model
+	if req.Model != "" {
+		model = req.Model
 	}
-	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint, bytes.NewReader(body))
+	if !o.stream || o.refuses(model, refusesStream) {
+		resp, _, err := o.post(ctx, req, false, false, nil)
+		return resp, err
+	}
+	opts := !o.refuses(model, refusesStreamOptions)
+	resp, status, err := o.post(ctx, req, true, opts, onDelta)
+	if opts && (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
+		resp, status, err = o.post(ctx, req, true, false, onDelta)
+		if status == http.StatusOK {
+			o.remember(model, refusesStreamOptions)
+		}
+	}
+	if !streamRefused(status) {
+		return resp, err
+	}
+	resp, status, err = o.post(ctx, req, false, false, nil)
+	if status == http.StatusOK {
+		o.remember(model, refusesStream)
+	}
+	return resp, err
+}
+
+func (o *OpenAI) refuses(model string, what refusal) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	k := learntKey{model, what}
+	until, ok := o.learnt[k]
+	if ok && o.now().Before(until) {
+		return true
+	}
+	delete(o.learnt, k)
+	return false
+}
+
+func (o *OpenAI) remember(model string, what refusal) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := o.now()
+	if len(o.learnt) >= learntKeep {
+		for k, until := range o.learnt {
+			if !now.Before(until) {
+				delete(o.learnt, k)
+			}
+		}
+		if len(o.learnt) >= learntKeep {
+			clear(o.learnt)
+		}
+	}
+	o.learnt[learntKey{model, what}] = now.Add(learntTTL)
+}
+
+func streamRefused(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusNotImplemented
+}
+
+// post makes one request and returns the HTTP status (0 when none arrived).
+func (o *OpenAI) post(ctx context.Context, req CompletionRequest, stream, opts bool, onDelta func(Delta)) (CompletionResponse, int, error) {
+	w := o.encode(req)
+	if stream {
+		w.Stream = true
+		if opts {
+			w.StreamOptions = &wireStreamOptions{IncludeUsage: true}
+		}
+	}
+	body, err := json.Marshal(w)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("%w: building the request failed", ErrInvalid)
+		return CompletionResponse{}, 0, fmt.Errorf("%w: encoding failed", ErrInvalid)
+	}
+	start := time.Now()
+	rctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var idle *time.Timer
+	if stream {
+		idle = time.AfterFunc(o.idle, func() { cancel(errIdle) })
+		defer idle.Stop()
+	} else {
+		plain := time.AfterFunc(o.plain, func() { cancel(errPlain) })
+		defer plain.Stop()
+	}
+	hr, err := http.NewRequestWithContext(rctx, http.MethodPost, o.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return CompletionResponse{}, 0, fmt.Errorf("%w: building the request failed", ErrInvalid)
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Accept", "application/json")
+	if stream {
+		hr.Header.Set("Accept", "text/event-stream")
+	}
 	if o.key != nil {
 		hr.Header.Set("Authorization", "Bearer "+o.key.Reveal())
 	}
@@ -217,23 +378,43 @@ func (o *OpenAI) Complete(ctx context.Context, req CompletionRequest) (Completio
 	resp, err := o.client.Do(hr)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return CompletionResponse{}, fmt.Errorf("llm: %w", cerr)
+			return CompletionResponse{}, 0, fmt.Errorf("llm: %w", cerr)
 		}
-		return CompletionResponse{}, fmt.Errorf("%w: transport error", ErrUnavailable)
+		return CompletionResponse{}, 0, fmt.Errorf("%w: transport error", ErrUnavailable)
 	}
 	defer resp.Body.Close()
 	if err := statusError(resp.StatusCode); err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{}, resp.StatusCode, err
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, o.maxResponse+1))
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return CompletionResponse{}, fmt.Errorf("llm: %w", cerr)
+	var rd io.Reader = resp.Body
+	if stream {
+		idle.Reset(o.idle)
+		act := &activity{r: resp.Body, t: idle, d: o.idle}
+		rd = act
+		if isEventStream(resp.Header.Get("Content-Type")) {
+			out, err := o.readStream(ctx, act, len(body), onDelta)
+			return out, resp.StatusCode, err
 		}
-		return CompletionResponse{}, fmt.Errorf("%w: reading the response failed", ErrUnavailable)
+		// a plain answer to a stream request: bounded like a plain call
+		plain := time.AfterFunc(o.plain-time.Since(start), func() { cancel(errPlain) })
+		defer plain.Stop()
+	}
+	raw, err := io.ReadAll(io.LimitReader(rd, o.maxResponse+1))
+	if err != nil {
+		return CompletionResponse{}, resp.StatusCode, readError(ctx)
 	}
 	if int64(len(raw)) > o.maxResponse {
-		return CompletionResponse{}, ErrTooLarge
+		return CompletionResponse{}, resp.StatusCode, ErrTooLarge
 	}
-	return o.decode(raw)
+	out, err := o.decode(raw)
+	return out, resp.StatusCode, err
+}
+
+// readError is the error of a failed read: the caller's context error, or
+// an outage (a timeout, the idle timeout, a lost connection).
+func readError(ctx context.Context) error {
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("llm: %w", cerr)
+	}
+	return fmt.Errorf("%w: reading the response failed", ErrUnavailable)
 }

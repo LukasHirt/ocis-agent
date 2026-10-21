@@ -107,6 +107,12 @@ type Tx interface {
 	// fence is the current lease generation of this running job; ErrConflict
 	// if the job is terminal.
 	SaveCheckpoint(userID, jobID string, checkpoint json.RawMessage, fence int64) error
+	// SetJobPartial stores what the model of a running job is doing and the
+	// text it has written so far (at most MaxPartialBytes of valid UTF-8;
+	// PartialNone only with empty text, which clears it) and sets PartialAt.
+	// It leaves the job itself (and its UpdatedAt, the jobs mark) alone; a
+	// chat job's write moves the messages mark. Fenced like SaveCheckpoint.
+	SetJobPartial(userID, jobID string, fence int64, state PartialState, text string) error
 	// AppendStep adds a step to a running job's timeline and assigns its N.
 	// Fenced like SaveCheckpoint.
 	AppendStep(step JobStep, fence int64) (JobStep, error)

@@ -256,7 +256,7 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	if a.runner, err = agent.NewRunner(agent.Deps{
 		Store: a.st, Queue: a.queue, Provider: provider, Catalog: cfg.LLM.Catalog, Registry: a.registry,
-		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg, OwnWrites: own,
+		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg, OwnWrites: own, Log: a.log,
 	}); err != nil {
 		return fmt.Errorf("app: runner: %w", err)
 	}
@@ -339,5 +339,6 @@ func openAIConfig(l config.LLMConfig) llm.OpenAIConfig {
 		BaseURL: l.BaseURL, APIKey: l.APIKey, Model: l.Catalog.Default,
 		AllowedHosts: l.AllowedHosts, AllowHTTP: l.AllowHTTP,
 		Timeout: l.Timeout, ReasoningEffort: l.ReasoningEffort,
+		Stream: l.Stream, IdleTimeout: l.IdleTimeout, PlainTimeout: l.PlainTimeout,
 	}
 }

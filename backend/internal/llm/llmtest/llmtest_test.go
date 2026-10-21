@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
@@ -85,5 +86,66 @@ func TestProviderFuncAdapter(t *testing.T) {
 	r, err := p.Complete(context.Background(), req("a"))
 	if err != nil || r.Stop != llm.StopEnd {
 		t.Fatalf("got %+v, %v", r, err)
+	}
+}
+
+func TestStreamingProviderPlaysDeltasThenTheResponse(t *testing.T) {
+	p := NewStreaming(
+		Streamed(Say("Hello", 3, 2), llm.Delta{Thinking: true}, llm.Delta{Text: "Hel"}, llm.Delta{Text: "lo"}),
+		Say("plain", 1, 1),
+		Streamed(Fail(llm.ErrUnavailable), llm.Delta{Text: "half"}),
+	)
+	var _ llm.Streamer = p
+	var _ llm.Provider = p
+	var got []llm.Delta
+	r, err := p.CompleteStream(context.Background(), req("a"), func(d llm.Delta) { got = append(got, d) })
+	if err != nil || r.Message.Content != "Hello" || len(got) != 3 || !got[0].Thinking || got[1].Text != "Hel" || got[2].Text != "lo" {
+		t.Fatalf("first = %+v, %v, deltas %+v", r, err, got)
+	}
+	got = nil
+	if r, err := p.Complete(context.Background(), req("b")); err != nil || r.Message.Content != "plain" {
+		t.Fatalf("second = %+v, %v", r, err)
+	}
+	if _, err := p.CompleteStream(context.Background(), req("c"), nil); !errors.Is(err, llm.ErrUnavailable) {
+		t.Fatalf("third err = %v", err)
+	}
+	if len(p.Requests()) != 3 || p.Remaining() != 0 {
+		t.Errorf("requests %d, remaining %d", len(p.Requests()), p.Remaining())
+	}
+}
+
+func TestStreamingProviderStopsOnACancelledContext(t *testing.T) {
+	p := NewStreaming(Streamed(Say("x", 1, 1), llm.Delta{Text: "a"}, llm.Delta{Text: "b"}))
+	ctx, cancel := context.WithCancel(context.Background())
+	var got []llm.Delta
+	_, err := p.CompleteStream(ctx, req("a"), func(d llm.Delta) { got = append(got, d); cancel() })
+	if !errors.Is(err, context.Canceled) || len(got) != 1 {
+		t.Fatalf("err = %v, deltas %+v", err, got)
+	}
+}
+
+func TestThePlainProviderDoesNotStream(t *testing.T) {
+	var p llm.Provider = New()
+	if _, ok := p.(llm.Streamer); ok {
+		t.Error("the plain scripted provider must not implement Streamer")
+	}
+}
+
+func TestStreamingProviderWaitsTheGapBeforeEachDelta(t *testing.T) {
+	s := Streamed(Say("ab", 1, 1), llm.Delta{Text: "a"}, llm.Delta{Text: "b"})
+	s.Gap = 40 * time.Millisecond
+	p := NewStreaming(s, s)
+	start := time.Now()
+	var at []time.Duration
+	if _, err := p.CompleteStream(context.Background(), req("a"), func(llm.Delta) { at = append(at, time.Since(start)) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(at) != 2 || at[0] < 40*time.Millisecond || at[1] < 80*time.Millisecond {
+		t.Errorf("deltas at %v", at)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := p.CompleteStream(ctx, req("b"), nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the context error during the gap", err)
 	}
 }

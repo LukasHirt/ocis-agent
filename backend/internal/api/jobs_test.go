@@ -195,7 +195,7 @@ func ids(list []map[string]any) []string {
 }
 
 var jobKeys = []string{"id", "trigger_kind", "trigger_ref", "goal", "state", "attempt", "runs", "created_at", "updated_at",
-	"ended_at", "error", "steps_count", "tokens_in", "tokens_out"}
+	"ended_at", "error", "steps_count", "tokens_in", "tokens_out", "partial", "partial_state"}
 
 func wantKeys(t *testing.T, m map[string]any, keys ...string) {
 	t.Helper()

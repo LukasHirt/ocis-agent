@@ -25,6 +25,16 @@ export const messageOf = (id: string, over: Partial<Message> = {}): Message => (
 export const userMessage = (id: string, job: MessageJob | null, content = 'question ' + id): Message =>
   messageOf(id, { role: 'user', content, job_id: job?.id ?? '', job })
 
+// jobOfMessage is the job object of a question (no partial answer unless given).
+export const jobOfMessage = (id: string, state: string, over: Partial<MessageJob> = {}): MessageJob => ({
+  id,
+  state,
+  error: '',
+  partial: '',
+  partial_state: '',
+  ...over
+})
+
 export const answer = (id: string, content = 'answer ' + id): Message =>
   messageOf(id, { role: 'assistant', content })
 
@@ -101,7 +111,7 @@ export const chatHandler =
       if (c.method === 'POST') {
         if (st.failSend) return st.failSend.clone()
         const jobId = 'j' + st.nextId++
-        const job: MessageJob = { id: jobId, state: 'queued', error: '' }
+        const job = jobOfMessage(jobId, 'queued')
         const m = userMessage('m' + st.nextId++, job, (c.body as { content: string }).content)
         list.unshift(m)
         const sent: Sent = {
