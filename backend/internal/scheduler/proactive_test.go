@@ -105,6 +105,21 @@ func (fx *fixture) insertJob(user, kind string, state store.JobState) {
 	}
 }
 
+// cancelLive cancels every live job of the users.
+func (fx *fixture) cancelLive(users ...string) {
+	fx.t.Helper()
+	for _, u := range users {
+		for _, j := range fx.jobsOf(u) {
+			if j.State.Terminal() {
+				continue
+			}
+			if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.CancelJob(u, j.ID) }); err != nil {
+				fx.t.Fatal(err)
+			}
+		}
+	}
+}
+
 // useTokens records a finished chat job of user that used n tokens.
 func (fx *fixture) useTokens(user string, n int64) {
 	fx.t.Helper()
@@ -199,7 +214,7 @@ func TestProactiveDueSelection(t *testing.T) {
 		name    string
 		lastAgo time.Duration
 		setup   setup
-		skip    string // "" with start: a job; "" without start: silently not due
+		skip    string // the audited skip reason; "" without start: no job and no audit
 		start   bool
 	}{
 		{"due", time.Hour, nil, "", true},
@@ -208,19 +223,19 @@ func TestProactiveDueSelection(t *testing.T) {
 		{"disabled", time.Hour, func(fx *fixture, u string) {
 			fx.enableProactive(u, time.Hour, func(p *store.Policy) { p.ProactiveEnabled = false })
 		}, "", false},
-		{"paused by the user", time.Hour, pausedFor(store.PauseUser), store.SkipPaused, false},
-		{"dormant", time.Hour, pausedFor(store.PauseDormant), store.SkipPaused, false},
-		{"token anomaly", time.Hour, pausedFor(store.PauseTokenAnomaly), store.SkipPaused, false},
-		{"credentials invalid", time.Hour, pausedFor(store.PauseCredentialInvalid), store.SkipPaused, false},
-		{"credentials revoked", time.Hour, pausedFor(store.PauseCredentialRevoked), store.SkipPaused, false},
+		{"paused by the user", time.Hour, pausedFor(store.PauseUser), "", false},
+		{"dormant", time.Hour, pausedFor(store.PauseDormant), "", false},
+		{"token anomaly", time.Hour, pausedFor(store.PauseTokenAnomaly), "", false},
+		{"credentials invalid", time.Hour, pausedFor(store.PauseCredentialInvalid), "", false},
+		{"credentials revoked", time.Hour, pausedFor(store.PauseCredentialRevoked), "", false},
 		{"kill switch in the database", time.Hour, func(fx *fixture, _ string) {
 			if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.SetSystem(store.KillSwitchKey, store.KillSwitchOnValue) }); err != nil {
 				t.Fatal(err)
 			}
 		}, "", false},
 		{"kill switch in the environment", time.Hour, func(fx *fixture, _ string) { fx.cfg.Proactive.Limits.KillSwitchEnv = true }, "", false},
-		{"quiet hours wrapping midnight", time.Hour, quiet("22:00-12:01"), store.SkipQuietHours, false},
-		{"quiet hours starting now", time.Hour, quiet("12:00-13:00"), store.SkipQuietHours, false},
+		{"quiet hours wrapping midnight", time.Hour, quiet("22:00-12:01"), "", false},
+		{"quiet hours starting now", time.Hour, quiet("12:00-13:00"), "", false},
 		{"quiet hours ending now", time.Hour, quiet("11:00-12:00"), "", true},
 		{"quiet hours at night", time.Hour, quiet("22:00-07:00"), "", true},
 		{"budget 79%", time.Hour, func(fx *fixture, u string) { fx.useTokens(u, 790) }, "", true},
@@ -276,79 +291,218 @@ func TestProactiveDueSelection(t *testing.T) {
 	}
 }
 
-func TestProactiveSkipsAreAuditedOncePerReasonAndHour(t *testing.T) {
+func TestProactiveSkipAuditing(t *testing.T) {
 	fx := newFixture(t)
-	u := fx.addUsers(1)[0]
-	fx.enableProactive(u, time.Hour)
-	fx.insertJob(u, store.TriggerManual, store.JobQueued)
+	users := fx.addUsers(3) // live job, dormant, quiet hours
+	fx.enableProactive(users[0], time.Hour)
+	fx.insertJob(users[0], store.TriggerManual, store.JobQueued)
+	fx.enableProactive(users[1], time.Hour)
+	if err := fx.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(users[1], store.PauseDormant); return err }); err != nil {
+		t.Fatal(err)
+	}
+	fx.enableProactive(users[2], time.Hour, func(p *store.Policy) { p.QuietHours = "00:00-23:59" })
+	skips := func(u string) []string { return fx.auditOf(u, audit.KindProactiveSkipped) }
+
 	s := fx.scheduler()
-	skips := func() int { return len(fx.auditOf(u, audit.KindProactiveSkipped)) }
-
-	fx.runProactive(s)
-	for range 59 {
-		fx.clk.Advance(time.Minute)
+	for i := range 48 * 60 {
+		if i%7 == 0 {
+			s = fx.scheduler() // restarts keep nothing in memory
+		}
 		fx.runProactive(s)
+		fx.clk.Advance(time.Minute)
 	}
-	if got := skips(); got != 1 {
-		t.Fatalf("%d skip events within the hour, want 1", got)
+	if got := skips(users[1]); len(got) != 0 {
+		t.Errorf("a dormant user got %d skip events in 48h", len(got))
 	}
-	// another reason is recorded at once
-	if err := fx.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(u, store.PauseUser); return err }); err != nil {
-		t.Fatal(err)
-	}
-	fx.clk.Advance(time.Minute)
-	fx.runProactive(s)
-	if got := fx.auditOf(u, audit.KindProactiveSkipped); len(got) != 2 || !strings.HasSuffix(got[1], "reason=paused") {
-		t.Fatalf("skips = %v", got)
-	}
-	if err := fx.st.InTx(bg, func(tx store.Tx) error { _, err := tx.ClearPause(u, store.PauseUser); return err }); err != nil {
-		t.Fatal(err)
-	}
-	// an hour after the first live_job event the same reason is recorded again
-	fx.clk.Advance(time.Minute)
-	fx.runProactive(s)
-	if got := skips(); got != 3 {
-		t.Fatalf("%d skip events after the hour, want 3", got)
-	}
-	if len(fx.jobsOf(u)) != 1 {
-		t.Fatal("a job was started despite the live job")
-	}
-
-	// the skip left the sweep due: once the live job ends the next run starts one
-	for _, j := range fx.jobsOf(u) {
-		if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.CancelJob(u, j.ID) }); err != nil {
-			t.Fatal(err)
+	for _, e := range skips(users[2]) {
+		if strings.Contains(e, store.SkipQuietHours) {
+			t.Errorf("quiet hours were audited: %s", e)
 		}
 	}
-	fx.clk.Advance(time.Minute)
-	if n, _ := fx.runProactive(s); n != 1 {
-		t.Fatalf("started %d after the live job ended, want 1", n)
+	// live_job: once, then once more after 24h, restarts included
+	if got := skips(users[0]); len(got) != 2 || got[0] != "skipped trigger=schedule reason=live_job" {
+		t.Fatalf("live_job skips over 48h = %v, want 2", got)
+	}
+	// a change of reason is recorded at once
+	fx.cancelLive(users...) // useTokens claims the oldest queued job of anyone
+	fx.useTokens(users[0], 1<<40)
+	fx.cfg.Proactive.Limits.DailyTokens = 1000
+	s = fx.scheduler()
+	fx.runProactive(s)
+	if got := skips(users[0]); len(got) != 3 || got[2] != "skipped trigger=schedule reason=budget" {
+		t.Fatalf("after the budget ran out: %v", got)
+	}
+	if len(fx.jobsOf(users[0])) != 2 { // the cancelled manual one and the chat job
+		t.Fatal("a job was started despite the skips")
 	}
 }
 
-func TestProactiveSkipThrottleForgetsOldEntries(t *testing.T) {
+func TestProactiveSkippedUsersWaitBeforeTheNextCheck(t *testing.T) {
 	fx := newFixture(t)
-	users := fx.addUsers(3)
+	fx.cfg.Proactive.Limits = store.ProactiveLimits{DailyJobs: 2, DailyTokens: 1000}
+	users := fx.addUsers(5)
 	for _, u := range users {
 		fx.enableProactive(u, time.Hour)
-		if err := fx.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(u, store.PauseUser); return err }); err != nil {
+	}
+	// u0 live job (2m), u1 paused (5m), u2 daily cap of 2 (midnight), u3 budget
+	// (15m), u4 quiet hours 12:00-12:30 (until 12:30)
+	fx.useTokens(users[3], 900) // first: it claims the oldest queued job
+	fx.insertJob(users[0], store.TriggerManual, store.JobQueued)
+	if err := fx.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(users[1], store.PauseUser); return err }); err != nil {
+		t.Fatal(err)
+	}
+	fx.insertJob(users[2], store.TriggerManual, store.JobCancelled)
+	fx.insertJob(users[2], store.TriggerManual, store.JobCancelled)
+	fx.enableProactive(users[4], time.Hour, func(p *store.Policy) { p.QuietHours = "12:00-12:30" })
+	spy := &viewSpy{Store: fx.st}
+	fx.deps.Store = spy
+	s := fx.scheduler()
+	fx.runProactive(s)
+	if got := s.trackedNotBefore(); got != 5 {
+		t.Fatalf("tracked %d users, want 5", got)
+	}
+	want := map[string]time.Time{
+		users[0]: fx.clk.Now().Add(2 * time.Minute),
+		users[1]: fx.clk.Now().Add(5 * time.Minute),
+		users[2]: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC),
+		users[3]: fx.clk.Now().Add(15 * time.Minute),
+		users[4]: time.Date(2026, 10, 16, 12, 30, 0, 0, time.UTC),
+	}
+	for u, at := range want {
+		if got := s.notBeforeOf(u); !got.Equal(at) {
+			t.Errorf("%s not before %v, want %v", u, got, at)
+		}
+	}
+	// within the waits a run reads the due list only, no user
+	fx.clk.Advance(time.Minute)
+	spy.reset()
+	fx.runProactive(s)
+	if got := spy.views(); got != 2 { // the kill switch and one page
+		t.Errorf("%d read transactions, want 2", got)
+	}
+	// the condition ended early: the user is picked up after the wait
+	for _, j := range fx.jobsOf(users[0]) {
+		if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.CancelJob(users[0], j.ID) }); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s := fx.scheduler()
-	fx.runProactive(s)
-	if got := s.trackedSkips(); got != 3 {
-		t.Fatalf("tracked %d skips, want 3", got)
+	if n, _ := fx.runProactive(s); n != 0 {
+		t.Fatalf("started %d during the wait", n)
 	}
-	for _, u := range users[1:] {
+	fx.clk.Advance(time.Minute)
+	if n, _ := fx.runProactive(s); n != 1 || len(fx.jobsOf(users[0])) != 2 {
+		t.Fatalf("started %d after the wait, want users[0]", n)
+	}
+	// expired waits are forgotten
+	fx.clk.Advance(24 * time.Hour)
+	for _, u := range users {
 		if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.DeleteUser(u) }); err != nil {
 			t.Fatal(err)
 		}
 	}
-	fx.clk.Advance(time.Hour)
 	fx.runProactive(s)
-	if got := s.trackedSkips(); got != 1 {
-		t.Fatalf("tracked %d skips after an hour, want only the user still skipped", got)
+	if got := s.trackedNotBefore(); got != 0 {
+		t.Errorf("tracked %d users after their waits passed", got)
+	}
+}
+
+// viewSpy counts read transactions.
+type viewSpy struct {
+	store.Store
+	mu sync.Mutex
+	n  int
+}
+
+func (s *viewSpy) View(ctx context.Context, fn func(tx store.Tx) error) error {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	return s.Store.View(ctx, fn)
+}
+
+func (s *viewSpy) views() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+func (s *viewSpy) reset() {
+	s.mu.Lock()
+	s.n = 0
+	s.mu.Unlock()
+}
+
+func TestProactiveWakesOnlyAfterAStart(t *testing.T) {
+	fx := newFixture(t)
+	users := fx.addUsers(2)
+	fx.enableProactive(users[0], -1) // baseline only
+	fx.enableProactive(users[1], time.Hour)
+	fx.insertJob(users[1], store.TriggerManual, store.JobQueued) // skip only
+	s := fx.scheduler()
+	if n, _ := fx.runProactive(s); n != 0 {
+		t.Fatalf("started %d", n)
+	}
+	if fx.f.wakes() != 0 {
+		t.Errorf("woken %d times without a start", fx.f.wakes())
+	}
+	if fx.lastSweep(users[0]) == nil || len(fx.auditOf(users[1], audit.KindProactiveSkipped)) != 1 {
+		t.Fatal("the baseline or the skip is missing")
+	}
+}
+
+func TestProactiveKillSwitchWritesNothing(t *testing.T) {
+	for _, env := range []bool{false, true} {
+		fx := newFixture(t)
+		users := fx.addUsers(2)
+		fx.enableProactive(users[0], -1)
+		fx.enableProactive(users[1], time.Hour)
+		fx.insertJob(users[1], store.TriggerManual, store.JobQueued)
+		if env {
+			fx.cfg.Proactive.Limits.KillSwitchEnv = true
+		} else if err := fx.st.InTx(bg, func(tx store.Tx) error { return tx.SetSystem(store.KillSwitchKey, store.KillSwitchOnValue) }); err != nil {
+			t.Fatal(err)
+		}
+		fx.runProactive(fx.scheduler())
+		if fx.lastSweep(users[0]) != nil {
+			t.Errorf("env=%v: a baseline was written under the kill switch", env)
+		}
+		if got := fx.auditOf(users[1], audit.KindProactiveSkipped); len(got) != 0 {
+			t.Errorf("env=%v: skips = %v", env, got)
+		}
+	}
+}
+
+// The limit reached on the last user of a short page wraps the rotation at
+// once: the next run starts from the first user, not with an empty page.
+func TestProactiveLimitOnTheLastUserWraps(t *testing.T) {
+	fx := newFixture(t)
+	fx.cfg.Batch = 5
+	fx.cfg.Proactive.PerTick = 2
+	users := fx.addUsers(4)
+	fx.enableProactive(users[0], time.Hour)
+	fx.enableProactive(users[3], time.Hour)
+	s := fx.scheduler()
+	if n, _ := fx.runProactive(s); n != 2 {
+		t.Fatalf("started %d", n)
+	}
+	if s.pro.after != "" {
+		t.Fatalf("cursor = %q, want wrapped", s.pro.after)
+	}
+	// users[1] becomes due; the next run finds it at once
+	fx.enableProactive(users[1], time.Hour)
+	if n, _ := fx.runProactive(s); n != 1 || len(fx.jobsOf(users[1])) != 1 {
+		t.Fatalf("started %d, want users[1]", n)
+	}
+	// on a full page the cursor stays at the last user
+	fx.cfg.Batch = 2
+	fx.cfg.Proactive.PerTick = 1
+	fx.enableProactive(users[2], time.Hour)
+	fx.enableProactive(users[3], -1)
+	fx.cancelLive(users...)
+	s2 := fx.scheduler()
+	fx.clk.Advance(2 * time.Hour)
+	if n, _ := fx.runProactive(s2); n != 1 || s2.pro.after != users[0] {
+		t.Fatalf("started %d, cursor %q", n, s2.pro.after)
 	}
 }
 
@@ -550,11 +704,14 @@ func TestProactiveConfigIsValidated(t *testing.T) {
 		{Proactive: ProactiveConfig{PerTick: -1}},
 		{Proactive: ProactiveConfig{Limits: store.ProactiveLimits{DailyJobs: -1}}},
 		{Intervals: Intervals{Proactive: -time.Second}},
+		{Proactive: ProactiveConfig{Limits: store.ProactiveLimits{DailyTokens: -1}}},
+		{}, // the daily token cap is required: 0 would mean no budget
 	} {
 		if _, err := New(fx.deps, c); err == nil {
 			t.Errorf("%+v accepted", c)
 		}
 	}
+	fx.cfg.Proactive = ProactiveConfig{Limits: store.ProactiveLimits{DailyTokens: 1000}}
 	s := fx.scheduler()
 	if s.c.Proactive.PerTick != 50 || s.c.Proactive.Limits.DailyJobs != 24 || s.c.Intervals.Proactive != time.Minute {
 		t.Errorf("defaults = %+v, %v", s.c.Proactive, s.c.Intervals.Proactive)

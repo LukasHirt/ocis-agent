@@ -123,6 +123,9 @@ func (c Config) withDefaults() (Config, error) {
 		c.Proactive.PerTick < 0 || c.Proactive.Limits.DailyJobs < 0 || c.Proactive.Limits.DailyTokens < 0 {
 		return c, errors.New("scheduler: negative config value")
 	}
+	if c.Proactive.Limits.DailyTokens == 0 {
+		return c, errors.New("scheduler: the proactive daily token cap is required")
+	}
 	if c.Batch > maxBatch {
 		return c, fmt.Errorf("scheduler: batch above %d", maxBatch)
 	}

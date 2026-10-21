@@ -265,7 +265,8 @@ func newFixture(t *testing.T) *fixture {
 		Log: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now: clk.Now,
 	}
-	fx.cfg = Config{MaxAttempts: 3, LeaseTTL: 2 * time.Minute, RetrySettle: 2 * time.Minute, CallTimeout: 5 * time.Minute, SweepInterval: 15 * time.Minute}
+	fx.cfg = Config{MaxAttempts: 3, LeaseTTL: 2 * time.Minute, RetrySettle: 2 * time.Minute, CallTimeout: 5 * time.Minute, SweepInterval: 15 * time.Minute,
+		Proactive: ProactiveConfig{Limits: store.ProactiveLimits{DailyTokens: 1 << 40}}}
 	return fx
 }
 

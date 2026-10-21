@@ -102,6 +102,153 @@ func runProactive(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("CountJobsOfKinds counts kinds, states and creation in one", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u")
+		mustUser(t, st, "other")
+		start := clk.Now()
+		mustTx(t, st, func(tx store.Tx) error {
+			for _, j := range []store.Job{
+				{UserID: "u", TriggerKind: store.TriggerSchedule, Goal: "g"},
+				{UserID: "u", TriggerKind: store.TriggerManual, Goal: "g"},
+				{UserID: "u", TriggerKind: store.TriggerChat, Goal: "g"},
+				{UserID: "other", TriggerKind: store.TriggerSchedule, Goal: "g"},
+			} {
+				if _, err := tx.InsertJob(j); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		clk.Advance(time.Hour)
+		mustTx(t, st, func(tx store.Tx) error {
+			j, err := tx.InsertJob(store.Job{UserID: "u", TriggerKind: store.TriggerFileEvent, Goal: "g"})
+			if err != nil {
+				return err
+			}
+			return tx.CancelJob("u", j.ID)
+		})
+		count := func(kinds []string, states []store.JobState, since time.Time) int {
+			t.Helper()
+			var n int
+			if err := st.View(bg(), func(tx store.Tx) error {
+				var err error
+				n, err = tx.CountJobsOfKinds("u", kinds, states, since)
+				return err
+			}); err != nil {
+				t.Fatalf("CountJobsOfKinds: %v", err)
+			}
+			return n
+		}
+		live := []store.JobState{store.JobQueued, store.JobRunning, store.JobWaitingApproval}
+		if got := count(store.ProactiveTriggers, live, time.Time{}); got != 2 {
+			t.Errorf("live proactive = %d, want 2", got)
+		}
+		if got := count(store.ProactiveTriggers, nil, time.Time{}); got != 3 {
+			t.Errorf("all proactive = %d, want 3", got)
+		}
+		if got := count(store.ProactiveTriggers, nil, start.Add(time.Hour)); got != 1 {
+			t.Errorf("proactive since the hour = %d, want 1", got)
+		}
+		if got := count(store.ProactiveTriggers, nil, start); got != 3 {
+			t.Errorf("since is inclusive: %d", got)
+		}
+		if got := count([]string{store.TriggerChat}, live, time.Time{}); got != 1 {
+			t.Errorf("chat = %d", got)
+		}
+		if got := count(nil, nil, time.Time{}); got != 0 {
+			t.Errorf("no kinds = %d, want 0", got)
+		}
+		err := st.View(bg(), func(tx store.Tx) error {
+			_, err := tx.CountJobsOfKinds("u", store.ProactiveTriggers, []store.JobState{"bogus"}, time.Time{})
+			return err
+		})
+		if !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("unknown state: %v", err)
+		}
+	})
+
+	t.Run("AuditProactiveSkip records a reason when it changes and then once a day", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u")
+		skip := func(trigger, reason string) bool {
+			t.Helper()
+			var wrote bool
+			mustTx(t, st, func(tx store.Tx) error {
+				var err error
+				wrote, err = store.AuditProactiveSkip(tx, "u", trigger, reason, clk.Now())
+				return err
+			})
+			return wrote
+		}
+		// never: reasons that are audited elsewhere or expected
+		for _, r := range []string{store.SkipNotEnrolled, store.SkipDisabled, store.SkipKillSwitch, store.SkipPaused, store.SkipQuietHours} {
+			if skip(store.TriggerSchedule, r) {
+				t.Errorf("%s was audited", r)
+			}
+		}
+		if !skip(store.TriggerSchedule, store.SkipLiveJob) {
+			t.Fatal("the first live_job skip was not audited")
+		}
+		clk.Advance(23 * time.Hour)
+		if skip(store.TriggerSchedule, store.SkipLiveJob) || skip(store.TriggerFileEvent, store.SkipLiveJob) {
+			t.Error("the same reason was audited again within a day")
+		}
+		// a paused or quiet skip in between is no change
+		skip(store.TriggerSchedule, store.SkipPaused)
+		if skip(store.TriggerSchedule, store.SkipLiveJob) {
+			t.Error("a pause in between counted as a change")
+		}
+		clk.Advance(time.Hour)
+		if !skip(store.TriggerSchedule, store.SkipLiveJob) {
+			t.Error("not audited again after 24h")
+		}
+		if !skip(store.TriggerSchedule, store.SkipBudget) || !skip(store.TriggerSchedule, store.SkipLiveJob) {
+			t.Error("a change of reason was not audited")
+		}
+		// a started job ends the run of skips: the next one is a change
+		mustTx(t, st, func(tx store.Tx) error {
+			_, err := store.StartProactive(tx, "u", store.TriggerManual, clk.Now(), "oidc")
+			return err
+		})
+		clk.Advance(time.Minute)
+		if !skip(store.TriggerSchedule, store.SkipLiveJob) {
+			t.Error("a skip after a start was not audited")
+		}
+		var details []string
+		for _, r := range readAll(t, st, "u") {
+			if r.Kind == audit.KindProactiveSkipped {
+				details = append(details, r.Outcome+" "+r.Detail)
+			}
+		}
+		want := []string{
+			"skipped trigger=schedule reason=live_job", "skipped trigger=schedule reason=live_job",
+			"skipped trigger=schedule reason=budget", "skipped trigger=schedule reason=live_job",
+			"skipped trigger=schedule reason=live_job",
+		}
+		if !slices.Equal(details, want) {
+			t.Errorf("skips = %v, want %v", details, want)
+		}
+		// a rolled-back skip leaves nothing: the next one is audited
+		mustUser(t, st, "v")
+		boom := errors.New("boom")
+		if err := st.InTx(bg(), func(tx store.Tx) error {
+			if _, err := store.AuditProactiveSkip(tx, "v", store.TriggerSchedule, store.SkipDailyCap, clk.Now()); err != nil {
+				return err
+			}
+			return boom
+		}); !errors.Is(err, boom) {
+			t.Fatal(err)
+		}
+		mustTx(t, st, func(tx store.Tx) error {
+			wrote, err := store.AuditProactiveSkip(tx, "v", store.TriggerSchedule, store.SkipDailyCap, clk.Now())
+			if err == nil && !wrote {
+				t.Error("the skip after a rollback was not audited")
+			}
+			return err
+		})
+	})
+
 	t.Run("CheckProactive reasons", func(t *testing.T) {
 		st, clk := open(t, f)
 		mustUser(t, st, "u")

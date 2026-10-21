@@ -494,16 +494,20 @@ other than a read or a memory write becomes an approval. Its goal is a fixed tex
 name or other data. A review is not started while the kill switch is on or the agent is paused
 (any reason), while another review (of any kind) is queued, running or waiting for approval,
 after `AGENT_PROACTIVE_DAILY_JOBS` (24) reviews of the UTC day, or once 80% of the day's token
-budget is used. A scheduled review that is skipped for one of these reasons is retried a minute
-later and recorded as `proactive_skipped` with the reason (at most once per reason and hour);
-a started one as `proactive_started`.
+budget is used; a running review also stops at 80% (chat jobs may use the whole budget). A
+skipped scheduled review is checked again a few minutes later (at the end of the quiet hours, or
+at midnight UTC for the daily cap). A skip because of a live review, the daily cap or the budget
+is recorded as `proactive_skipped` with the reason when the reason changes, and at most once a day
+while it stays the same; pauses (already audited) and quiet hours are not recorded. A started
+review is recorded as `proactive_started`.
 
 ### POST /agent-api/v1/proactive/run
 
 Empty body or `{}`. Starts a review now (`trigger_kind` `manual`), regardless of quiet hours and
 the interval; it counts as the last scheduled one. `202` with the job (fields as in `GET /jobs`)
 and the workers are woken. `409` when it cannot start: `not_enrolled`, `proactive_disabled`,
-`kill_switch`, `paused`, `live_job`, `daily_cap` or `budget`. Cooldown: 5 s, also used up by a
+`kill_switch`, `paused` (`credentials_invalid` for a `credential_*` pause: enrol again),
+`live_job`, `daily_cap` or `budget`. Cooldown: 5 s, also used up by a
 refused run.
 
 ## Audit log
@@ -614,7 +618,7 @@ get `503 unavailable`.
 | `proactive_disabled` | 409 | Proactive reviews are turned off in your settings. |
 | `kill_switch` | 409 | The operator has stopped the agent. |
 | `paused` | 409 | The agent is paused. |
-| `live_job` | 409 | A review is already queued or running. |
+| `live_job` | 409 | A review is already queued, running or waiting for your approval. |
 | `daily_cap` | 409 | Today's limit of reviews is reached; it resets at midnight UTC. |
 | `budget` | 409 | Most of today's token budget is used; reviews resume at midnight UTC. |
 | `expired` | 410 | This has expired. |

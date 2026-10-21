@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
@@ -108,23 +109,17 @@ func CheckProactive(tx Tx, userID string, now time.Time, l ProactiveLimits, quie
 	if quiet && InQuietHours(pol.QuietHours, now) {
 		return SkipQuietHours, nil
 	}
-	for _, kind := range ProactiveTriggers {
-		n, err := tx.CountJobsInStates(userID, liveJobStates, kind)
-		if err != nil {
-			return "", err
-		}
-		if n > 0 {
-			return SkipLiveJob, nil
-		}
+	live, err := tx.CountJobsOfKinds(userID, ProactiveTriggers, liveJobStates, time.Time{})
+	if err != nil {
+		return "", err
+	}
+	if live > 0 {
+		return SkipLiveJob, nil
 	}
 	day := StartOfUTCDay(now)
-	total := 0
-	for _, kind := range ProactiveTriggers {
-		n, err := tx.CountJobsSince(userID, kind, day)
-		if err != nil {
-			return "", err
-		}
-		total += n
+	total, err := tx.CountJobsOfKinds(userID, ProactiveTriggers, nil, day)
+	if err != nil {
+		return "", err
 	}
 	if total >= l.DailyJobs {
 		return SkipDailyCap, nil
@@ -134,8 +129,7 @@ func CheckProactive(tx Tx, userID string, now time.Time, l ProactiveLimits, quie
 		if err != nil {
 			return "", err
 		}
-		// budget - budget/5 is 80% of the budget rounded up, without overflow
-		if in+out >= budget-budget/5 {
+		if BudgetReached(in+out, budget, TriggerSchedule) {
 			return SkipBudget, nil
 		}
 	}
@@ -178,6 +172,76 @@ func StartProactive(tx Tx, userID, kind string, now time.Time, cred string) (Job
 	return job, nil
 }
 
+// Skip auditing (AuditProactiveSkip).
+const (
+	// SkipAuditRepeat is how long the same skip reason stays unaudited.
+	SkipAuditRepeat = 24 * time.Hour
+	// skipAuditLookback is how many of the user's newest audit records are
+	// searched for the last proactive event; one further back counts as no
+	// event, so at worst a skip is audited once per that many other events.
+	skipAuditLookback = 200
+)
+
+// auditedSkip reports whether a skip reason is ever audited: only the caps,
+// which say why proactive work did not happen. A pause is audited when it
+// happens, quiet hours are the user's own setting, and the others mean
+// there is nothing to report.
+func auditedSkip(reason string) bool {
+	return reason == SkipLiveJob || reason == SkipDailyCap || reason == SkipBudget
+}
+
+// AuditProactiveSkip appends a proactive_skipped event (outcome skipped,
+// detail "trigger=<trigger> reason=<reason>") when it is worth recording,
+// and reports whether it did: only for SkipLiveJob, SkipDailyCap and
+// SkipBudget, and only if the user's last proactive event (skipped or
+// started, within the newest records of the chain) is not a skip for the
+// same reason less than SkipAuditRepeat ago. The record is the audit chain
+// itself, so the rule holds across restarts, a rolled-back skip leaves no
+// trace, and a started job (proactive_started) ends a run of skips. Call it
+// in the transaction that decided the skip.
+func AuditProactiveSkip(tx Tx, userID, trigger, reason string, now time.Time) (bool, error) {
+	if !auditedSkip(reason) {
+		return false, nil
+	}
+	recs, err := tx.ReadAuditBefore(userID, 0, skipAuditLookback)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range recs {
+		if r.Kind == audit.KindProactiveStarted {
+			break
+		}
+		if r.Kind == audit.KindProactiveSkipped {
+			if strings.HasSuffix(r.Detail, " reason="+reason) && now.Sub(r.TS) < SkipAuditRepeat {
+				return false, nil
+			}
+			break
+		}
+	}
+	if _, err := tx.AppendAudit(audit.Event{
+		UserID: userID, TS: now, Kind: audit.KindProactiveSkipped, Outcome: "skipped",
+		Detail: "trigger=" + trigger + " reason=" + reason,
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BudgetReached reports whether used tokens exhaust the daily budget for a
+// job of triggerKind: a chat job may use all of it, every other (proactive)
+// job stops at 80%, so interactive chat keeps the rest. budget <= 0 is
+// unlimited. The runner's precheck and CheckProactive both use it.
+func BudgetReached(used, budget int64, triggerKind string) bool {
+	if budget <= 0 {
+		return false
+	}
+	if ModelTaskFor(triggerKind) == ModelTaskProactive {
+		// budget - budget/5 is 80% of the budget rounded up, without overflow
+		return used >= budget-budget/5
+	}
+	return used >= budget
+}
+
 // StartOfUTCDay is the midnight (UTC) that starts t's UTC day: daily caps
 // and budgets reset there.
 func StartOfUTCDay(t time.Time) time.Time {
@@ -210,6 +274,23 @@ func InQuietHours(q string, t time.Time) bool {
 		return m >= start && m < end
 	}
 	return m >= start || m < end
+}
+
+// QuietHoursEnd returns when the quiet hours q that contain t (read in UTC)
+// end, or the zero time if t is not in them (also for "" and a malformed
+// value).
+func QuietHoursEnd(q string, t time.Time) time.Time {
+	start, end, ok := parseQuietHours(q)
+	if !ok || !InQuietHours(q, t) {
+		return time.Time{}
+	}
+	u := t.UTC()
+	day := StartOfUTCDay(u)
+	at := day.Add(time.Duration(end) * time.Minute)
+	if m := u.Hour()*60 + u.Minute(); start > end && m >= start {
+		at = at.AddDate(0, 0, 1)
+	}
+	return at
 }
 
 func parseQuietHours(q string) (start, end int, ok bool) {

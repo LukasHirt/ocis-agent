@@ -42,7 +42,7 @@ var errorMessages = map[string]string{
 	"proactive_disabled":     "Proactive reviews are turned off in your settings.",
 	"kill_switch":            "The operator has stopped the agent.",
 	"paused":                 "The agent is paused.",
-	"live_job":               "A review is already queued or running.",
+	"live_job":               "A review is already queued, running or waiting for your approval.",
 	"daily_cap":              "Today's limit of reviews is reached; it resets at midnight UTC.",
 	"budget":                 "Most of today's token budget is used; reviews resume at midnight UTC.",
 	"expired":                "This has expired.",

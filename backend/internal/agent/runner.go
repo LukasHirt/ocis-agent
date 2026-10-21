@@ -139,7 +139,8 @@ func (r *Runner) precheck(ctx context.Context, claim store.Claim, ph phase) (sto
 	}); err != nil {
 		return pol, creds, false, fmt.Errorf("agent: read token usage: %w", err)
 	}
-	if budget := store.DailyBudget(pol.DailyTokens, r.cfg.UserDailyTokens); budget > 0 && in+out >= budget {
+	// proactive jobs stop at 80% of the budget, so chat keeps the rest
+	if store.BudgetReached(in+out, store.DailyBudget(pol.DailyTokens, r.cfg.UserDailyTokens), claim.Job.TriggerKind) {
 		return pol, creds, true, r.fail(ctx, claim, ReasonBudget)
 	}
 	return pol, creds, false, nil

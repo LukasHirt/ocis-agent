@@ -97,3 +97,45 @@ func TestQuietHours(t *testing.T) {
 		}
 	}
 }
+
+func TestQuietHoursEnd(t *testing.T) {
+	day := func(d, h, m int) time.Time { return time.Date(2026, 10, d, h, m, 0, 0, time.UTC) }
+	cases := []struct {
+		q    string
+		at   time.Time
+		want time.Time
+	}{
+		{"22:00-07:00", day(25, 23, 10), day(26, 7, 0)},
+		{"22:00-07:00", day(25, 22, 0), day(26, 7, 0)},
+		{"22:00-07:00", day(26, 3, 59), day(26, 7, 0)},
+		{"01:00-05:30", day(25, 1, 0), day(25, 5, 30)},
+		{"23:59-00:00", day(25, 23, 59), day(26, 0, 0)},
+		// not quiet, empty or malformed: zero
+		{"22:00-07:00", day(25, 12, 0), time.Time{}},
+		{"", day(25, 12, 0), time.Time{}},
+		{"bad", day(25, 12, 0), time.Time{}},
+	}
+	for _, c := range cases {
+		if got := QuietHoursEnd(c.q, c.at.Add(30*time.Second)); !got.Equal(c.want) {
+			t.Errorf("QuietHoursEnd(%q, %s) = %v, want %v", c.q, c.at.Format("02 15:04"), got, c.want)
+		}
+	}
+}
+
+func TestBudgetReached(t *testing.T) {
+	for _, c := range []struct {
+		used, budget int64
+		kind         string
+		want         bool
+	}{
+		{799, 1000, TriggerSchedule, false}, {800, 1000, TriggerSchedule, true},
+		{800, 1000, TriggerFileEvent, true}, {800, 1000, TriggerManual, true},
+		{801, 1001, TriggerSchedule, true}, {800, 1001, TriggerSchedule, false},
+		{999, 1000, TriggerChat, false}, {1000, 1000, TriggerChat, true},
+		{1 << 62, 0, TriggerSchedule, false}, {1 << 62, -1, TriggerChat, false},
+	} {
+		if got := BudgetReached(c.used, c.budget, c.kind); got != c.want {
+			t.Errorf("BudgetReached(%d, %d, %s) = %v", c.used, c.budget, c.kind, got)
+		}
+	}
+}

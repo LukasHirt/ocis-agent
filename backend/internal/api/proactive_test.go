@@ -109,9 +109,22 @@ func TestProactiveRunRefusals(t *testing.T) {
 		{"paused", func(t *testing.T, s *stack) {
 			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseUser })
 		}, "paused"},
+		{"dormant", func(t *testing.T, s *stack) {
+			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseDormant })
+		}, "paused"},
+		{"token anomaly", func(t *testing.T, s *stack) {
+			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseTokenAnomaly })
+		}, "paused"},
+		// a credential pause needs a new enrolment: say so
 		{"credentials revoked", func(t *testing.T, s *stack) {
 			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseCredentialRevoked })
-		}, "paused"},
+		}, "credentials_invalid"},
+		{"credentials invalid", func(t *testing.T, s *stack) {
+			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseCredentialInvalid })
+		}, "credentials_invalid"},
+		{"credentials expired", func(t *testing.T, s *stack) {
+			s.setPolicy(t, einsteinID, func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseCredentialExpired })
+		}, "credentials_invalid"},
 		{"kill switch", func(t *testing.T, s *stack) {
 			s.mustTx(t, func(tx store.Tx) error { return tx.SetSystem(store.KillSwitchKey, store.KillSwitchOnValue) })
 		}, "kill_switch"},
@@ -253,5 +266,11 @@ func TestEnablingProactiveSetsTheSweepBaseline(t *testing.T) {
 	put(`{"proactive_enabled":true}`)
 	if got := cursor().LastSweepAt; got == nil || !got.Equal(s.fake.Now()) {
 		t.Errorf("re-enabling: baseline = %v, want now", got)
+	}
+}
+
+func TestProactiveLiveJobMessageMentionsApprovals(t *testing.T) {
+	if got := errorMessages["live_job"]; got != "A review is already queued, running or waiting for your approval." {
+		t.Errorf("live_job message = %q", got)
 	}
 }

@@ -331,6 +331,11 @@ type Tx interface {
 	// CountJobsSince counts the user's jobs in any state created at or after
 	// since with the given trigger kind (any kind if empty).
 	CountJobsSince(userID, triggerKind string, since time.Time) (int, error)
+	// CountJobsOfKinds counts, in one query, the user's jobs whose trigger
+	// kind is one of kinds (none: 0), in any of states (all states if
+	// empty), created at or after since (zero: any time). ErrInvalid for an
+	// unknown state.
+	CountJobsOfKinds(userID string, kinds []string, states []JobState, since time.Time) (int, error)
 	// CountConversations counts the user's conversations.
 	CountConversations(userID string) (int, error)
 	// ChangeMarks returns the user's change marks (see ChangeMarks).

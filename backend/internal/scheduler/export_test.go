@@ -1,7 +1,12 @@
 package scheduler
 
+import "time"
+
 // trackedSweeps is how many users the sweep remembers.
 func (s *Scheduler) trackedSweeps() int { return len(s.sweep.last) }
 
-// trackedSkips is how many (user, reason) skip events the proactive task remembers.
-func (s *Scheduler) trackedSkips() int { return len(s.pro.skipped) }
+// trackedNotBefore is how many skipped users the proactive task makes wait.
+func (s *Scheduler) trackedNotBefore() int { return len(s.pro.notBefore) }
+
+// notBeforeOf is when the proactive task checks the user again.
+func (s *Scheduler) notBeforeOf(user string) time.Time { return s.pro.notBefore[user] }
