@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package integration
 
@@ -100,9 +100,10 @@ func (h *harness) enrol(t *testing.T) statusDoc {
 	if err := json.Unmarshal(r.body, &s); err != nil {
 		t.Fatal(err)
 	}
-	if h.labelPrefix() == "" {
-		h.learnPrefix(t)
-	}
+	// the prefix recorded from the database must be the one the sidecar
+	// marks as its own; the README the first enrolment created is noted
+	h.learnPrefix(t)
+	h.noteReadme(t)
 	return s
 }
 
@@ -579,7 +580,7 @@ func scenarioMemory(t *testing.T, h *harness) {
 	}
 
 	put := func(etag, content string) apiResp {
-		return h.call(t, http.MethodPut, "/memory/"+name, map[string]string{"content": content}, map[string]string{"If-Match": etag})
+		return h.callRetryHdr(t, http.MethodPut, "/memory/"+name, map[string]string{"content": content}, map[string]string{"If-Match": etag})
 	}
 	if r := h.call(t, http.MethodPut, "/memory/"+name, map[string]string{"content": "x"}, nil); r.status != http.StatusPreconditionRequired {
 		t.Fatalf("PUT without If-Match = %s", r)

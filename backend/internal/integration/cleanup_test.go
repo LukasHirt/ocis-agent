@@ -1,11 +1,16 @@
+//go:build unix
+
 package integration
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The rules of what the integration test may delete in oCIS. They run in the
@@ -62,6 +67,9 @@ func TestPrefixCollides(t *testing.T) {
 
 func TestDeletablePath(t *testing.T) {
 	created := map[string]bool{
+		"/ocis-agent-it-abc.txt":                         true,
+		"/ocis-agent-it-":                                true, // recorded, but no name after the prefix
+		"/ocis-agent-it-abc/../x":                        true,
 		"/.ocis-agent/memory/notes/ocis-agent-it-abc.md": true,
 		"/.ocis-agent/README.md":                         true,
 		// recorded, but never a file the test creates: refused anyway
@@ -167,5 +175,202 @@ func TestOwnTempDir(t *testing.T) {
 	}
 	if !strings.HasPrefix(stateFile(), root) {
 		t.Fatalf("state file %s is not in the temp dir", stateFile())
+	}
+}
+
+func TestCheckStateDir(t *testing.T) {
+	uid := os.Getuid()
+	good := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(good, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateDir(good, uid); err != nil {
+		t.Fatalf("a private dir is refused: %v", err)
+	}
+	if err := checkStateDir(good, uid+1); err == nil {
+		t.Fatal("a dir of another owner is accepted")
+	}
+	open := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateDir(open, uid); err == nil {
+		t.Fatal("a 0755 dir is accepted")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateDir(link, uid); err == nil {
+		t.Fatal("a symlink to a private dir is accepted")
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateDir(file, uid); err == nil {
+		t.Fatal("a file is accepted")
+	}
+	if err := checkStateDir(filepath.Join(t.TempDir(), "missing"), uid); err == nil {
+		t.Fatal("a missing dir is accepted")
+	}
+}
+
+func TestRecordedBinary(t *testing.T) {
+	own := filepath.Join(os.TempDir(), testFilePrefix+"42")
+	for _, c := range []struct {
+		st   runState
+		want bool
+	}{
+		{runState{Binary: filepath.Join(own, "ocis-agent"), Dirs: []string{own}}, true},
+		{runState{Binary: "/", Dirs: []string{own}}, false},
+		{runState{Binary: "", Dirs: []string{own}}, false},
+		{runState{Binary: filepath.Join(own, "ocis-agent")}, false},                                      // dir not recorded
+		{runState{Binary: filepath.Join(own, "other"), Dirs: []string{own}}, false},                      // not the built binary
+		{runState{Binary: "/usr/bin/ocis-agent", Dirs: []string{"/usr/bin"}}, false},                     // not our temp dir
+		{runState{Binary: filepath.Join(own, "..", "x", "ocis-agent"), Dirs: []string{own}}, false},      // not clean
+		{runState{Binary: filepath.Join(own, "sub", "ocis-agent"), Dirs: []string{own + "/sub"}}, false}, // not directly in the temp dir
+	} {
+		if _, got := recordedBinary(c.st); got != c.want {
+			t.Errorf("recordedBinary(%+v) = %v, want %v", c.st, got, c.want)
+		}
+	}
+}
+
+// startSleep runs an unrelated process with an absolute argv[0].
+func startSleep(t *testing.T) (*exec.Cmd, string) {
+	t.Helper()
+	bin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	if bin, err = filepath.Abs(bin); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd, bin
+}
+
+func TestRunsExactly(t *testing.T) {
+	cmd, bin := startSleep(t)
+	pid := cmd.Process.Pid
+	if !runsExactly(pid, bin) {
+		t.Fatalf("the sleep process is not recognised by its exact argv[0] %s", bin)
+	}
+	for _, want := range []string{"/", "", "sleep", bin + "x", filepath.Dir(bin)} {
+		if runsExactly(pid, want) {
+			t.Errorf("runsExactly(sleep, %q) = true", want)
+		}
+	}
+	if runsExactly(0, bin) || runsExactly(-1, bin) {
+		t.Error("an invalid pid matches")
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if runsExactly(pid, bin) {
+		t.Error("an ended process still matches")
+	}
+}
+
+func TestRunLock(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireLock(dir); err == nil || !strings.Contains(err.Error(), "another integration run") {
+		t.Fatalf("a second lock while the first is held = %v", err)
+	}
+	release()
+	release() // idempotent
+	release2, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("lock after release: %v", err)
+	}
+	release2()
+
+	// a stale lock: its pid runs something else than the recorded binary
+	cmd, bin := startSleep(t)
+	lock := filepath.Join(dir, "lock")
+	plant := func(pid int, argv0 string) {
+		t.Helper()
+		if err := os.WriteFile(lock, []byte(`{"pid":`+strconv.Itoa(pid)+`,"argv0":"`+argv0+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plant(cmd.Process.Pid, "/some/integration.test")
+	release3, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("a lock of a pid that runs another binary is not taken over: %v", err)
+	}
+	release3()
+	// a lock of a live process that runs exactly the recorded binary is held
+	plant(cmd.Process.Pid, bin)
+	if _, err := acquireLock(dir); err == nil {
+		t.Fatal("a live lock is taken over")
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if !eventuallyTrue(5*time.Second, func() bool { return !runsExactly(cmd.Process.Pid, bin) }) {
+		t.Fatal("sleep did not end")
+	}
+	release4, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("the lock of an ended process is not taken over: %v", err)
+	}
+	release4()
+	// a damaged lock is not taken over silently
+	if err := os.WriteFile(lock, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireLock(dir); err == nil {
+		t.Fatal("a damaged lock is taken over")
+	}
+}
+
+func eventuallyTrue(d time.Duration, f func() bool) bool {
+	deadline := time.Now().Add(d)
+	for !f() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+func TestReadmeDeletable(t *testing.T) {
+	if !readmeDeletable(`"e1"`, `"e1"`) {
+		t.Fatal("the README the test created is not deletable")
+	}
+	for _, c := range [][2]string{{"", ""}, {"", `"e1"`}, {`"e1"`, `"e2"`}, {`"e1"`, ""}} {
+		if readmeDeletable(c[0], c[1]) {
+			t.Errorf("readmeDeletable(%q, %q) = true", c[0], c[1])
+		}
+	}
+}
+
+func TestPropfindInfo(t *testing.T) {
+	file := `<d:multistatus><d:response><d:href>/x</d:href><d:propstat><d:prop><d:getetag>"abc"</d:getetag><d:resourcetype></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>`
+	dir := `<d:multistatus><d:response><d:href>/x/</d:href><d:propstat><d:prop><d:getetag>"d"</d:getetag><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>`
+	if etag, isDir, ok := propfindInfo(file); !ok || isDir || etag != `"abc"` {
+		t.Fatalf("file: %q %v %v", etag, isDir, ok)
+	}
+	if _, isDir, ok := propfindInfo(dir); !ok || !isDir {
+		t.Fatalf("dir: %v %v", isDir, ok)
+	}
+	if _, _, ok := propfindInfo("garbage"); ok {
+		t.Fatal("garbage parses")
+	}
+	two := `<d:multistatus><d:response></d:response><d:response></d:response></d:multistatus>`
+	if _, _, ok := propfindInfo(two); ok {
+		t.Fatal("two entries parse as one")
 	}
 }

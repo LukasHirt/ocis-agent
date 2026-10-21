@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 // The end-to-end test of the sidecar against the dev stack (docker compose in
 // the repository root): real oCIS, a real OIDC login of the demo user, real
@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/store/sqlite"
 )
 
 const (
@@ -62,27 +66,40 @@ var (
 // without it (the go test timeout, SIGKILL) is cleaned up by the next run
 // from the state file (recoverOrphan).
 func TestMain(m *testing.M) {
+	trapped := []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sig, trapped...)
 	go func() {
 		s := <-sig
+		// a second signal ends the process at once (the default action);
+		// the next run's recovery covers what the cleanup did not finish
+		signal.Reset(trapped...)
+		code := 128 + int(s.(syscall.Signal))
 		activeMu.Lock()
 		h := active
 		activeMu.Unlock()
 		if h != nil {
-			fmt.Fprintln(os.Stderr, "integration: interrupted, cleaning up")
-			for _, err := range h.teardown(func(f string, a ...any) { fmt.Fprintf(os.Stderr, "integration: "+f+"\n", a...) }) {
-				fmt.Fprintln(os.Stderr, "integration: cleanup:", err)
+			fmt.Fprintln(os.Stderr, "integration: interrupted, cleaning up (signal again to stop at once)")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for _, err := range h.teardown(func(f string, a ...any) { fmt.Fprintf(os.Stderr, "integration: "+f+"\n", a...) }) {
+					fmt.Fprintln(os.Stderr, "integration: cleanup:", err)
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(signalCleanupBound):
+				fmt.Fprintln(os.Stderr, "integration: the cleanup did not finish in time; the next run recovers from", stateFile())
 			}
-		}
-		code := 130
-		if s == syscall.SIGTERM {
-			code = 143
 		}
 		os.Exit(code)
 	}()
 	os.Exit(m.Run())
 }
+
+// signalCleanupBound caps the cleanup after a signal.
+const signalCleanupBound = 90 * time.Second
 
 // stackURL returns the dev stack's URL: https://localhost:$OCIS_DEV_PORT, the
 // port from the environment, else from the repository's .env, else 9200.
@@ -163,6 +180,12 @@ type harness struct {
 
 	teardownOnce sync.Once
 	teardownErrs []error
+	release      func() // the run lock
+
+	// readmeOurs: the README did not exist before the run, so the run's
+	// enrolment creates it (its ETag is then recorded)
+	readmeOurs bool
+	dataDir    string
 }
 
 type lockedBuffer struct {
@@ -191,9 +214,19 @@ func startHarness(t *testing.T) *harness {
 	if err := stackUp(base); err != nil {
 		t.Skipf("the dev stack does not answer at %s (%v): start it with `make dev-up` (or `docker compose up -d` in the repository root); set OCIS_DEV_PORT for another port", base, err)
 	}
+	// one run at a time, locked before anything is created
+	dir, err := ensureStateDir()
+	if err != nil {
+		t.Fatalf("the state directory is not safe to use (%v): it must be a directory of this user with mode 0700", err)
+	}
+	release, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("integration run lock: %v", err)
+	}
+	t.Cleanup(release)
 	h := &harness{
 		base: base, http: insecureClient(), logs: &lockedBuffer{}, exited: make(chan struct{}),
-		created: map[string]bool{}, deleted: map[string]bool{},
+		created: map[string]bool{}, deleted: map[string]bool{}, release: release,
 	}
 	h.http.Timeout = 60 * time.Second
 	h.state = runState{Started: time.Now().Unix(), TestPID: os.Getpid()}
@@ -218,9 +251,7 @@ func startHarness(t *testing.T) *harness {
 		}
 		h.state.MemoryDirs = append(h.state.MemoryDirs, d)
 	}
-	if !h.exists(t, readmePath) {
-		h.track(readmePath)
-	}
+	h.readmeOurs = !h.exists(t, readmePath)
 	list, err := h.listTokens()
 	if err != nil {
 		t.Fatalf("list the user's app tokens: %v", err)
@@ -266,6 +297,7 @@ func startHarness(t *testing.T) *harness {
 	}
 	h.key = base64.StdEncoding.EncodeToString(keyBytes)
 	dataDir := h.tempDir(t)
+	h.dataDir = dataDir
 
 	// the free ports are found by listening and closing: another process can
 	// take one before the sidecar binds it, so retry with new ports
@@ -283,7 +315,44 @@ func startHarness(t *testing.T) *harness {
 			t.Fatalf("the sidecar did not become healthy: %v\n%s", err, h.logTail())
 		}
 	}
+	// the instance prefix is recorded before the first enrolment, so a run
+	// killed at any later point leaves a prefix to clean up by
+	prefix, err := instancePrefix(filepath.Join(dataDir, "agent.db"))
+	if err != nil {
+		t.Fatalf("read the sidecar's instance id: %v", err)
+	}
+	if prefixCollides(prefix, h.preexisting) {
+		t.Fatalf("a token that existed before the sidecar started carries its label prefix: refusing to manage tokens by it")
+	}
+	h.mu.Lock()
+	h.state.Prefix = prefix
+	h.mu.Unlock()
+	h.saveState(t.Logf)
 	return h
+}
+
+// instancePrefix reads the sidecar's instance id from its database and
+// returns its token label prefix.
+func instancePrefix(dbPath string) (string, error) {
+	st, err := sqlite.Open(dbPath)
+	if err != nil {
+		return "", err
+	}
+	defer st.Close()
+	var id string
+	err = st.View(context.Background(), func(tx store.Tx) error {
+		var err error
+		id, err = tx.GetSystem("instance_id")
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	p := "ocis-agent-" + id + "-"
+	if !validPrefix(p) {
+		return "", errors.New("the instance id has an unexpected shape")
+	}
+	return p, nil
 }
 
 // tempDir makes a directory a later run recognises as ours (ownTempDir) and
@@ -491,9 +560,18 @@ func (h *harness) teardown(logf func(string, ...any)) []error {
 		temps := append([]string(nil), h.state.Dirs...)
 		h.mu.Unlock()
 		for _, p := range files {
+			if p == readmePath {
+				continue // removeReadme
+			}
 			if st, err := h.remove(p); err != nil || (st != http.StatusNoContent && st != http.StatusNotFound) {
 				errs = append(errs, fmt.Errorf("delete %s: %d %v", p, st, err))
 			}
+		}
+		h.mu.Lock()
+		readmeETag := h.state.ReadmeETag
+		h.mu.Unlock()
+		if err := h.removeReadme(readmeETag, logf); err != nil {
+			errs = append(errs, err)
 		}
 		errs = append(errs, h.removeEmptyDirs(dirs, logf)...)
 		if n, err := h.purgeTrash(); err != nil {
@@ -512,6 +590,9 @@ func (h *harness) teardown(logf func(string, ...any)) []error {
 			logf("the state file %s stays for the next run's cleanup", stateFile())
 		}
 		h.teardownErrs = errs
+		if h.release != nil {
+			h.release()
+		}
 	})
 	return h.teardownErrs
 }
@@ -571,13 +652,90 @@ func (h *harness) remove(p string) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("refusing to delete %s: not a file this test created", p)
 	}
-	st, _, err := h.dav(http.MethodDelete, p, nil, nil)
+	st, body, err := h.dav("PROPFIND", p, nil, map[string]string{"Depth": "0"})
+	if err != nil || st == http.StatusNotFound {
+		return st, err
+	}
+	if st != http.StatusMultiStatus {
+		return st, fmt.Errorf("PROPFIND %s = %d before the delete", p, st)
+	}
+	if _, isDir, ok := propfindInfo(string(body)); !ok || isDir {
+		return 0, fmt.Errorf("refusing to delete %s: not a single file", p)
+	}
+	st, _, err = h.dav(http.MethodDelete, p, nil, nil)
 	if err == nil && st == http.StatusNoContent {
 		h.mu.Lock()
 		h.deleted[p] = true
 		h.mu.Unlock()
 	}
 	return st, err
+}
+
+// etagOf is the ETag of a file ("" when it is missing).
+func (h *harness) etagOf(p string) (string, error) {
+	st, body, err := h.dav("PROPFIND", p, nil, map[string]string{"Depth": "0"})
+	switch {
+	case err != nil:
+		return "", err
+	case st == http.StatusNotFound:
+		return "", nil
+	case st != http.StatusMultiStatus:
+		return "", fmt.Errorf("PROPFIND %s = %d", p, st)
+	}
+	etag, isDir, ok := propfindInfo(string(body))
+	if !ok || isDir {
+		return "", fmt.Errorf("%s is not a single file", p)
+	}
+	return etag, nil
+}
+
+// removeReadme deletes the README only while it is still the one the run's
+// enrolment created (its recorded ETag): never one recreated or edited since.
+func (h *harness) removeReadme(recorded string, logf func(string, ...any)) error {
+	if recorded == "" {
+		return nil
+	}
+	cur, err := h.etagOf(readmePath)
+	if err != nil {
+		return err
+	}
+	if cur == "" {
+		return nil
+	}
+	if !readmeDeletable(recorded, cur) {
+		logf("%s changed since the run created it: left in place", readmePath)
+		return nil
+	}
+	h.mu.Lock()
+	h.created[readmePath] = true
+	h.mu.Unlock()
+	if st, err := h.remove(readmePath); err != nil || (st != http.StatusNoContent && st != http.StatusNotFound) {
+		return fmt.Errorf("delete %s: %d %v", readmePath, st, err)
+	}
+	return nil
+}
+
+// noteReadme records the README's ETag right after the run's first
+// enrolment, if the README did not exist before the run.
+func (h *harness) noteReadme(t *testing.T) {
+	t.Helper()
+	h.mu.Lock()
+	need := h.readmeOurs && h.state.ReadmeETag == ""
+	h.mu.Unlock()
+	if !need {
+		return
+	}
+	etag, err := h.etagOf(readmePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag == "" {
+		return
+	}
+	h.mu.Lock()
+	h.state.ReadmeETag = etag
+	h.mu.Unlock()
+	h.track(readmePath)
 }
 
 // purgeTrash removes from the trash the files this run deleted (exact
@@ -639,33 +797,64 @@ func (h *harness) saveState(logf func(string, ...any)) {
 }
 
 // recoverOrphan cleans up after an earlier run that died without its
-// cleanup, from its state file: it stops that run's sidecar if it still runs
-// (the same binary path), deletes the app tokens with that run's exact
-// instance prefix and the files it recorded, removes the memory folders it
-// created while they are empty and its temporary directories. A state file of
-// a run that is still active fails the test.
+// cleanup, from its state file, trusting nothing in it: the run lock is held
+// (so that run is over) and the state directory was checked
+// (ensureStateDir). It stops that run's sidecar only if the recorded pid runs
+// exactly the binary such a run builds (recordedBinary), deletes the app
+// tokens with that run's exact instance prefix and the recorded files the
+// rules allow, the README only while it has the recorded ETag, the memory
+// folders that run created while they are empty and its temporary
+// directories. A state file naming anything else fails the test.
 func (h *harness) recoverOrphan(t *testing.T) {
 	t.Helper()
 	st, ok, err := readState(stateFile())
 	if err != nil {
-		t.Fatalf("read the state file %s: %v (delete it after checking that no run is active)", stateFile(), err)
+		t.Fatalf("read the state file %s: %v (delete it after checking)", stateFile(), err)
 	}
 	if !ok {
 		return
 	}
-	if st.TestPID != os.Getpid() && processRuns(st.TestPID, ".test") {
-		t.Fatalf("another integration run (pid %d) seems active; if not, delete %s", st.TestPID, stateFile())
+	damaged := func(what string) {
+		t.Fatalf("the state file %s names %s: not recovering from it; delete it after checking", stateFile(), what)
+	}
+	if st.Prefix != "" && !validPrefix(st.Prefix) {
+		damaged("an invalid token prefix")
+	}
+	for _, d := range st.Dirs {
+		if !ownTempDir(d) {
+			damaged("a directory that is not the harness's")
+		}
+	}
+	for _, d := range st.MemoryDirs {
+		if !slices.Contains(memoryDirs, d) {
+			damaged("an unexpected folder")
+		}
+	}
+	recorded := map[string]bool{}
+	for _, p := range st.Files {
+		recorded[p] = true
+	}
+	for p := range recorded {
+		if !deletablePath(p, recorded) {
+			damaged("a file the test never creates")
+		}
 	}
 	t.Logf("cleaning up after an earlier run that did not finish (state %s)", stateFile())
-	if st.SidecarPID > 0 && st.Binary != "" && processRuns(st.SidecarPID, st.Binary) {
-		if p, err := os.FindProcess(st.SidecarPID); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-			if !eventually(15*time.Second, func() bool { return !processRuns(st.SidecarPID, st.Binary) }) {
-				_ = p.Kill()
+	if st.Binary != "" {
+		bin, ok := recordedBinary(st)
+		if !ok {
+			damaged("an unexpected binary")
+		}
+		if runsExactly(st.SidecarPID, bin) {
+			if p, err := os.FindProcess(st.SidecarPID); err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+				if !eventually(15*time.Second, func() bool { return !runsExactly(st.SidecarPID, bin) }) && runsExactly(st.SidecarPID, bin) {
+					_ = p.Kill()
+				}
 			}
 		}
 	}
-	if validPrefix(st.Prefix) {
+	if st.Prefix != "" {
 		list, err := h.listTokens()
 		if err != nil {
 			t.Fatalf("list the user's app tokens: %v", err)
@@ -678,15 +867,21 @@ func (h *harness) recoverOrphan(t *testing.T) {
 		}
 	}
 	h.mu.Lock()
-	for _, p := range st.Files {
-		h.created[p] = true // the recorded paths of that run
+	for p := range recorded {
+		h.created[p] = true
 	}
 	h.state.Started = min(h.state.Started, st.Started)
 	h.mu.Unlock()
-	for _, p := range st.Files {
+	for _, p := range sortedKeys(recorded) {
+		if p == readmePath {
+			continue
+		}
 		if s, err := h.remove(p); err != nil || (s != http.StatusNoContent && s != http.StatusNotFound) {
 			t.Fatalf("delete %s of the earlier run: %d %v", p, s, err)
 		}
+	}
+	if err := h.removeReadme(st.ReadmeETag, t.Logf); err != nil {
+		t.Fatal(err)
 	}
 	for _, err := range h.removeEmptyDirs(append([]string(nil), st.MemoryDirs...), t.Logf) {
 		t.Fatal(err)
@@ -695,9 +890,7 @@ func (h *harness) recoverOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range st.Dirs {
-		if ownTempDir(d) {
-			_ = os.RemoveAll(d)
-		}
+		_ = os.RemoveAll(d) // ownTempDir checked above
 	}
 	h.mu.Lock()
 	h.created, h.deleted = map[string]bool{}, map[string]bool{}
@@ -706,15 +899,6 @@ func (h *harness) recoverOrphan(t *testing.T) {
 	if err := os.Remove(stateFile()); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// processRuns reports whether pid runs a command line containing want.
-func processRuns(pid int, want string) bool {
-	if pid <= 0 {
-		return false
-	}
-	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	return err == nil && strings.Contains(string(out), want)
 }
 
 func (h *harness) logTail() string {
@@ -826,13 +1010,21 @@ func (h *harness) call(t *testing.T, method, path string, body any, hdr map[stri
 	return apiResp{status: resp.StatusCode, header: resp.Header, body: b}
 }
 
-// callRetry is call that waits out a 429 (cooldowns between enrolments,
-// renewals and sent messages) up to three times.
+// callRetry is call that waits out, up to three times, a 429 (cooldowns
+// between enrolments, renewals and sent messages) and a 503 with Retry-After
+// (a file oCIS still postprocesses).
 func (h *harness) callRetry(t *testing.T, method, path string, body any) apiResp {
 	t.Helper()
+	return h.callRetryHdr(t, method, path, body, nil)
+}
+
+func (h *harness) callRetryHdr(t *testing.T, method, path string, body any, hdr map[string]string) apiResp {
+	t.Helper()
 	for i := 0; ; i++ {
-		r := h.call(t, method, path, body, nil)
-		if r.status != http.StatusTooManyRequests || i == 3 {
+		r := h.call(t, method, path, body, hdr)
+		retry := r.status == http.StatusTooManyRequests ||
+			(r.status == http.StatusServiceUnavailable && r.header.Get("Retry-After") != "")
+		if !retry || i == 3 {
 			return r
 		}
 		wait, _ := strconv.Atoi(r.header.Get("Retry-After"))
@@ -1030,13 +1222,9 @@ func (h *harness) learnPrefix(t *testing.T) {
 	if prefix == "" {
 		t.Fatalf("no own token in the revoke-all preview after enrolment")
 	}
-	if prefixCollides(prefix, h.preexisting) {
-		t.Fatalf("a token that existed before the sidecar started carries its label prefix: refusing to manage tokens by it")
+	if prefix != h.labelPrefix() {
+		t.Fatalf("the sidecar marks tokens of another prefix as its own than its database names")
 	}
-	h.mu.Lock()
-	h.state.Prefix = prefix
-	h.mu.Unlock()
-	h.saveState(t.Logf)
 }
 
 // --- the event stream ---
