@@ -192,6 +192,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     } catch (e) {
       if (g !== sessionGen || isAbortError(e)) return
       conversationsError.value = describe(s, e)
+      agent.reportError(e)
     } finally {
       if (g === sessionGen) listBusy.value--
     }
@@ -223,7 +224,10 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
         if (g !== sessionGen || isAbortError(e)) return
         // the cursor's conversation is gone (or moved): read from the top
         if (e instanceof ApiError && e.status === 400) stale = true
-        else conversationsError.value = describe(s, e)
+        else {
+          conversationsError.value = describe(s, e)
+          agent.reportError(e)
+        }
       } finally {
         if (g === sessionGen) listBusy.value--
         moreInflight = null
@@ -325,6 +329,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
         messagesError.value = null
       } else {
         messagesError.value = describe(s, e)
+        agent.reportError(e)
       }
       return
     } finally {

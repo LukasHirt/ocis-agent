@@ -119,6 +119,7 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
     } catch (e) {
       if (g !== listGen || isAbortError(e)) return
       error.value = describe(s, e)
+      agent.reportError(e)
     } finally {
       if (g === listGen) loading.value = false
     }
@@ -243,6 +244,7 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
         dropJob(id)
       } else {
         detailError.value = describe(s, e)
+        agent.reportError(e)
       }
       return
     } finally {

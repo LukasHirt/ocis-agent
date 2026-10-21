@@ -36,6 +36,13 @@ describe('AgentSection', () => {
     expect(w.find('img').exists()).toBe(false)
   })
 
+  it('keeps Disable agent in a danger zone', async () => {
+    const { w } = await setup({})
+    const zone = w.find('.agent-settings-danger')
+    expect(zone.find('.agent-card-title').text()).toBe('Danger zone')
+    expect(button(zone as unknown as VueWrapper, 'Disable agent')).toBeDefined()
+  })
+
   it('pauses a running agent', async () => {
     const { w, server, store } = await setup({}, (c) =>
       c.method === 'POST' && c.path === '/pause' ? json(statusOf({ paused: true, pause_reason: 'user' })) : undefined

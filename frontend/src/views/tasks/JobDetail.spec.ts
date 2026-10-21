@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import JobDetail from './JobDetail.vue'
 import { PLATFORM_KEY } from '../../platform'
-import { apiErr, approvalOf } from '../../test/fixtures'
+import { apiErr, gatewayErr, approvalOf } from '../../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../../test/server'
 import { jobOf, jobsHandler, jobsState, stepOf, type JobsState } from '../../test/jobs'
 import { useJobsStore } from '../../stores/jobs'
@@ -183,8 +183,8 @@ describe('JobDetail', () => {
   it('shows a load error with a retry', async () => {
     let fail = true
     const st = jobsState({ jobs: [jobOf('j1')] })
-    const { w } = await setup(st, 'j1', (c) => (fail && c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined))
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    const { w } = await setup(st, 'j1', (c) => (fail && (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined))
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()
@@ -218,4 +218,40 @@ describe('JobDetail', () => {
       expect(w.text()).not.toContain('stale')
     }
   )
+})
+
+describe('JobDetail during an outage', () => {
+  it('keeps the task and shows no inline error while the service is down', async () => {
+    let fail = false
+    const { w, jobs, store } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
+      fail && (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined
+    )
+    fail = true
+    await jobs.refreshDetail()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.find('.agent-job-detail-goal').text()).toBe('goal of j1')
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
+      (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined
+    )
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
+
+  it('lays out the main column and the facts card, with chips for state and trigger', async () => {
+    const st = jobsState({ jobs: [jobOf('j1', { state: 'failed' })], steps: { j1: [stepOf(1)] } })
+    const { w } = await setup(st)
+    const main = w.find('.agent-job-detail-main')
+    const side = w.find('aside.agent-job-detail-side')
+    expect(main.exists()).toBe(true)
+    expect(side.classes()).toContain('agent-surface')
+    expect(main.find('.agent-job-detail-steps').exists()).toBe(true)
+    expect(side.find('.agent-job-detail-facts').exists()).toBe(true)
+    expect(side.find('.agent-job-detail-state').classes()).toEqual(expect.arrayContaining(['agent-chip', 'agent-chip--danger']))
+    expect(side.find('.agent-job-detail-trigger').classes()).toContain('agent-chip--neutral')
+  })
 })

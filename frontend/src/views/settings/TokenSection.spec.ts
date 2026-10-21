@@ -52,6 +52,15 @@ describe('TokenSection', () => {
     expect(w.text()).toContain('valid')
   })
 
+  it('keeps the revoke and incident buttons in a danger zone', async () => {
+    const { w } = await setup()
+    const zone = w.find('.agent-settings-danger')
+    expect(zone.find('.agent-card-title').text()).toBe('Danger zone')
+    expect(button(zone as unknown as VueWrapper, 'I suspect compromise')).toBeDefined()
+    expect(button(zone as unknown as VueWrapper, "Revoke the agent's tokens")).toBeDefined()
+    expect(button(zone as unknown as VueWrapper, 'Renew now')).toBeUndefined()
+  })
+
   it('renews the token now', async () => {
     const { w, server, platform } = await setup((c) =>
       c.method === 'POST' && c.path === '/token/renew' ? json({ renewed: true, old_cleaned: true }) : undefined

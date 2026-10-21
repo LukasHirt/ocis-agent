@@ -57,6 +57,16 @@ describe('Editor', () => {
     expect(mem.editing).toBe(false)
   })
 
+  it('keeps Save, Cancel and the size in a bar before the textarea', async () => {
+    const { w } = await setup()
+    const bar = w.find('.agent-memory-editor-bar')
+    expect(bar.exists()).toBe(true)
+    expect(bar.findAll('button').map((b) => b.text())).toEqual(['Save', 'Cancel'])
+    expect(bar.find('.agent-memory-size').exists()).toBe(true)
+    const html = w.html()
+    expect(html.indexOf('agent-memory-editor-bar')).toBeLessThan(html.indexOf('<textarea'))
+  })
+
   it('does not submit on Enter', async () => {
     const { w } = await setup()
     await type(w, 'new')

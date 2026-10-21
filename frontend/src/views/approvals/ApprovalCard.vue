@@ -1,11 +1,11 @@
 <template>
-  <article :class="['agent-card', { 'agent-card-danger': danger, 'agent-card-ended': ended }]">
-    <p v-if="warning" class="agent-card-warning">
+  <article :class="['agent-card', 'agent-surface', { 'agent-card-danger': danger, 'agent-card-ended': ended }]">
+    <p v-if="warning" class="agent-card-warning agent-notice agent-notice--danger">
       <oc-icon name="alert" size="small" />
       <strong v-text="warning" />
     </p>
     <header class="agent-card-head">
-      <code class="agent-card-tool"><TextBlock :text="shown.tool" /></code>
+      <code class="agent-card-tool agent-mono"><TextBlock :text="shown.tool" /></code>
       <RiskBadge :risk="shown.risk" />
       <span v-if="expiry" class="agent-card-expiry" v-text="expiry" />
       <span v-if="decidedAt" class="agent-card-decided" v-text="decidedAt" />
@@ -28,22 +28,50 @@
         v-text="$gettext('I checked')"
       />
     </div>
-    <div class="agent-card-args">
-      <span class="agent-label" v-text="$gettext('Exact arguments')" />
-      <JsonBlock :value="shown.args" />
-      <p
-        v-if="lossy"
-        class="agent-card-lossy"
-        v-text="
-          $gettext(
-            'Some numbers in these arguments are too large to be shown exactly here; the agent would use the exact values.'
-          )
-        "
-      />
-    </div>
-    <div class="agent-card-preview">
-      <span class="agent-label" v-text="pending ? $gettext('What will happen') : $gettext('What was requested')" />
-      <JsonBlock :value="shown.preview" />
+    <p v-if="targets.length > 0" class="agent-card-summary">
+      <span class="agent-label" v-text="$ngettext('Target:', 'Targets:', targets.length)" />
+      <span v-for="(t, i) in targets" :key="i" class="agent-card-target agent-mono" v-text="quote(t)" />
+    </p>
+    <details v-if="collapsible" class="agent-card-disclosure">
+      <summary v-text="$gettext('Exact arguments and preview')" />
+      <div class="agent-card-body">
+        <div class="agent-card-args">
+          <span class="agent-label" v-text="$gettext('Exact arguments')" />
+          <JsonBlock :value="shown.args" />
+          <p
+            v-if="lossy"
+            class="agent-card-lossy"
+            v-text="
+              $gettext(
+                'Some numbers in these arguments are too large to be shown exactly here; the agent would use the exact values.'
+              )
+            "
+          />
+        </div>
+        <div class="agent-card-preview">
+          <span class="agent-label" v-text="pending ? $gettext('What will happen') : $gettext('What was requested')" />
+          <JsonBlock :value="shown.preview" />
+        </div>
+      </div>
+    </details>
+    <div v-else class="agent-card-body">
+      <div class="agent-card-args">
+        <span class="agent-label" v-text="$gettext('Exact arguments')" />
+        <JsonBlock :value="shown.args" />
+        <p
+          v-if="lossy"
+          class="agent-card-lossy"
+          v-text="
+            $gettext(
+              'Some numbers in these arguments are too large to be shown exactly here; the agent would use the exact values.'
+            )
+          "
+        />
+      </div>
+      <div class="agent-card-preview">
+        <span class="agent-label" v-text="pending ? $gettext('What will happen') : $gettext('What was requested')" />
+        <JsonBlock :value="shown.preview" />
+      </div>
     </div>
     <div v-if="shown.rationale" class="agent-card-rationale">
       <span class="agent-label" v-text="$gettext('Agent\'s explanation (unverified)')" />
@@ -53,12 +81,12 @@
     <template v-if="pending">
       <p
         v-if="ended"
-        class="agent-card-ended-note"
+        class="agent-card-ended-note agent-notice agent-notice--warning"
         v-text="$gettext('The job ended; this can no longer be approved')"
       />
       <div class="agent-card-actions">
         <oc-button
-          :appearance="danger ? 'filled' : 'outline'"
+          appearance="filled"
           :variation="danger ? 'danger' : 'primary'"
           :disabled="disabled"
           :aria-label="ariaLabel($gettext('Approve %{tool}'))"
@@ -88,6 +116,7 @@ import { usePlatform } from '../../platform'
 import { useAgentStore } from '../../stores/agent'
 import { formatDuration, formatTime } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
+import { quote, targetsOf } from './targets'
 import { needsConfirm, useDecisions } from './decisions'
 import type { Approval, ApprovalState, Risk } from '../../api/types'
 
@@ -98,12 +127,16 @@ const props = defineProps<{ approval: Approval }>()
 const store = useAgentStore()
 // shown is the approval as an acknowledgement returned it, if there was one
 const shown = computed(() => store.viewOf(props.approval))
-const { $gettext, interpolate } = useGettext()
+const { $gettext, $ngettext, interpolate } = useGettext()
 const platform = usePlatform()
 const decisions = useDecisions()
 
 const pending = computed(() => shown.value.state === ('pending' satisfies ApprovalState))
 const ended = computed(() => shown.value.job_ended)
+const targets = computed(() => targetsOf(shown.value.preview, shown.value.args))
+// Only decided history folds the arguments away; a pending approval and one
+// that needs verification always show them without a click.
+const collapsible = computed(() => !pending.value && !shown.value.needs_verification)
 const danger = computed(() => needsConfirm(shown.value.risk))
 const disabled = computed(() => ended.value || decisions.busy(shown.value.id))
 
@@ -168,59 +201,94 @@ const decidedAt = computed(() => {
 </script>
 
 <style>
-.agent-card {
-  border: 1px solid var(--oc-color-border, #ccc);
-  border-radius: 6px;
-  padding: var(--oc-space-medium, 1rem);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
 .agent-card-danger {
-  border-color: var(--oc-color-swatch-danger-default, #b00020);
+  border-color: var(--oc-color-swatch-danger-default);
   border-width: 2px;
 }
 .agent-card-ended {
   opacity: 0.7;
 }
-.agent-card-warning {
-  display: flex;
+.agent-card-warning.agent-notice {
   align-items: center;
-  gap: 0.25rem;
-  margin: 0;
-  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 .agent-card-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
 }
 .agent-card-tool {
-  font-family: var(--oc-font-family-mono, monospace);
-  font-weight: bold;
+  font-weight: 600;
+  font-size: var(--agent-font-m);
 }
 .agent-card-expiry,
 .agent-card-decided {
-  color: var(--oc-color-text-muted, #666);
-  font-size: 0.9em;
+  color: var(--oc-color-text-muted);
+  font-size: var(--agent-font-xs);
+}
+.agent-card-head > .agent-card-expiry,
+.agent-card-head > .agent-card-decided {
+  margin-left: auto;
+}
+.agent-card-state {
+  margin: 0;
+  color: var(--oc-color-text-muted);
+}
+.agent-card-summary {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--agent-space-1) var(--agent-space-2);
+  min-width: 0;
+}
+.agent-card-summary .agent-label {
+  margin: 0;
+}
+.agent-card-target {
+  font-size: var(--agent-font-s);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.agent-card-body {
+  display: grid;
+  gap: var(--agent-space-3);
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+.agent-card-args,
+.agent-card-preview {
+  min-width: 0;
+}
+@container agent (min-width: 1000px) {
+  .agent-card-body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.agent-card-disclosure > summary {
+  cursor: pointer;
+  color: var(--oc-color-text-muted);
+  font-size: var(--agent-font-s);
+  margin-bottom: var(--agent-space-2);
+}
+.agent-card-rationale {
+  border-left: 3px solid var(--oc-color-border);
+  padding-left: var(--agent-space-3);
+  color: var(--oc-color-text-muted);
 }
 .agent-card-actions {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
+  border-top: var(--agent-line);
+  padding-top: var(--agent-space-3);
 }
 .agent-card-verify {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
 }
 .agent-card-verify p {
   margin: 0;
-}
-.agent-label {
-  display: block;
-  font-weight: bold;
-  font-size: 0.9em;
 }
 </style>

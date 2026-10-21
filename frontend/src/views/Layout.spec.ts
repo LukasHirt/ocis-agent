@@ -4,7 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Layout from './Layout.vue'
 import { PLATFORM_KEY } from '../platform'
 import { makePlatform } from '../test/platform'
-import { apiErr, json, settingsOf, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { useAgentStore } from '../stores/agent'
 import type { Status } from '../api/types'
 
@@ -70,11 +70,18 @@ describe('Layout', () => {
     const fetch = serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf())))
     const w = mountLayout(fetch)
     await flushPromises()
-    expect(w.find('[role=alert]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await w.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
     expect(w.find('.host-rv').exists()).toBe(true)
+  })
+
+  it('keeps the banner in a fixed top area and the page in the scrolling main', async () => {
+    const w = mountLayout(serve(() => json(statusOf())))
+    await flushPromises()
+    expect(w.find('.agent-layout > .agent-layout-top .agent-banners').exists()).toBe(true)
+    expect(w.find('.agent-layout > main.agent-main .host-rv').exists()).toBe(true)
   })
 
   it('stops the store when unmounted', async () => {
@@ -91,24 +98,40 @@ describe('Layout', () => {
 })
 
 describe('Layout after the first load', () => {
-  it('shows a non-blocking error with a retry when a status refresh fails', async () => {
+  it('shows a failed status refresh once, as the danger banner, and keeps the page', async () => {
     let fail = false
-    const w = mountLayout(serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf()))))
+    const w = mountLayout(serve(() => (fail ? apiErr(500, 'internal') : json(statusOf()))))
     await flushPromises()
-    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    expect(w.find('.agent-banner').exists()).toBe(false)
     fail = true
     const store = useAgentStore()
     await store.refreshStatus()
     await flushPromises()
-    const line = w.find('.agent-layout-stale')
-    expect(line.attributes('role')).toBe('alert')
-    expect(line.text()).toContain('The agent service is not reachable right now. Try again later.')
-    expect(line.text()).toContain('may be out of date')
+    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    const banners = w.findAll('.agent-layout-top .agent-banner')
+    expect(banners).toHaveLength(1)
+    expect(banners[0].classes()).toContain('agent-banner-status_error')
+    expect(banners[0].text()).toContain('Something went wrong in the agent service.')
+    expect(banners[0].text()).toContain('may be out of date')
     expect(w.find('.host-rv').exists()).toBe(true) // the page stays
     fail = false
-    await line.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
+    await banners[0].findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
-    expect(w.find('.agent-layout-stale').exists()).toBe(false)
+    expect(w.find('.agent-banner').exists()).toBe(false)
+  })
+
+  it('shows an unreachable service once, as the unreachable banner, and keeps the page', async () => {
+    let fail = false
+    const w = mountLayout(serve(() => (fail ? gatewayErr() : json(statusOf()))))
+    await flushPromises()
+    fail = true
+    await useAgentStore().refreshStatus()
+    await flushPromises()
+    const banners = w.findAll('.agent-banner')
+    expect(banners).toHaveLength(1)
+    expect(banners[0].classes()).toContain('agent-banner-unreachable')
+    expect(w.text()).not.toContain('may be out of date')
+    expect(w.find('.host-rv').exists()).toBe(true)
   })
 
   it('Reconnect enrols again and clears the credential pause', async () => {
@@ -135,5 +158,16 @@ describe('Layout after the first load', () => {
     await useAgentStore().refreshStatus()
     await flushPromises()
     expect(w.find('.agent-banner').exists()).toBe(false)
+  })
+})
+
+describe('Layout before the first status', () => {
+  it('shows one error card and no banner when the service is down on the first load', async () => {
+    const w = mountLayout(serve(() => gatewayErr()))
+    await flushPromises()
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('.agent-layout-loading [role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+    expect(w.find('.agent-banner').exists()).toBe(false)
+    expect(w.find('.host-rv').exists()).toBe(false)
   })
 })

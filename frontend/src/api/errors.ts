@@ -6,12 +6,17 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly retryAfter?: number
+  // transport: the service itself could not be reached (the request failed
+  // before an answer, or a gateway answered instead of the sidecar). An
+  // error the sidecar answered, even a 502 or 503, is never one.
+  readonly transport: boolean
 
-  constructor(status: number, code: string, retryAfter?: number) {
+  constructor(status: number, code: string, retryAfter?: number, transport = false) {
     super(`ocis-agent api: ${code} (${status})`)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.transport = transport
     if (retryAfter !== undefined) this.retryAfter = retryAfter
   }
 }
@@ -75,3 +80,8 @@ export const describeError = (e: unknown, gettext: Gettext): string => {
 // not a failure to show.
 export const isAbortError = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError'
+
+// isUnavailable reports that the agent service itself could not be reached
+// (no response, or a gateway answered instead of the sidecar), as opposed to
+// any answer of the sidecar, which is shown as that error.
+export const isUnavailable = (e: unknown): boolean => e instanceof ApiError && e.transport

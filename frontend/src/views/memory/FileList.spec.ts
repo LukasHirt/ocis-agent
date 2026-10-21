@@ -29,6 +29,19 @@ const rowNames = (w: VueWrapper, group: string) =>
   w.findAll(`[data-testid="${group}"] .agent-memory-file-name`).map((n) => n.text())
 
 describe('FileList', () => {
+  it('does not create a missing core file while a draft is unsaved', async () => {
+    const { w, mem, server } = await setup(memoryState({ 'notes/a.md': 'a' }))
+    const create = () => w.findAll('[data-testid="agent-memory-core"] button').find((b) => b.text() === 'Create')!
+    expect(create().attributes('disabled')).toBeUndefined()
+    await mem.open('notes/a.md')
+    mem.startEdit()
+    mem.draft = 'changed'
+    await flushPromises()
+    expect(create().attributes('disabled')).toBeDefined()
+    await create().trigger('click')
+    expect(server.calls.filter((c) => c.method === 'POST')).toHaveLength(0)
+  })
+
   it('groups profile and projects before the notes', async () => {
     const st = memoryState({ 'notes/b.md': 'b', 'projects.md': 'p', 'notes/a.md': 'a', 'profile.md': 'x' })
     const { w } = await setup(st)

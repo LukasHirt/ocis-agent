@@ -154,6 +154,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     } catch (e) {
       if (g !== listGen || isAbortError(e)) return
       listError.value = describe(s, e)
+      agent.reportError(e)
     } finally {
       if (g === listGen) listLoading.value = false
     }
@@ -218,6 +219,7 @@ export const useMemoryStore = defineStore('ocis-agent-memory', () => {
     } catch (e) {
       if (g !== fileGen || isAbortError(e)) return
       fileError.value = describe(s, e)
+      agent.reportError(e)
     } finally {
       if (g === fileGen) fileLoading.value = false
     }

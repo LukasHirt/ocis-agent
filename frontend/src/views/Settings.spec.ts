@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Settings from './Settings.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, json, settingsOf, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Call, type Handler } from '../test/server'
 import type { ProactiveState, Settings as SettingsT, Status } from '../api/types'
 
@@ -95,7 +95,7 @@ describe('Settings', () => {
     let fail = true
     const s = settingsServer()
     const { w } = await setup((c) => (c.path === '/settings' && fail ? apiErr(503, 'unavailable') : s.handler(c)))
-    expect(w.find('[role="alert"]').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role="alert"] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()
@@ -119,6 +119,77 @@ describe('Settings', () => {
     expect(s.put).toHaveLength(1)
     const keys = Object.keys(s.put[0] as object)
     for (const k of ['auto_approve_write', 'paused', 'dormancy_days', 'daily_tokens_max']) expect(keys).not.toContain(k)
+  })
+
+  describe('layout', () => {
+    it('has a section nav whose buttons scroll to and focus the section heading', async () => {
+      const scrolled: string[] = []
+      const behaviors: unknown[] = []
+      const orig = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function (this: Element, arg?: boolean | ScrollIntoViewOptions) {
+        scrolled.push(this.id)
+        behaviors.push(typeof arg === 'object' ? arg.behavior : undefined)
+      }
+      try {
+        const server = fakeServer(settingsServer().handler)
+        const { platform } = await startStore(server)
+        const host = document.createElement('div')
+        document.body.appendChild(host)
+        const attached = mount(Settings, { attachTo: host, global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
+        await flushPromises()
+        const nav = attached.find('nav.agent-settings-nav')
+        expect(nav.attributes('aria-label')).toBe('Settings sections')
+        expect(nav.findAll('button').map((b) => b.text())).toEqual([
+          'Agent',
+          'Daily token budget',
+          'Models',
+          'Proactive work',
+          'App token'
+        ])
+        await attached.find('nav.agent-settings-nav').findAll('button')[4]!.trigger('click')
+        expect(scrolled).toEqual(['agent-settings-tokens-h'])
+        expect(behaviors).toEqual(['smooth'])
+        expect(document.activeElement?.id).toBe('agent-settings-tokens-h')
+        attached.unmount()
+        host.remove()
+      } finally {
+        Element.prototype.scrollIntoView = orig
+      }
+    })
+
+    it('scrolls without animation when the user prefers reduced motion', async () => {
+      const behaviors: unknown[] = []
+      const orig = Element.prototype.scrollIntoView
+      const origMatch = window.matchMedia
+      Element.prototype.scrollIntoView = function (_arg?: boolean | ScrollIntoViewOptions) {
+        behaviors.push(typeof _arg === 'object' ? _arg.behavior : undefined)
+      }
+      window.matchMedia = ((q: string) => ({ matches: q.includes('reduce'), media: q })) as typeof window.matchMedia
+      try {
+        const server = fakeServer(settingsServer().handler)
+        const { platform } = await startStore(server)
+        const host = document.createElement('div')
+        document.body.appendChild(host)
+        const attached = mount(Settings, { attachTo: host, global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
+        await flushPromises()
+        await attached.find('nav.agent-settings-nav').findAll('button')[2]!.trigger('click')
+        expect(behaviors).toEqual(['auto'])
+        attached.unmount()
+        host.remove()
+      } finally {
+        Element.prototype.scrollIntoView = orig
+        window.matchMedia = origMatch
+      }
+    })
+
+    it('shows "Unsaved changes" only while the form is dirty', async () => {
+      const { w } = await setup(settingsServer().handler)
+      expect(w.find('.agent-settings-unsaved').exists()).toBe(false)
+      await input(w, 'agent-quiet-hours').setValue('22:00-07:00')
+      expect(w.find('.agent-settings-unsaved').text()).toBe('Unsaved changes')
+      await button(w, 'Discard changes')!.trigger('click')
+      expect(w.find('.agent-settings-unsaved').exists()).toBe(false)
+    })
   })
 
   describe('budget', () => {
@@ -584,5 +655,26 @@ describe('Settings', () => {
       expect(JSON.stringify(s.put)).toBe('[{"proactive_enabled":true}]')
       expect(input(w, 'agent-quiet-hours').element.value).toBe('01:00-02:00')
     })
+  })
+})
+
+describe('Settings during an outage', () => {
+  it('shows no inline error while the service is down and the form is loaded', async () => {
+    let fail = false
+    const s = settingsServer()
+    const { w, store } = await setup((c) => ((c.path === '/settings' || c.path === '/status') && fail ? gatewayErr() : s.handler(c)))
+    fail = true
+    await store.refreshSettings()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role="alert"]').exists()).toBe(false)
+    expect(button(w, 'Save')).toBeDefined()
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const s = settingsServer()
+    const { w } = await setup((c) => ((c.path === '/settings' || c.path === '/status') ? gatewayErr() : s.handler(c)))
+    expect(w.findAll('[role="alert"]')).toHaveLength(1)
+    expect(w.find('[role="alert"] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
   })
 })

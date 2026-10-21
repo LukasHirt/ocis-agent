@@ -1,11 +1,12 @@
 <template>
   <section class="agent-settings-section agent-settings-budget" aria-labelledby="agent-settings-budget-h">
-    <h2 id="agent-settings-budget-h" v-text="$gettext('Daily token budget')" />
+    <h2 id="agent-settings-budget-h" class="agent-section-title" tabindex="-1" v-text="$gettext('Daily token budget')" />
     <template v-if="budget">
       <p
+        class="agent-settings-usage"
         data-testid="agent-budget-usage"
         v-text="
-          $gettextInterpolate(
+          interpolate(
             $gettext('%{used} of %{total} tokens used today'),
             { used: number(budget.used_tokens), total: number(budget.daily_tokens) },
             true
@@ -18,9 +19,10 @@
         :max="budget.daily_tokens"
         :aria-label="$gettext('Tokens used today')"
       />
-      <p v-if="budget.resets_at" data-testid="agent-budget-reset" v-text="resetText" />
+      <p v-if="budget.resets_at" class="agent-settings-hint" data-testid="agent-budget-reset" v-text="resetText" />
     </template>
 
+    <div class="agent-field">
     <oc-text-input
       v-model="tokens"
       data-testid="agent-daily-tokens"
@@ -32,7 +34,7 @@
     <p
       class="agent-settings-hint"
       v-text="
-        $gettextInterpolate(
+        interpolate(
           $gettext('You can lower the limit set by the operator (%{max} tokens) but not raise it.'),
           { max: number(max) },
           true
@@ -40,12 +42,15 @@
       "
     />
     <p v-if="form.draft.followOperator" class="agent-settings-hint" v-text="$gettext('Follows the operator\'s limit once saved.')" />
+    </div>
+    <div class="agent-field-row">
     <oc-button
       size="small"
       :disabled="form.saving.value || form.draft.followOperator"
       @click="follow"
       v-text="$gettext('Follow the operator\'s limit')"
     />
+    </div>
   </section>
 </template>
 

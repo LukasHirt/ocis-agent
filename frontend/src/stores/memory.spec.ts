@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { apiErr, json } from '../test/fixtures'
+import { apiErr, gatewayErr, json } from '../test/fixtures'
+import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { MAX_FILE, memoryHandler, memoryState, setFile, type MemoryState } from '../test/memory'
 import { useMemoryStore } from './memory'
@@ -59,6 +60,26 @@ describe('useMemoryStore', () => {
       await mem.refreshList()
       expect(mem.listError).toBe('ownCloud could not be reached. Try again later.')
       expect(names(mem.files)).toEqual(['profile.md'])
+    })
+
+    it('shows the outage banner state only when the status cannot be read either', async () => {
+      let down = false
+      const { mem } = await setup(memoryState(), (c) => (down && (c.path === '/memory' || c.path === '/status') ? gatewayErr() : undefined))
+      down = true
+      await mem.refreshList()
+      await flushPromises()
+      expect(useAgentStore().serviceDown).toBe(true)
+    })
+
+    it('keeps the error to the screen when the sidecar itself answers 502 and the status works', async () => {
+      let down = false
+      const { mem, server } = await setup(memoryState(), (c) => (down && c.path === '/memory' ? apiErr(502, 'upstream_unavailable') : undefined))
+      down = true
+      const reads = server.count('GET', '/status')
+      await mem.refreshList()
+      await flushPromises()
+      expect(useAgentStore().serviceDown).toBe(false)
+      expect(server.count('GET', '/status')).toBe(reads)
     })
 
     it('refreshes on an activity change and on a refresh, not on other kinds', async () => {

@@ -493,7 +493,9 @@ describe('createClient: responses and errors', () => {
     [403, '<html>forbidden</html>', 'origin_rejected'],
     [412, '{}', 'precondition_failed'],
     [428, '{}', 'precondition_required'],
-    [502, '{}', 'upstream_unavailable'],
+    [502, '{"error":{"code":"upstream_unavailable"}}', 'upstream_unavailable'],
+    [502, '{}', 'unavailable'],
+    [504, '<html>gateway</html>', 'unavailable'],
     [418, '{}', 'internal']
   ])('derives the code of a malformed %i error body', async (status, body, code) => {
     const { client } = setup([new Response(body, { status })])
@@ -501,6 +503,20 @@ describe('createClient: responses and errors', () => {
     expect(e).toBeInstanceOf(ApiError)
     expect(e.status).toBe(status)
     expect(e.code).toBe(code)
+  })
+
+  it.each([
+    [502, '<html>Bad Gateway</html>', true],
+    [504, '', true],
+    [503, '{}', true],
+    [502, '{"error":{"code":"upstream_unavailable"}}', false],
+    [502, '{"error":{"code":"upstream_rejected"}}', false],
+    [503, '{"error":{"code":"unavailable"}}', false],
+    [500, '<html>x</html>', false]
+  ])('marks a %i answer with body %j as a transport failure only when the sidecar did not answer: %s', async (status, body, transport) => {
+    const { client } = setup([new Response(body, { status })])
+    const e = (await caught(client.getStatus())) as ApiError
+    expect(e.transport).toBe(transport)
   })
 
   it('fails a 2xx with a body that is not JSON as internal', async () => {

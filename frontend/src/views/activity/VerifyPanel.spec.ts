@@ -36,6 +36,7 @@ describe('VerifyPanel', () => {
     expect(server.count('GET', '/audit/verify')).toBe(0) // only on request
     await check(w)
     expect(w.find('[role="status"]').text()).toBe('Verified 12 events: no recorded event was changed.')
+    expect(w.find('[role="status"]').classes()).toContain('agent-chip--success')
   })
 
   it('counts a single verified event', async () => {

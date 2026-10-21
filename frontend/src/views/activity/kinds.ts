@@ -37,6 +37,46 @@ const KINDS: Record<string, (t: Gettext) => string> = {
 
 export const KNOWN_KINDS: readonly string[] = Object.freeze(Object.keys(KINDS))
 
+const ICONS: Record<string, string> = {
+  approval_requested: 'hourglass',
+  approval_decided: 'checkbox-circle',
+  approval_expired: 'time',
+  approval_acknowledged: 'checkbox-circle',
+  tool_call: 'tools',
+  action_executed: 'play-circle',
+  policy_denied: 'forbid',
+  tampered: 'forbid',
+  memory_changed: 'brain',
+  memory_edited: 'file-edit',
+  job_finished: 'task',
+  job_cancelled: 'close-circle',
+  chat_message: 'chat-3',
+  conversation_deleted: 'chat-delete',
+  agent_paused: 'pause-circle',
+  agent_resumed: 'play-circle',
+  agent_dormant: 'time',
+  policy_changed: 'settings-3',
+  proactive_started: 'search-eye',
+  proactive_skipped: 'search-eye',
+  token_created: 'key-2',
+  token_renewed: 'key-2',
+  token_deleted: 'key-2',
+  token_label_closed: 'key-2',
+  token_revoked_all: 'lock',
+  token_invalid: 'key-2',
+  token_expired: 'key-2',
+  token_anomaly: 'alarm-warning',
+  unenrolled: 'stop-circle'
+}
+
+// kindIcon is the design-system icon name of an event kind.
+export const kindIcon = (kind: string): string => (Object.hasOwn(ICONS, kind) ? ICONS[kind] : 'question')
+
+const DANGER_KINDS = ['policy_denied', 'tampered', 'token_revoked_all', 'token_invalid', 'token_anomaly']
+
+// kindTone is 'danger' for refusals and access trouble, else 'neutral'.
+export const kindTone = (kind: string): 'danger' | 'neutral' => (DANGER_KINDS.includes(kind) ? 'danger' : 'neutral')
+
 // The kinds whose detail is a line diff of a memory file.
 export const DIFF_KINDS: readonly string[] = ['memory_changed', 'memory_edited']
 

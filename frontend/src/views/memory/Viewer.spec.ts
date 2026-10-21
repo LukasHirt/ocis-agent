@@ -67,7 +67,7 @@ describe('Viewer', () => {
     const st = memoryState()
     st.get = { 'profile.md': apiErr(422, 'file_too_large') }
     const { w } = await setup(st, 'profile.md')
-    expect(w.find('[role="alert"]').text()).toBe('The file is too large to open.')
+    expect(w.find('[role="alert"] .agent-state-title').text()).toBe('The file is too large to open.')
     expect(w.find('pre').exists()).toBe(false)
   })
 

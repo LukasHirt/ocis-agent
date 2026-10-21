@@ -200,6 +200,7 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     } catch (e) {
       if (ep !== listEpoch || isAbortError(e)) return
       error.value = describe(s, e)
+      agent.reportError(e)
     } finally {
       if (ep === listEpoch) loading.value = false
     }

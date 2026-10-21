@@ -21,7 +21,9 @@ const OcButton = defineComponent({
   name: 'OcButton',
   props: {
     type: { type: String, default: 'button' },
-    disabled: { type: Boolean, default: false }
+    disabled: { type: Boolean, default: false },
+    appearance: { type: String, default: undefined },
+    variation: { type: String, default: undefined }
   },
   emits: ['click'],
   setup(props, { slots, emit }) {
@@ -31,6 +33,8 @@ const OcButton = defineComponent({
         {
           type: props.type,
           disabled: props.disabled,
+          'data-appearance': props.appearance,
+          'data-variation': props.variation,
           onClick: (e: MouseEvent) => emit('click', e)
         },
         slots.default?.()

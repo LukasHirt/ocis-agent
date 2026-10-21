@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { credLabel, diffLines, kindLabel, KNOWN_KINDS, memoryEdit } from './kinds'
+import { credLabel, diffLines, kindIcon, kindLabel, kindTone, KNOWN_KINDS, memoryEdit } from './kinds'
 
 const t = (s: string) => s
 
@@ -73,5 +73,22 @@ describe('activity kinds', () => {
     expect(memoryEdit('name=notes/a.md; diff=+x\n-y\n')).toEqual({ name: 'notes/a.md', diff: '+x\n-y\n' })
     expect(memoryEdit('name=profile.md; diff=+a; diff=b')).toEqual({ name: 'profile.md', diff: '+a; diff=b' })
     expect(memoryEdit('something else')).toBeNull()
+  })
+
+  it('gives every kind an icon from the fixed set, unknown kinds a question mark', () => {
+    const icons = new Set([
+      'hourglass', 'checkbox-circle', 'time', 'tools', 'play-circle', 'forbid', 'brain', 'file-edit', 'task',
+      'close-circle', 'chat-3', 'chat-delete', 'pause-circle', 'settings-3', 'search-eye', 'key-2', 'lock',
+      'alarm-warning', 'stop-circle'
+    ])
+    for (const k of KNOWN_KINDS) expect(icons.has(kindIcon(k))).toBe(true)
+    expect(kindIcon('brand_new')).toBe('question')
+    expect(kindIcon('constructor')).toBe('question')
+  })
+
+  it('marks refusals and token trouble as danger', () => {
+    const danger = ['policy_denied', 'tampered', 'token_revoked_all', 'token_invalid', 'token_anomaly']
+    for (const k of KNOWN_KINDS) expect(kindTone(k)).toBe(danger.includes(k) ? 'danger' : 'neutral')
+    expect(kindTone('brand_new')).toBe('neutral')
   })
 })

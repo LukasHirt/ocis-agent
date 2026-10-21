@@ -43,6 +43,38 @@ describe('MessageBubble', () => {
     expect(w.find('.agent-msg').classes()).toContain('agent-msg-user')
   })
 
+  it.each([
+    ['queued', 'neutral'],
+    ['running', 'info'],
+    ['waiting_approval', 'warning'],
+    ['succeeded', 'success'],
+    ['failed', 'danger'],
+    ['cancelled', 'neutral']
+  ])('colours the chip of a %s job %s', (state, tone) => {
+    const w = mountBubble({ message: userMessage('m1', job(state)) })
+    const chip = w.find('.agent-msg-status')
+    expect(chip.classes()).toContain('agent-chip')
+    expect(chip.classes()).toContain(`agent-chip--${tone}`)
+  })
+
+  it('marks an unknown job state as a dashed danger chip', () => {
+    const w = mountBubble({ message: userMessage('m1', job('weird')) })
+    const chip = w.find('.agent-msg-status')
+    expect(chip.classes()).toEqual(expect.arrayContaining(['agent-chip--danger', 'agent-chip--dashed']))
+  })
+
+  it('shows an avatar for assistant and system messages, none for the user', () => {
+    expect(mountBubble({ message: answer('a1') }).find('.agent-msg-avatar').exists()).toBe(true)
+    expect(mountBubble({ message: userMessage('m1', null) }).find('.agent-msg-avatar').exists()).toBe(false)
+    const sys = mountBubble({ message: { ...answer('s1'), role: 'system' } })
+    expect(sys.find('.agent-msg-avatar').exists()).toBe(true)
+  })
+
+  it('keeps the content inside the body', () => {
+    const w = mountBubble({ message: answer('a1') })
+    expect(w.find('.agent-msg-body .agent-msg-content').exists()).toBe(true)
+  })
+
   it('shows an unknown job state raw, marked unknown', () => {
     const w = mountBubble({ message: userMessage('m1', job('weird\u202e')) })
     const status = w.find('.agent-msg-status')

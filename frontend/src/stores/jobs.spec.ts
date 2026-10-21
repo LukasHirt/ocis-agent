@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { apiErr, approvalOf, json } from '../test/fixtures'
+import { apiErr, gatewayErr, approvalOf, json } from '../test/fixtures'
+import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { jobOf, jobsHandler, jobsState, stepOf, type JobsState } from '../test/jobs'
 import { JOB_FILTERS, JOB_PAGE, useJobsStore } from './jobs'
@@ -133,6 +134,26 @@ describe('useJobsStore', () => {
     fail = false
     await jobs.refresh()
     expect(jobs.error).toBeNull()
+  })
+
+  it('shows the outage banner state only when the status cannot be read either', async () => {
+    let down = false
+    const { jobs } = await setup(jobsState(), (c) => (down && ('/jobs' === c.path || c.path === '/status') ? gatewayErr() : undefined))
+    down = true
+    await jobs.refresh()
+    await flushPromises()
+    expect(useAgentStore().serviceDown).toBe(true)
+  })
+
+  it('keeps the error to the screen when the sidecar itself answers 502 and the status works', async () => {
+    let down = false
+    const { jobs, server } = await setup(jobsState(), (c) => (down && '/jobs' === c.path ? apiErr(502, 'upstream_unavailable') : undefined))
+    down = true
+    const reads = server.count('GET', '/status')
+    await jobs.refresh()
+    await flushPromises()
+    expect(useAgentStore().serviceDown).toBe(false)
+    expect(server.count('GET', '/status')).toBe(reads)
   })
 
   it('merges a fresh first page into the pages read before', async () => {

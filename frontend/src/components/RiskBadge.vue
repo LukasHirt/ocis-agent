@@ -1,5 +1,5 @@
 <template>
-  <span :class="['agent-risk', `agent-risk-${known ? risk : 'unknown'}`]">
+  <span :class="['agent-risk', 'agent-chip', `agent-risk-${known ? risk : 'unknown'}`, toneClass]">
     <oc-icon :name="icon" size="small" />
     <span v-if="known" class="agent-risk-label" v-text="label" />
     <span v-else class="agent-risk-label">
@@ -28,34 +28,16 @@ const RISKS: Record<string, { icon: string; label: () => string }> = {
 
 const known = computed(() => Object.hasOwn(RISKS, props.risk))
 const icon = computed(() => (known.value ? RISKS[props.risk].icon : 'question'))
+const toneClass = computed<string | string[]>(() => {
+  if (!known.value) return ['agent-chip--danger', 'agent-chip--dashed']
+  if (props.risk === 'read') return 'agent-chip--neutral'
+  if (props.risk === 'write') return 'agent-chip--warning'
+  return 'agent-chip--danger'
+})
 const label = computed(() => (known.value ? RISKS[props.risk].label() : ''))
 </script>
 
 <style>
-.agent-risk {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0 0.4rem;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 0.85em;
-}
-.agent-risk-read {
-  color: var(--oc-color-swatch-passive-default, #555);
-}
-.agent-risk-write {
-  color: var(--oc-color-swatch-warning-default, #8a5a00);
-}
-.agent-risk-destructive,
-.agent-risk-outward {
-  color: var(--oc-color-swatch-danger-default, #b00020);
-  font-weight: bold;
-}
-.agent-risk-unknown {
-  color: var(--oc-color-swatch-danger-default, #b00020);
-  border-style: dashed;
-}
 .agent-risk-raw {
   font-family: var(--oc-font-family-mono, monospace);
 }

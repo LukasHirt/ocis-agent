@@ -1,6 +1,6 @@
 <template>
   <section class="agent-settings-section agent-settings-policy" aria-labelledby="agent-settings-policy-h">
-    <h2 id="agent-settings-policy-h" v-text="$gettext('Proactive work')" />
+    <h2 id="agent-settings-policy-h" class="agent-section-title" tabindex="-1" v-text="$gettext('Proactive work')" />
     <oc-switch
       data-testid="agent-proactive"
       :checked="form.draft.proactive_enabled"
@@ -8,7 +8,7 @@
       @update:checked="setProactive"
     />
     <p class="agent-settings-hint" data-testid="agent-proactive-about" v-text="aboutText" />
-    <p v-if="proactive" class="agent-settings-proactive-last" data-testid="agent-proactive-last">
+    <p v-if="proactive" class="agent-settings-proactive-last agent-meta" data-testid="agent-proactive-last">
       <template v-if="proactive.last_sweep_at">
         <span v-text="$gettext('Last review:') + ' '" />
         <time :datetime="proactive.last_sweep_at" v-text="formatTime(proactive.last_sweep_at)" />
@@ -17,7 +17,7 @@
     </p>
     <p
       v-if="proactive && proactive.enabled && proactive.next_sweep_at"
-      class="agent-settings-proactive-next"
+      class="agent-settings-proactive-next agent-meta"
       data-testid="agent-proactive-next"
     >
       <span v-text="$gettext('Next scheduled review expected around') + ' '" />
@@ -25,13 +25,13 @@
     </p>
     <p
       v-if="blockedText"
-      class="agent-settings-proactive-blocked"
+      class="agent-settings-proactive-blocked agent-notice agent-notice--warning"
       role="status"
       data-testid="agent-proactive-blocked"
       v-text="blockedText"
     />
 
-    <h3 v-text="$gettext('Watched folders')" />
+    <h3 class="agent-card-title" v-text="$gettext('Watched folders')" />
     <p v-if="form.draft.watch.length === 0" v-text="$gettext('No folders are watched.')" />
     <ul v-else class="agent-settings-watch">
       <li v-for="(p, i) in form.draft.watch" :key="i + ':' + p" data-testid="agent-watch-item">
@@ -58,7 +58,8 @@
       <oc-button :disabled="form.saving.value || full" @click="add" v-text="$gettext('Add')" />
     </div>
 
-    <h3 v-text="$gettext('Schedule')" />
+    <h3 class="agent-card-title" v-text="$gettext('Schedule')" />
+    <div class="agent-field-grid">
     <oc-select
       :model-value="sweepSelected"
       :options="sweepOptions"
@@ -82,6 +83,7 @@
           : undefined
       "
     />
+    </div>
   </section>
 </template>
 

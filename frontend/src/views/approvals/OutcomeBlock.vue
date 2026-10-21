@@ -1,5 +1,5 @@
 <template>
-  <div :class="['agent-outcome', `agent-outcome-${known ? outcome.state : 'other'}`]">
+  <div :class="['agent-outcome', 'agent-notice', `agent-notice--${tone}`, `agent-outcome-${known ? outcome.state : 'other'}`]">
     <p class="agent-outcome-head">
       <oc-icon :name="icon" size="small" />
       <strong class="agent-outcome-state" v-text="label" />
@@ -37,6 +37,8 @@ const STATES: Record<string, { icon: string; label: () => string }> = {
 }
 
 const known = computed(() => Object.hasOwn(STATES, props.outcome.state))
+const TONES: Record<string, string> = { done: 'success', rejected: 'info', expired: 'info' }
+const tone = computed(() => (known.value ? (TONES[props.outcome.state] ?? 'danger') : 'danger'))
 const icon = computed(() => (known.value ? STATES[props.outcome.state].icon : 'question'))
 const label = computed(() =>
   known.value
@@ -47,21 +49,20 @@ const label = computed(() =>
 
 <style>
 .agent-outcome {
-  border-left: 3px solid var(--oc-color-border, #ccc);
-  padding-left: 0.5rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--agent-space-1);
 }
 .agent-outcome-head {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
   margin: 0;
 }
-.agent-outcome-failed,
-.agent-outcome-unknown,
-.agent-outcome-other {
-  border-left-color: var(--oc-color-swatch-danger-default, #b00020);
+.agent-outcome-head .oc-icon svg {
+  fill: var(--agent-tone);
 }
-.agent-outcome-done {
-  border-left-color: var(--oc-color-swatch-success-default, #2e7d32);
+.agent-outcome p {
+  margin: 0;
 }
 </style>

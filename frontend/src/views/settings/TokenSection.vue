@@ -1,11 +1,11 @@
 <template>
   <section class="agent-settings-section agent-settings-tokens" aria-labelledby="agent-settings-tokens-h">
-    <h2 id="agent-settings-tokens-h" v-text="$gettext('App token')" />
+    <h2 id="agent-settings-tokens-h" class="agent-section-title" tabindex="-1" v-text="$gettext('App token')" />
     <p v-if="status" v-text="tokenText" />
     <p
       v-if="status?.token.expires_at"
       v-text="
-        $gettextInterpolate($gettext('It expires on %{time}.'), { time: formatTime(status.token.expires_at) }, true)
+        interpolate($gettext('It expires on %{time}.'), { time: formatTime(status.token.expires_at) }, true)
       "
     />
     <p
@@ -14,7 +14,6 @@
     />
     <div class="agent-settings-actions">
       <oc-button :disabled="busy" @click="renew" v-text="$gettext('Renew now')" />
-      <oc-button :disabled="busy" variation="danger" @click="revoke" v-text="$gettext('Revoke the agent\'s tokens')" />
     </div>
 
     <div v-if="revokedAll" class="agent-settings-revoked" role="status" data-testid="agent-revoked-all">
@@ -29,7 +28,10 @@
       <oc-button appearance="filled" :disabled="busy" @click="enableAgain" v-text="$gettext('Enable agent')" />
     </div>
 
-    <h3 v-text="$gettext('Incident revoke')" />
+    <div class="agent-settings-danger">
+    <h3 class="agent-card-title" v-text="$gettext('Danger zone')" />
+    <oc-button variation="danger" :disabled="busy" @click="revoke" v-text="$gettext('Revoke the agent\'s tokens')" />
+    <h4 class="agent-card-title" v-text="$gettext('Incident revoke')" />
     <p
       v-text="
         $gettext(
@@ -109,6 +111,7 @@
           v-text="$gettext('Revoke all my app tokens')"
         />
       </div>
+    </div>
     </div>
   </section>
 </template>

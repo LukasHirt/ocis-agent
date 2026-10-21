@@ -317,7 +317,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       return await platform.fetch(base + req.path, init)
     } catch {
       throwIfAborted(req.signal)
-      throw new ApiError(0, 'unavailable')
+      throw new ApiError(0, 'unavailable', undefined, true)
     }
   }
 
@@ -336,13 +336,14 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       return await res.text()
     } catch {
       throwIfAborted(signal)
-      throw new ApiError(0, 'unavailable')
+      throw new ApiError(0, 'unavailable', undefined, true)
     }
   }
 
   const errorOf = async (res: Response, signal: AbortSignal | undefined): Promise<ApiError> => {
     const retryAfter = parseRetryAfter(res.headers.get('Retry-After'))
     let code = codeOfStatus(res.status)
+    let envelope = false
     const text = await readText(res, signal).catch((e) => {
       if (signal?.aborted) throw e
       return ''
@@ -353,11 +354,17 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
         typeof doc === 'object' && doc !== null
           ? (doc as { error?: { code?: unknown } }).error?.code
           : undefined
-      if (typeof c === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(c)) code = c
+      if (typeof c === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(c)) {
+        code = c
+        envelope = true
+      }
     } catch {
       // not JSON: keep the status-derived code
     }
-    return new ApiError(res.status, code, retryAfter)
+    // a gateway error without the sidecar's error body: the sidecar is not
+    // answering
+    const gateway = !envelope && (res.status === 502 || res.status === 503 || res.status === 504)
+    return new ApiError(res.status, gateway ? 'unavailable' : code, retryAfter, gateway)
   }
 
   // send makes the request (and the one 401 retry) and returns a 2xx
@@ -441,12 +448,12 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       }
     } catch {
       throwIfAborted(signal)
-      throw new ApiError(0, 'unavailable')
+      throw new ApiError(0, 'unavailable', undefined, true)
     }
     throwIfAborted(signal)
     // a cut is mostly detected by the transport error above; a body that
     // does not end with a whole line is refused as well
-    if (bytes > 0 && lastByte !== 0x0a) throw new ApiError(0, 'unavailable')
+    if (bytes > 0 && lastByte !== 0x0a) throw new ApiError(0, 'unavailable', undefined, true)
     return { parts, bytes }
   }
 

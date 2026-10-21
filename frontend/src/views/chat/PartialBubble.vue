@@ -1,16 +1,18 @@
 <template>
   <article class="agent-msg agent-msg-assistant agent-msg-partial" aria-live="off" aria-busy="true">
-    <header class="agent-msg-head">
-      <oc-icon name="robot" size="small" />
-      <span class="agent-msg-role" v-text="$gettext('Agent')" />
-    </header>
-    <div v-if="partial.text" class="agent-msg-content">
-      <TextBlock :text="partial.text" />
+    <span class="agent-msg-avatar" aria-hidden="true"><oc-icon name="robot" size="small" /></span>
+    <div class="agent-msg-body">
+      <header class="agent-msg-head">
+        <span class="agent-msg-role" v-text="$gettext('Agent')" />
+      </header>
+      <div v-if="partial.text" class="agent-msg-content">
+        <TextBlock :text="partial.text" />
+      </div>
+      <p class="agent-msg-status agent-msg-partial-state agent-chip agent-chip--info">
+        <oc-icon name="loader-4" size="small" class="agent-spin" />
+        <span v-text="label" />
+      </p>
     </div>
-    <p class="agent-msg-status agent-msg-partial-state">
-      <oc-icon name="loader-4" size="small" />
-      <span v-text="label" />
-    </p>
   </article>
 </template>
 
@@ -30,7 +32,10 @@ const label = computed(() => (props.partial.state === 'thinking' ? $gettext('Thi
 </script>
 
 <style>
-.agent-msg-partial {
-  border-style: dashed;
+.agent-msg-partial .agent-msg-content {
+  border: 1px dashed var(--oc-color-border);
+}
+.agent-msg-partial-state {
+  align-self: flex-start;
 }
 </style>

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Chat from './Chat.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, json, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import {
   answer,
@@ -141,6 +141,8 @@ describe('Chat', () => {
     expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('')
     expect(w.findAll('.agent-msg-content').map((m) => m.text())).toEqual(['What changed?'])
     expect(w.find('.agent-msg-status').text()).toContain('Waiting')
+    expect(w.find('.agent-chat-back').exists()).toBe(true)
+    expect(w.find('.agent-chat').classes()).toContain('agent-chat--open')
     expect(document.activeElement).toBe(w.find('textarea').element)
   })
 
@@ -285,5 +287,43 @@ describe('Chat without a session', () => {
     await flushPromises()
     expect(wrapper.find('.agent-convs [data-stub=OcSpinner]').exists()).toBe(true)
     expect(wrapper.find('.agent-chat-main [data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})
+
+describe('Chat during an outage', () => {
+  it('keeps the list and the thread and shows no inline error while the service is down', async () => {
+    let down = false
+    const { w, chat, store } = await setup(withThread(), { id: 'c1' }, (c) =>
+      down && ((c.path === '/conversations' || c.path === '/status') || c.path.endsWith('/messages')) ? gatewayErr() : undefined
+    )
+    down = true
+    await chat.loadConversations()
+    await chat.refreshOpen()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.findAll('.agent-conv-link')).toHaveLength(2)
+    expect(w.findAll('.agent-msg-content')).toHaveLength(2)
+  })
+
+  it('shows one error, in the thread pane, when the list and the messages fail', async () => {
+    const { w } = await setup(withThread(), { id: 'c1' }, (c) =>
+      (c.path === '/conversations' || c.path === '/status') || c.path.endsWith('/messages') ? gatewayErr() : undefined
+    )
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('.agent-chat-main [role=alert]').exists()).toBe(true)
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
+
+  it('shows the list error when no conversation is open', async () => {
+    const { w } = await setup(chatState(), {}, (c) => ((c.path === '/conversations' || c.path === '/status') ? gatewayErr() : undefined))
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('.agent-convs [role=alert]').exists()).toBe(true)
+  })
+
+  it('shows empty states with an icon', async () => {
+    const { w } = await setup(chatState())
+    expect(w.find('.agent-convs-empty [data-stub=OcIcon]').attributes('data-icon')).toBe('chat-3')
+    expect(w.find('.agent-chat-pick [data-stub=OcIcon]').attributes('data-icon')).toBe('chat-3')
   })
 })

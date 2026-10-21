@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Activity from './Activity.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr } from '../test/fixtures'
+import { apiErr, gatewayErr } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { auditHandler, auditState, eventOf, eventsUpTo, type AuditState } from '../test/audit'
-import { AUDIT_PAGE } from '../stores/audit'
+import { AUDIT_PAGE, useAuditStore } from '../stores/audit'
 
 const saved = vi.hoisted(() => [] as Array<{ blob: Blob; filename: string }>)
 vi.mock('../util/download', () => ({
@@ -40,6 +40,17 @@ describe('Activity', () => {
     const { w } = await setup(auditState({ events }))
     expect(w.find('h1').text()).toBe('Activity')
     expect(kinds(w)).toEqual(['Task ended', 'Chat question'])
+  })
+
+  it('separates the events by day', async () => {
+    const events = [
+      eventOf(1, { ts: '2026-01-01T10:00:00.000Z' }),
+      eventOf(2, { ts: '2026-01-01T11:00:00.000Z' }),
+      eventOf(3, { ts: '2026-01-09T10:00:00.000Z' })
+    ]
+    const { w } = await setup(auditState({ events }))
+    expect(w.findAll('.agent-day-head')).toHaveLength(2)
+    expect(w.findAll('.agent-day')[1].findAll('.agent-event')).toHaveLength(2)
   })
 
   it('says when there is no activity', async () => {
@@ -84,7 +95,7 @@ describe('Activity', () => {
     const { w } = await setup(auditState({ events: eventsUpTo(1) }), (c) =>
       fail && c.path === '/audit' ? apiErr(500, 'internal') : undefined
     )
-    expect(w.find('[role="alert"]').text()).toBe('Something went wrong in the agent service.')
+    expect(w.find('[role="alert"] .agent-state-title').text()).toBe('Something went wrong in the agent service.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
     await flushPromises()
@@ -177,5 +188,33 @@ describe('Activity without a session', () => {
     wrapper = mount(Activity, { global: { mocks: { $router: { push: vi.fn() } } } })
     await flushPromises()
     expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+  })
+})
+
+describe('Activity during an outage', () => {
+  it('keeps the events and shows no inline error while the service is down', async () => {
+    let down = false
+    const { w, store } = await setup(auditState({ events: eventsUpTo(1) }), (c) =>
+      down && (c.path === '/audit' || c.path === '/status') ? gatewayErr() : undefined
+    )
+    down = true
+    await useAuditStore().refresh()
+    await flushPromises()
+    expect(store.serviceDown).toBe(true)
+    expect(w.find('.agent-activity-error').exists()).toBe(false)
+    expect(w.find('[role=alert]').exists()).toBe(false)
+    expect(w.findAll('.agent-event-kind')).toHaveLength(1)
+  })
+
+  it('shows exactly one error card with no data', async () => {
+    const { w } = await setup(auditState(), (c) => ((c.path === '/audit' || c.path === '/status') ? gatewayErr() : undefined))
+    expect(w.findAll('[role=alert]')).toHaveLength(1)
+    expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
+    expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
+  })
+
+  it('shows an empty state with an icon', async () => {
+    const { w } = await setup()
+    expect(w.find('.agent-activity-empty [data-stub=OcIcon]').attributes('data-icon')).toBe('history')
   })
 })

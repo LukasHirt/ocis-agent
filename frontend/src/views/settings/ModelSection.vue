@@ -1,9 +1,10 @@
 <template>
   <section class="agent-settings-section agent-settings-models" aria-labelledby="agent-settings-models-h">
-    <h2 id="agent-settings-models-h" v-text="$gettext('Models')" />
+    <h2 id="agent-settings-models-h" class="agent-section-title" tabindex="-1" v-text="$gettext('Models')" />
     <p v-if="available.length === 0" v-text="$gettext('The operator offers no models to choose from.')" />
     <template v-else>
-      <div v-for="task in tasks" :key="task.key" class="agent-settings-field">
+      <div class="agent-field-grid">
+      <div v-for="task in tasks" :key="task.key" class="agent-field agent-settings-field">
         <oc-select
           :model-value="selected(task.key)"
           :options="options"
@@ -19,9 +20,10 @@
           class="agent-settings-hint"
           :data-testid="'agent-model-' + task.key + '-effective'"
           v-text="
-            $gettextInterpolate($gettext('Used: %{model}'), { model: labelOf(form.draft.models[task.key] ?? defaultId) }, true)
+            interpolate($gettext('Used: %{model}'), { model: labelOf(form.draft.models[task.key] ?? defaultId) }, true)
           "
         />
+      </div>
       </div>
     </template>
   </section>

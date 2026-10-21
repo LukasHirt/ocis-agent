@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-home">
+  <div class="agent-home agent-page">
     <oc-spinner :aria-label="$gettext('Loading the agent')" />
   </div>
 </template>
