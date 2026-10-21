@@ -42,6 +42,17 @@ describe('Activity', () => {
     expect(kinds(w)).toEqual(['Task ended', 'Chat question'])
   })
 
+  it('separates the events by day', async () => {
+    const events = [
+      eventOf(1, { ts: '2026-01-01T10:00:00.000Z' }),
+      eventOf(2, { ts: '2026-01-01T11:00:00.000Z' }),
+      eventOf(3, { ts: '2026-01-09T10:00:00.000Z' })
+    ]
+    const { w } = await setup(auditState({ events }))
+    expect(w.findAll('.agent-day-head')).toHaveLength(2)
+    expect(w.findAll('.agent-day')[1].findAll('.agent-event')).toHaveLength(2)
+  })
+
   it('says when there is no activity', async () => {
     const { w } = await setup()
     expect(w.find('.agent-activity-empty').text()).toBe('No activity yet.')

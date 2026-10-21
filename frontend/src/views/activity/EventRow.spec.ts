@@ -19,6 +19,15 @@ describe('EventRow', () => {
     expect(w.find('.agent-event-outcome').text()).toContain('approved')
   })
 
+  it('leads with a kind icon, red for a refused action', () => {
+    const ok = row({ kind: 'job_finished' })
+    expect(ok.find('.agent-event-icon [data-stub=OcIcon]').attributes('data-icon')).toBe('task')
+    expect(ok.find('.agent-event-icon').classes()).not.toContain('agent-event-icon--danger')
+    const bad = row({ kind: 'policy_denied' })
+    expect(bad.find('.agent-event-icon').classes()).toContain('agent-event-icon--danger')
+    expect(bad.classes()).toContain('agent-row')
+  })
+
   it('marks an unknown kind and shows it as text', () => {
     const w = row({ kind: HOSTILE })
     const k = w.find('.agent-event-kind')

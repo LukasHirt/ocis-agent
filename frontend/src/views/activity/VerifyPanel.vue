@@ -1,6 +1,6 @@
 <template>
   <div class="agent-verify">
-    <oc-button size="small" :disabled="audit.verifying" @click="audit.verify()">
+    <oc-button size="small" appearance="outline" :disabled="audit.verifying" @click="audit.verify()">
       <oc-icon name="shield-check" size="small" />
       <span v-text="$gettext('Check integrity')" />
     </oc-button>
@@ -8,12 +8,17 @@
     <p
       v-if="audit.verifyResult"
       role="status"
-      :class="['agent-verify-result', `agent-verify-${audit.verifyResult}`]"
+      :class="[
+        'agent-verify-result',
+        'agent-chip',
+        audit.verifyResult === 'ok' ? 'agent-chip--success' : 'agent-chip--danger',
+        `agent-verify-${audit.verifyResult}`
+      ]"
     >
       <oc-icon :name="audit.verifyResult === 'ok' ? 'checkbox-circle' : 'error-warning'" size="small" />
       <span v-text="resultText" />
     </p>
-    <p v-if="audit.verifyError" role="alert" class="agent-verify-error" v-text="audit.verifyError" />
+    <p v-if="audit.verifyError" role="alert" class="agent-verify-error agent-chip agent-chip--danger" v-text="audit.verifyError" />
     <p class="agent-verify-note" v-text="$gettext('This check cannot detect removal of the newest events.')" />
   </div>
 </template>
@@ -60,22 +65,22 @@ const resultText = computed(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: flex-end;
+  gap: var(--agent-space-2);
+  max-width: 100%;
+  min-width: 0;
 }
 .agent-activity .agent-verify p {
   margin: 0;
 }
 .agent-activity .agent-verify-result {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-.agent-activity .agent-verify-broken,
-.agent-activity .agent-verify-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  padding-top: var(--agent-space-1);
+  padding-bottom: var(--agent-space-1);
 }
 .agent-activity .agent-verify-note {
   flex-basis: 100%;
-  font-size: 0.875rem;
+  text-align: right;
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
 }
 </style>
