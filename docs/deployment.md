@@ -197,7 +197,7 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_LLM_API_KEY_FILE` | none | A file holding the model key (for docker or Kubernetes secrets); exclusive with `AGENT_LLM_API_KEY`. |
 | `AGENT_LLM_ALLOWED_HOSTS` | the base URL's host | Comma-separated egress allow-list for the model client; must contain the base URL's host. |
 | `AGENT_LLM_TIMEOUT` | `30m`, `120s` without streaming | Bound of one whole model call, reading the response included (10s to 30m). With streaming the idle timeout guards against stalls, so the default is the maximum; it must be longer than `AGENT_LLM_IDLE_TIMEOUT`. |
-| `AGENT_LLM_STREAM` | `true` | Request streamed answers (`stream: true`, with `stream_options.include_usage`). An endpoint that refuses `stream_options` (400 or 422) is asked again without it, and one that refuses streaming (400, 404 or 501) once more without streaming; the client remembers this per model for an hour. An endpoint that answers with plain JSON is read as such. Once the model has finished, the rest of the stream (usage, `[DONE]`) must arrive within 3 s. `false` waits for each whole answer. |
+| `AGENT_LLM_STREAM` | `true` | Request streamed answers (`stream: true`, with `stream_options.include_usage`). An endpoint that refuses `stream_options` (400 or 422) is asked again without it, and one that refuses streaming (400, 404 or 501) once more without streaming; the client remembers this per model for an hour. An endpoint that answers with plain JSON is read as such. A call that is not streamed (streaming off or refused, or a plain JSON answer) is bounded by 120s unless `AGENT_LLM_TIMEOUT` is set explicitly, never by the 30m streaming default. An endpoint that ignores `stream: true` and sends nothing until the whole answer is ready needs `AGENT_LLM_STREAM=false` (or an `AGENT_LLM_IDLE_TIMEOUT` longer than its slowest answer), since the idle timeout also covers the wait for the response headers. Once the model has finished, the rest of the stream (usage, `[DONE]`) must arrive within 3 s. `false` waits for each whole answer. |
 | `AGENT_LLM_IDLE_TIMEOUT` | `60s` | With streaming, how long a model call may receive nothing (not a single byte, the wait for the response headers included) before it fails as an outage (5s to 10m, shorter than `AGENT_LLM_TIMEOUT`). The wait for the first byte covers loading the model and reading the prompt, so raise it for a large local model with long prompts. |
 | `AGENT_LLM_REASONING_EFFORT` | not sent | `none`, `low`, `medium` or `high`, sent as `reasoning_effort`. |
 | `AGENT_LLM_MAX_TOKENS` | `4096` | Output token limit per model call (64 to 100000). |
@@ -342,7 +342,9 @@ leaves its jobs to the lease reaper, which recovers them only after the lease ex
 ## Kill switch
 
 Stops all agent work without stopping the process: no job is claimed and a running job stops at its
-next step. Maintenance (token renewal, expiry, dormancy) keeps running and the API keeps answering.
+next step. A model call that streams is re-checked about every 5 s while it receives anything and is
+cut off, so the job stops within seconds; a call that is not streamed runs to its end (at most its
+timeout). A user's pause works the same way. Maintenance (token renewal, expiry, dormancy) keeps running and the API keeps answering.
 
 ```
 ocis-agent killswitch on      # needs the same AGENT_DATA_DIR (or AGENT_SQLITE_PATH), a well-formed AGENT_MASTER_KEY
@@ -360,6 +362,8 @@ The database schema is migrated at start-up; `ocis-agent migrate` applies the mi
 exits (useful as an init step). To upgrade: take a backup, stop the old process, start the new
 one. Migrations only go forward: an older binary refuses a database with a newer schema ("newer
 than this binary supports"), so a downgrade means restoring the backup taken before the upgrade.
+Development builds between commits 6f2face and c8b3b1d created a different schema 16: if you ran
+one, delete `backend/bin/data` (development data only) before starting a newer build.
 
 ## Security checklist
 
@@ -405,7 +409,9 @@ than this binary supports"), so a downgrade means restoring the backup taken bef
   listener; adjust the container health check).
 - **Chat answers never come; jobs end with "restarted too many times".** The model calls time out
   or fail (outage, rate limit) and the job is requeued until `AGENT_MAX_RUNS`. Check the model
-  endpoint and raise `AGENT_LLM_TIMEOUT` for slow local models. Jobs that stay `queued` mean no
+  endpoint. With streaming (the default) raise `AGENT_LLM_IDLE_TIMEOUT` for slow local models (the
+  wait for the first byte covers loading the model and reading the prompt); `AGENT_LLM_TIMEOUT`
+  already defaults to its 30m maximum and matters without streaming. Jobs that stay `queued` mean no
   worker runs: check `AGENT_ROLES`, the kill switch and the user's pause.
 - **"The language model provider refused the configured credentials."** The model key is wrong or
   missing (`AGENT_LLM_API_KEY` / `AGENT_LLM_API_KEY_FILE`).

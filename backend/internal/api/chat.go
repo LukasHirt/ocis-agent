@@ -49,9 +49,6 @@ func conversationViewOf(c store.Conversation) conversationView {
 	return conversationView{ID: c.ID, Title: c.Title, CreatedAt: timeView(c.CreatedAt), UpdatedAt: timeView(c.UpdatedAt)}
 }
 
-// messageViewOf caps the content of every role (only assistant and system
-// messages can be longer than the cap in the store, but the cap holds for
-// all).
 // messageJobViewOf is the view of the job answering a user message.
 func messageJobViewOf(id string, js store.JobStatus) *messageJobView {
 	v := &messageJobView{ID: id, State: string(js.State), Error: capText(js.Error, maxReasonView)}
@@ -59,6 +56,9 @@ func messageJobViewOf(id string, js store.JobStatus) *messageJobView {
 	return v
 }
 
+// messageViewOf caps the content of every role (only assistant and system
+// messages can be longer than the cap in the store, but the cap holds for
+// all).
 func messageViewOf(m store.Message) messageView {
 	return messageView{ID: m.ID, Role: m.Role, Content: capText(m.Content, maxAnswerView), JobID: m.JobID, CreatedAt: timeView(m.CreatedAt)}
 }
