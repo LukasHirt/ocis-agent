@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-activity oc-p-m">
+  <section class="agent-activity agent-page">
     <h1 v-text="$gettext('Activity')" />
     <p
       class="agent-activity-intro"

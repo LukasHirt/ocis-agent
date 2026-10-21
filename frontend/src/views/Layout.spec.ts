@@ -77,6 +77,13 @@ describe('Layout', () => {
     expect(w.find('.host-rv').exists()).toBe(true)
   })
 
+  it('keeps the banner in a fixed top area and the page in the scrolling main', async () => {
+    const w = mountLayout(serve(() => json(statusOf())))
+    await flushPromises()
+    expect(w.find('.agent-layout > .agent-layout-top .agent-banners').exists()).toBe(true)
+    expect(w.find('.agent-layout > main.agent-main .host-rv').exists()).toBe(true)
+  })
+
   it('stops the store when unmounted', async () => {
     const w = mountLayout(serve(() => json(statusOf())))
     await flushPromises()
@@ -100,7 +107,8 @@ describe('Layout after the first load', () => {
     const store = useAgentStore()
     await store.refreshStatus()
     await flushPromises()
-    const line = w.find('.agent-layout-stale')
+    const line = w.find('.agent-layout-top .agent-layout-stale')
+    expect(line.exists()).toBe(true)
     expect(line.attributes('role')).toBe('alert')
     expect(line.text()).toContain('The agent service is not reachable right now. Try again later.')
     expect(line.text()).toContain('may be out of date')

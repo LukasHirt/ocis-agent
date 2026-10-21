@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-chat oc-p-m">
+  <section class="agent-chat agent-page agent-page--fill">
     <aside class="agent-chat-side">
       <div class="agent-chat-side-head">
         <h1 v-text="$gettext('Chat')" />
@@ -168,13 +168,14 @@ const enable = async () => {
 .agent-chat {
   display: grid;
   grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr);
-  gap: 1rem;
-  align-items: start;
-  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--oc-space-medium, 16px);
+  padding: var(--oc-space-medium, 16px) var(--oc-space-large, 24px);
 }
-@media (max-width: 640px) {
+@container agent (max-width: 699px) {
   .agent-chat {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
   }
 }
 .agent-chat-side {
@@ -182,6 +183,8 @@ const enable = async () => {
   flex-direction: column;
   gap: 0.75rem;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 .agent-chat-side-head {
   display: flex;
@@ -198,7 +201,7 @@ const enable = async () => {
   flex-direction: column;
   gap: 0.75rem;
   min-width: 0;
-  max-height: calc(100vh - 10rem);
+  min-height: 0;
 }
 .agent-chat-title {
   margin: 0;

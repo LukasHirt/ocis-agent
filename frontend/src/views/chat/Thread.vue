@@ -110,7 +110,7 @@ defineExpose({ toBottom })
 <style>
 .agent-thread-scroll {
   flex: 1 1 auto;
-  min-height: 12rem;
+  min-height: 8rem;
   overflow-y: auto;
   display: flex;
   flex-direction: column;

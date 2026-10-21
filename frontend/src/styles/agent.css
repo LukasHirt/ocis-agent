@@ -1,0 +1,51 @@
+/* Shared styles of the agent extension. Host tokens only. */
+.agent-layout {
+  container: agent / inline-size;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--oc-color-background-default);
+}
+.agent-layout-top {
+  flex: none;
+}
+.agent-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agent-main > * {
+  flex: 1 0 auto;
+  min-width: 0;
+}
+.agent-main > .agent-page--fill {
+  flex: 1 1 0;
+  min-height: 20rem;
+  overflow: hidden;
+}
+.agent-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oc-space-medium, 16px);
+  padding: var(--oc-space-medium, 16px) var(--oc-space-large, 24px) var(--oc-space-large, 24px);
+  box-sizing: border-box;
+}
+.agent-page--fill {
+  padding: 0;
+  gap: 0;
+}
+@container agent (max-width: 699px) {
+  .agent-page {
+    padding: var(--oc-space-medium, 16px);
+  }
+  .agent-page--fill {
+    padding: 0;
+  }
+}

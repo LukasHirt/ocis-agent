@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-tasks oc-p-m">
+  <section class="agent-tasks agent-page">
     <h1 v-text="$gettext('Tasks')" />
 
     <JobDetail v-if="id" />

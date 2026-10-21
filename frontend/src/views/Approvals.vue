@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-approvals oc-p-m">
+  <section class="agent-approvals agent-page">
     <h1 v-text="title" />
 
     <section v-if="verify.length > 0" class="agent-verify" aria-labelledby="agent-verify-h">

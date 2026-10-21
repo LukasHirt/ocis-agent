@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-settings oc-p-m">
+  <section class="agent-settings agent-page">
     <h1 v-text="$gettext('Settings')" />
     <AgentSection />
 

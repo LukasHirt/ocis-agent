@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-memory oc-p-m">
+  <section class="agent-memory agent-page">
     <h1 v-text="$gettext('Memory')" />
     <p
       class="agent-memory-intro"

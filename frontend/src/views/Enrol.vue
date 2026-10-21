@@ -1,5 +1,5 @@
 <template>
-  <section class="agent-enrol oc-p-m">
+  <section class="agent-enrol agent-page">
     <h1 v-text="$gettext('Set up your agent')" />
     <p
       v-text="

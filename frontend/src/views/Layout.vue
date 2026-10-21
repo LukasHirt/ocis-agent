@@ -1,15 +1,8 @@
 <template>
   <div class="agent-layout">
-    <StatusBanner />
-    <div v-if="!store.status" class="agent-layout-loading">
-      <template v-if="store.errors.status">
-        <p role="alert" v-text="store.errors.status" />
-        <oc-button :disabled="store.loading.status" @click="store.refreshStatus()" v-text="$gettext('Try again')" />
-      </template>
-      <oc-spinner v-else :aria-label="$gettext('Loading the agent')" />
-    </div>
-    <template v-else>
-      <div v-if="store.errors.status" class="agent-layout-stale" role="alert">
+    <div class="agent-layout-top">
+      <StatusBanner />
+      <div v-if="store.status && store.errors.status" class="agent-layout-stale" role="alert">
         <oc-icon name="error-warning" size="small" />
         <span v-text="store.errors.status" />
         <span v-text="$gettext('What is shown may be out of date.')" />
@@ -20,13 +13,25 @@
           v-text="$gettext('Try again')"
         />
       </div>
-      <Enrol v-if="!store.status.enrolled" />
-      <router-view v-else />
-    </template>
+    </div>
+    <main class="agent-main">
+      <div v-if="!store.status" class="agent-layout-loading">
+        <template v-if="store.errors.status">
+          <p role="alert" v-text="store.errors.status" />
+          <oc-button :disabled="store.loading.status" @click="store.refreshStatus()" v-text="$gettext('Try again')" />
+        </template>
+        <oc-spinner v-else :aria-label="$gettext('Loading the agent')" />
+      </div>
+      <template v-else>
+        <Enrol v-if="!store.status.enrolled" />
+        <router-view v-else />
+      </template>
+    </main>
   </div>
 </template>
 
 <script setup lang="ts">
+import '../styles/agent.css'
 import { onBeforeUnmount, onMounted } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import { useAgentStore } from '../stores/agent'
