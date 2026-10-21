@@ -42,6 +42,10 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 		if lost(err) {
 			return true, err // the lease went while the answer streamed
 		}
+		if p != nil && p.stopped() != stopNone && ctx.Err() == nil {
+			// a check during the stream cancelled the call
+			return true, r.stopStream(ctx, claim, p.stopped(), spentStep(claim, resp))
+		}
 		// a partial answer of the failed call is cleared by the release
 		return true, r.modelError(ctx, claim, err, spentStep(claim, resp))
 	}

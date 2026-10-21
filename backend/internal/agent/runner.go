@@ -55,8 +55,8 @@ type Runner struct {
 	cfg   Config
 	specs []llm.ToolSpec
 	log   *slog.Logger
-	// partialWriters counts the running partial-answer writes (tests check
-	// that none is left behind).
+	// partialWriters counts the running partial-answer writes and stream
+	// checks (tests check that none is left behind).
 	partialWriters atomic.Int32
 	// beforePartialWrite, if set (tests only), runs in a write goroutine
 	// before it writes

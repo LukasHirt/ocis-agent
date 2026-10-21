@@ -699,3 +699,126 @@ func TestTheWriteIsJoinedBeforeTheTurnGoesOn(t *testing.T) {
 		t.Errorf("job %s with %+v", j.State, j.JobPartial)
 	}
 }
+
+// While a call streams, the kill switch, a pause and switched-off proactive
+// work are re-read at most every streamCheckEvery (on the fixture clock, from
+// a background goroutine): a hit cancels the call, which stops the job like
+// the precheck would; nothing of the call is the answer.
+func TestTheStreamStopsForTheKillSwitchAPauseOrProactiveOff(t *testing.T) {
+	sec := time.Second
+	for _, c := range []struct {
+		name   string
+		kind   string
+		set    func(f *fixture) error
+		state  store.JobState
+		reason string
+	}{
+		{"kill switch", store.TriggerChat, func(f *fixture) error { return SetKillSwitch(bg, f.st, true) }, store.JobCancelled, ReasonKillSwitch},
+		{"pause", store.TriggerChat, func(f *fixture) error {
+			return f.st.InTx(bg, func(tx store.Tx) error { _, err := tx.PausePolicy(userID, store.PauseUser); return err })
+		}, store.JobQueued, ""},
+		{"proactive off", store.TriggerSchedule, func(f *fixture) error {
+			f.setPolicy(func(p *store.Policy) { p.ProactiveEnabled = false })
+			return nil
+		}, store.JobCancelled, ReasonProactiveOff},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			if c.kind != store.TriggerChat {
+				f.setPolicy(func(p *store.Policy) { p.ProactiveEnabled = true })
+			}
+			if c.kind == store.TriggerChat {
+				f.enqueue("g")
+			} else {
+				goal, _ := store.ProactiveGoal(c.kind)
+				f.enqueueKind(c.kind, goal)
+			}
+			p, r := f.streaming(pacedStep{
+				deltas: []pacedDelta{
+					text(0, "a"),
+					text(sec, "b").then(func() {
+						if err := c.set(f); err != nil {
+							t.Error(err)
+						}
+					}),
+					text(sec, "c"),   // 2 s: no check yet
+					text(4*sec, "d"), // 6 s: the check finds it and cancels
+					text(sec, "e"), text(sec, "f"),
+				},
+				resp: say("abcdef", 1, 1),
+			})
+			if err := r.Run(bg, f.claim()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			f.noWriterLeft(r)
+			if p.sent != 4 {
+				t.Errorf("%d deltas sent, want the call cut off after the check", p.sent)
+			}
+			j := f.job()
+			if j.State != c.state || j.Error != c.reason || j.JobPartial != (store.JobPartial{}) {
+				t.Fatalf("job %s %q with %+v", j.State, j.Error, j.JobPartial)
+			}
+			if c.state == store.JobQueued {
+				assertRequeued(t, f, DefaultConfig().PausedDelay)
+			}
+			if strings.Contains(string(j.Checkpoint), "abcdef") {
+				t.Errorf("the cut call became the answer: %s", j.Checkpoint)
+			}
+		})
+	}
+}
+
+// Without a hit the checks do not disturb the call.
+func TestStreamChecksLetAHealthyCallFinish(t *testing.T) {
+	f := newFixture(t)
+	f.enqueue("g")
+	var deltas []pacedDelta
+	for range 5 {
+		deltas = append(deltas, text(6*time.Second, "x"))
+	}
+	p, r := f.streaming(pacedStep{deltas: deltas, resp: say("xxxxx", 1, 1)})
+	if err := r.Run(bg, f.claim()); err != nil {
+		t.Fatal(err)
+	}
+	f.noWriterLeft(r)
+	if p.sent != 5 || f.job().State != store.JobSucceeded {
+		t.Errorf("sent %d, job %s", p.sent, f.job().State)
+	}
+}
+
+// The usage a call stopped by a check still reports is charged in the
+// transaction that ends or requeues the job.
+func TestAStreamStoppedByACheckIsCharged(t *testing.T) {
+	f := newFixture(t)
+	f.enqueue("g")
+	spent := llm.CompletionResponse{Usage: llm.Usage{In: 20, Out: 6}, UsageEstimated: true}
+	var r *Runner
+	f.provider = llm.StreamFunc(func(ctx context.Context, _ llm.CompletionRequest, onDelta func(llm.Delta)) (llm.CompletionResponse, error) {
+		if err := SetKillSwitch(bg, f.st, true); err != nil {
+			t.Error(err)
+		}
+		for range 100 {
+			f.clk.Advance(6 * time.Second)
+			onDelta(llm.Delta{})
+			select {
+			case <-ctx.Done():
+				return spent, ctx.Err()
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		t.Error("the call was never cancelled")
+		return spent, nil
+	})
+	r = f.runner()
+	if err := r.Run(bg, f.claim()); err != nil {
+		t.Fatal(err)
+	}
+	f.noWriterLeft(r)
+	if j := f.job(); j.State != store.JobCancelled || j.Error != ReasonKillSwitch {
+		t.Fatalf("job %s %q", j.State, j.Error)
+	}
+	s := f.steps()
+	if len(s) != 1 || s[0].Status != "failed" || s[0].TokensIn != 20 || s[0].TokensOut != 6 {
+		t.Errorf("steps = %+v", s)
+	}
+}

@@ -12,8 +12,13 @@ import (
 )
 
 // partialEvery is the shortest time between two partial-answer writes of a
-// job (Config.Now, so a fake clock drives it in tests).
-const partialEvery = 500 * time.Millisecond
+// job, and streamCheckEvery between two re-reads of the kill switch and the
+// policy while a call streams (both on Config.Now, so a fake clock drives
+// them in tests).
+const (
+	partialEvery     = 500 * time.Millisecond
+	streamCheckEvery = 5 * time.Second
+)
 
 // partialSnap is what one SetJobPartial stores.
 type partialSnap struct {
@@ -36,6 +41,13 @@ type partialSnap struct {
 // (store.ErrFenceLost, store.ErrConflict) cancels the model call through
 // cancel and is returned by wait; other write errors are logged by category
 // and ignored.
+//
+// A delta (heartbeats included) at least streamCheckEvery after the start
+// of the call or the previous check also starts a check, in at most one more
+// goroutine: the kill switch, the pause and, for a proactive job, switched-off
+// proactive work, read from the database like gateCheck. A hit cancels the
+// call and is reported by stopped, so the job stops within seconds of the
+// switch instead of when the call ends.
 type partial struct {
 	r      *Runner
 	ctx    context.Context // the job's context: the writes outlive a cancelled call
@@ -48,11 +60,24 @@ type partial struct {
 	written  partialSnap // the last write started
 	lastAt   time.Time
 	inflight chan struct{} // closed when the running write is done; nil if none
+	checked  time.Time     // the start of the call or of the last check
+	checking chan struct{} // closed when the running check is done; nil if none
 
 	mu     sync.Mutex
 	lost   error
-	stored bool // a write succeeded: the job shows a partial
+	stored bool       // a write succeeded: the job shows a partial
+	stop   stopReason // a check found the job must stop
 }
+
+// stopReason is why a check cancelled the call.
+type stopReason int
+
+const (
+	stopNone stopReason = iota
+	stopKillSwitch
+	stopPaused
+	stopProactiveOff
+)
 
 // add is the onDelta of the call.
 func (p *partial) add(d llm.Delta) {
@@ -64,6 +89,43 @@ func (p *partial) add(d llm.Delta) {
 		// split there becomes U+FFFD, which is never shorter)
 		p.buf = append(p.buf, d.Text[:min(len(d.Text), store.MaxPartialBytes+1-len(p.buf))]...)
 	}
+	now := p.r.cfg.Now()
+	p.maybeCheck(now)
+	p.maybeWrite(now)
+}
+
+// maybeCheck starts a check when the last one is old enough and none runs.
+func (p *partial) maybeCheck(now time.Time) {
+	if p.checking != nil {
+		select {
+		case <-p.checking:
+			p.checking = nil
+		default:
+			return
+		}
+	}
+	if p.lostErr() != nil || p.stopped() != stopNone || now.Sub(p.checked) < streamCheckEvery {
+		return
+	}
+	p.checked = now
+	done := make(chan struct{})
+	p.checking = done
+	p.r.partialWriters.Add(1)
+	go func() {
+		defer p.r.partialWriters.Add(-1)
+		defer close(done)
+		if why := p.r.streamCheck(p.ctx, p.claim); why != stopNone {
+			p.mu.Lock()
+			p.stop = why
+			p.mu.Unlock()
+			p.cancel()
+		}
+	}()
+}
+
+// maybeWrite starts a write when the throttle allows and the snapshot
+// changed.
+func (p *partial) maybeWrite(now time.Time) {
 	if p.inflight != nil {
 		select {
 		case <-p.inflight:
@@ -75,7 +137,6 @@ func (p *partial) add(d llm.Delta) {
 	if p.lostErr() != nil {
 		return
 	}
-	now := p.r.cfg.Now()
 	if !p.lastAt.IsZero() && now.Sub(p.lastAt) < partialEvery {
 		return
 	}
@@ -128,13 +189,66 @@ func (p *partial) lostErr() error {
 	return p.lost
 }
 
-// wait joins the running write and returns a lost lease.
+// wait joins the running write and check and returns a lost lease.
 func (p *partial) wait() error {
 	if p.inflight != nil {
 		<-p.inflight
 		p.inflight = nil
 	}
+	if p.checking != nil {
+		<-p.checking
+		p.checking = nil
+	}
 	return p.lostErr()
+}
+
+// stopped reports what a check found.
+func (p *partial) stopped() stopReason {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stop
+}
+
+// streamCheck reads the kill switch and the policy like gateCheck. A read
+// error is no reason to stop (the next check or turn reads again).
+func (r *Runner) streamCheck(ctx context.Context, claim store.Claim) stopReason {
+	on, err := KillSwitchOn(ctx, r.d.Store, r.cfg.KillSwitch)
+	if err == nil && on {
+		return stopKillSwitch
+	}
+	var pol store.Policy
+	if err == nil {
+		err = r.d.Store.View(ctx, func(tx store.Tx) error {
+			var err error
+			pol, err = tx.GetPolicy(claim.Job.UserID)
+			return err
+		})
+	}
+	switch {
+	case err != nil:
+		if ctx.Err() == nil {
+			r.log.Warn("agent runner: stream check failed", "job", claim.Job.ID, "outcome", "check_error")
+		}
+		return stopNone
+	case pol.Paused:
+		return stopPaused
+	case store.IsProactiveTrigger(claim.Job.TriggerKind) && !pol.ProactiveEnabled:
+		return stopProactiveOff
+	}
+	return stopNone
+}
+
+// stopStream ends or requeues the job whose call a check cancelled, like
+// gateCheck in a run, charging step (the call's usage, if any) in the same
+// transaction.
+func (r *Runner) stopStream(ctx context.Context, claim store.Claim, why stopReason, step *store.JobStep) error {
+	switch why {
+	case stopKillSwitch:
+		return r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonKillSwitch, step: step})
+	case stopProactiveOff:
+		return r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonProactiveOff, step: step})
+	}
+	return r.requeueWith(ctx, claim, r.cfg.PausedDelay, step)
 }
 
 // final writes what changed since the last write, synchronously; it
@@ -185,7 +299,7 @@ func (r *Runner) complete(ctx context.Context, claim store.Claim, req llm.Comple
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := &partial{r: r, ctx: ctx, claim: claim, cancel: cancel}
+	p := &partial{r: r, ctx: ctx, claim: claim, cancel: cancel, checked: r.cfg.Now()}
 	resp, err := s.CompleteStream(sctx, req, p.add)
 	if lerr := p.wait(); lerr != nil {
 		return llm.CompletionResponse{}, nil, fmt.Errorf("agent: save partial answer: %w", lerr)
