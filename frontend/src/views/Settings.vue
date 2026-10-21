@@ -1,6 +1,15 @@
 <template>
   <section class="agent-settings agent-page">
-    <h1 v-text="$gettext('Settings')" />
+    <header class="agent-page-head">
+      <div class="agent-page-titles">
+        <h1 class="agent-page-title" v-text="$gettext('Settings')" />
+      </div>
+    </header>
+    <div class="agent-settings-layout">
+      <nav class="agent-settings-nav" :aria-label="$gettext('Settings sections')">
+        <oc-button v-for="item in navItems" :key="item.id" appearance="raw" @click="go(item.id)" v-text="item.label" />
+      </nav>
+      <div class="agent-settings-content">
     <AgentSection />
 
     <div v-if="!base" class="agent-settings-loading">
@@ -41,13 +50,19 @@
         <span v-if="saveError.detail" v-text="' ' + saveError.detail" />
       </p>
       <div class="agent-settings-actions agent-settings-save">
-        <oc-button appearance="filled" :disabled="!canSave" @click="save" v-text="$gettext('Save')" />
+        <span v-if="dirty" class="agent-settings-unsaved">
+          <oc-icon name="pencil" size="small" />
+          <span v-text="$gettext('Unsaved changes')" />
+        </span>
+        <oc-button appearance="filled" variation="primary" :disabled="!canSave" @click="save" v-text="$gettext('Save')" />
         <oc-button :disabled="!dirty || saving" @click="discard" v-text="$gettext('Discard changes')" />
         <oc-spinner v-if="saving" :aria-label="$gettext('Saving the settings')" />
       </div>
     </div>
 
     <TokenSection />
+      </div>
+    </div>
   </section>
 </template>
 
@@ -143,6 +158,21 @@ const save = async () => {
   }
 }
 
+const navItems = computed(() => [
+  { id: 'agent-settings-agent-h', label: $gettext('Agent') },
+  { id: 'agent-settings-budget-h', label: $gettext('Daily token budget') },
+  { id: 'agent-settings-models-h', label: $gettext('Models') },
+  { id: 'agent-settings-policy-h', label: $gettext('Proactive work') },
+  { id: 'agent-settings-tokens-h', label: $gettext('App token') }
+])
+
+// The host's router owns the URL, so the nav scrolls and moves focus
+// instead of linking to a fragment.
+const go = (id: string) => {
+  document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  ;(document.getElementById(id) as HTMLElement | null)?.focus({ preventScroll: true })
+}
+
 const discard = () => {
   if (saving.value) return
   if (store.settings) reset(store.settings)
@@ -151,63 +181,194 @@ const discard = () => {
 </script>
 
 <style>
-.agent-settings {
-  max-width: 48rem;
+.agent-settings-layout {
+  display: block;
+  min-width: 0;
+}
+.agent-settings-nav {
+  display: none;
+}
+@container agent (min-width: 900px) {
+  .agent-settings-layout {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 48rem);
+    gap: var(--agent-space-5);
+    align-items: start;
+  }
+  .agent-settings-nav {
+    position: sticky;
+    top: var(--agent-space-4);
+    align-self: start;
+    display: flex;
+    flex-direction: column;
+    gap: var(--agent-space-1);
+  }
+  .agent-settings-nav .oc-button {
+    justify-content: flex-start;
+    width: 100%;
+    padding: var(--agent-space-2) var(--agent-space-3);
+    text-align: left;
+    border-radius: var(--agent-radius-s);
+  }
+  .agent-settings-nav .oc-button:hover {
+    background: var(--oc-color-background-hover);
+  }
+}
+.agent-settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-4);
+  min-width: 0;
 }
 .agent-settings-section {
-  margin: 0 0 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-3);
+  min-width: 0;
+  padding: var(--agent-space-4);
+  background: var(--oc-color-background-default);
+  border: var(--agent-line);
+  border-radius: var(--agent-radius-m);
+  box-sizing: border-box;
+}
+.agent-settings-section h2,
+.agent-settings-section h3,
+.agent-settings-section h4,
+.agent-settings-section p,
+.agent-settings-section dl {
+  margin: 0;
+}
+.agent-settings-section h2 {
+  scroll-margin-top: var(--agent-space-4);
+}
+.agent-settings-section h3,
+.agent-settings-section h4 {
+  font-size: var(--agent-font-m);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.agent-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-4);
+  min-width: 0;
+}
+.agent-settings-loading {
+  min-width: 0;
 }
 .agent-settings-actions,
 .agent-settings-add {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
+}
+.agent-settings-save {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  align-items: center;
+  padding: var(--agent-space-3) var(--agent-space-4);
+  background: var(--oc-color-background-default);
+  border: var(--agent-line);
+  border-radius: var(--agent-radius-m);
+  box-shadow: 0 -4px 12px color-mix(in srgb, var(--oc-color-text-default) 8%, transparent);
+}
+.agent-settings-unsaved {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-1);
+  margin-right: auto;
+  font-weight: 600;
+}
+.agent-settings-unsaved .oc-icon svg {
+  fill: currentColor;
 }
 .agent-settings-facts {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 0.25rem 1rem;
+  gap: var(--agent-space-1) var(--agent-space-4);
+}
+.agent-settings-facts dt {
+  font-size: var(--agent-font-xs);
+  font-weight: 600;
+  color: var(--oc-color-text-muted);
 }
 .agent-settings-facts dd {
   margin: 0;
 }
+.agent-settings-state {
+  font-weight: 600;
+}
 .agent-settings-error,
 .agent-settings-warning {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  color: var(--oc-color-swatch-danger-default);
 }
 .agent-settings-hint {
-  font-size: 0.9em;
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
+}
+.agent-settings-usage {
+  font-weight: 600;
 }
 .agent-settings-progress {
   width: 100%;
-  max-width: 24rem;
+  max-width: none;
+  height: 0.5rem;
+  accent-color: var(--oc-color-swatch-primary-default);
+}
+.agent-settings-danger {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-2);
+  align-items: flex-start;
+  padding: var(--agent-space-3);
+  border: 1px solid color-mix(in srgb, var(--oc-color-swatch-danger-default) 40%, transparent);
+  border-radius: var(--agent-radius-m);
+}
+.agent-settings-danger .agent-card-title {
+  color: var(--oc-color-swatch-danger-default);
 }
 .agent-settings-dialog {
-  border: 1px solid var(--oc-color-swatch-danger-default, #b00020);
-  border-radius: 4px;
-  padding: 0.75rem;
-  margin: 0.5rem 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-3);
+  background: var(--oc-color-background-default);
+  border: 1px solid var(--oc-color-swatch-danger-default);
+  border-radius: var(--agent-radius-m);
 }
 .agent-settings-watch {
   list-style: none;
+  margin: 0;
   padding: 0;
+  border: var(--agent-line);
+  border-radius: var(--agent-radius-m);
+  overflow: hidden;
 }
 .agent-settings-watch li {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: space-between;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-2) var(--agent-space-3);
+}
+.agent-settings-watch li + li {
+  border-top: var(--agent-line);
 }
 .agent-settings-watch pre {
   margin: 0;
+  font-family: var(--agent-font-mono);
+  min-width: 0;
 }
 .agent-settings-badge {
   display: inline-block;
-  margin-left: 0.5rem;
-  padding: 0 0.4rem;
+  margin-left: var(--agent-space-2);
+  padding: 0 var(--agent-space-2);
   border: 1px solid currentColor;
-  border-radius: 3px;
-  font-size: 0.8em;
+  border-radius: var(--agent-radius-pill);
+  font-size: var(--agent-font-xs);
 }
 .agent-settings-token-table {
   border-collapse: collapse;
@@ -217,7 +378,15 @@ const discard = () => {
 .agent-settings-token-table td {
   text-align: left;
   vertical-align: top;
-  padding: 0.25rem 0.5rem;
+  padding: var(--agent-space-2);
+}
+.agent-settings-token-table th {
+  font-size: var(--agent-font-xs);
+  font-weight: 600;
+  color: var(--oc-color-text-muted);
+}
+.agent-settings-token-table tr + tr {
+  border-top: var(--agent-line);
 }
 .agent-settings-token-table pre {
   margin: 0;

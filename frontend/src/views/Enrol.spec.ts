@@ -24,6 +24,14 @@ describe('Enrol', () => {
     expect(enableButton(w).exists()).toBe(true)
   })
 
+  it('is a centred card with a list of what it can access and a primary button', () => {
+    const w = mount(Enrol)
+    expect(w.find('.agent-enrol-card').exists()).toBe(true)
+    expect(w.find('h1').text()).toBe('Set up your agent')
+    expect(w.findAll('.agent-enrol-list li')).toHaveLength(3)
+    expect(enableButton(w).attributes('data-variation')).toBe('primary')
+  })
+
   it('enrols, shows a spinner meanwhile and blocks a second click', async () => {
     const store = useAgentStore()
     let resolve!: (s: Status) => void

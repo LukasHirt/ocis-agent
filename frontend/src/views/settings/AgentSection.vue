@@ -1,6 +1,6 @@
 <template>
   <section v-if="status" class="agent-settings-section agent-settings-agent" aria-labelledby="agent-settings-agent-h">
-    <h2 id="agent-settings-agent-h" v-text="$gettext('Agent')" />
+    <h2 id="agent-settings-agent-h" class="agent-section-title" tabindex="-1" v-text="$gettext('Agent')" />
     <dl class="agent-settings-facts">
       <dt v-text="$gettext('Name')" />
       <dd><TextBlock :text="status.user.name" /></dd>
@@ -32,7 +32,7 @@
       />
     </div>
 
-    <p class="agent-settings-killswitch" v-text="killSwitchText" />
+    <p class="agent-settings-killswitch agent-settings-hint" v-text="killSwitchText" />
     <p
       v-if="store.settings"
       v-text="
@@ -44,6 +44,8 @@
       "
     />
 
+    <div class="agent-settings-danger">
+    <h3 class="agent-card-title" v-text="$gettext('Danger zone')" />
     <oc-button
       v-if="!dialog"
       appearance="outline"
@@ -58,7 +60,7 @@
       aria-labelledby="agent-settings-disable-h"
       aria-describedby="agent-settings-disable-d"
     >
-      <h3 id="agent-settings-disable-h" v-text="$gettext('Disable the agent?')" />
+      <h3 id="agent-settings-disable-h" class="agent-card-title" v-text="$gettext('Disable the agent?')" />
       <p
         id="agent-settings-disable-d"
         v-text="
@@ -82,6 +84,7 @@
           v-text="$gettext('Disable agent')"
         />
       </div>
+    </div>
     </div>
   </section>
 </template>

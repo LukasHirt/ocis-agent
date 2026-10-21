@@ -121,6 +121,49 @@ describe('Settings', () => {
     for (const k of ['auto_approve_write', 'paused', 'dormancy_days', 'daily_tokens_max']) expect(keys).not.toContain(k)
   })
 
+  describe('layout', () => {
+    it('has a section nav whose buttons scroll to and focus the section heading', async () => {
+      const scrolled: string[] = []
+      const orig = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push(this.id)
+      }
+      try {
+        const server = fakeServer(settingsServer().handler)
+        const { platform } = await startStore(server)
+        const host = document.createElement('div')
+        document.body.appendChild(host)
+        const attached = mount(Settings, { attachTo: host, global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
+        await flushPromises()
+        const nav = attached.find('nav.agent-settings-nav')
+        expect(nav.attributes('aria-label')).toBe('Settings sections')
+        expect(nav.findAll('button').map((b) => b.text())).toEqual([
+          'Agent',
+          'Daily token budget',
+          'Models',
+          'Proactive work',
+          'App token'
+        ])
+        await attached.find('nav.agent-settings-nav').findAll('button')[4]!.trigger('click')
+        expect(scrolled).toEqual(['agent-settings-tokens-h'])
+        expect(document.activeElement?.id).toBe('agent-settings-tokens-h')
+        attached.unmount()
+        host.remove()
+      } finally {
+        Element.prototype.scrollIntoView = orig
+      }
+    })
+
+    it('shows "Unsaved changes" only while the form is dirty', async () => {
+      const { w } = await setup(settingsServer().handler)
+      expect(w.find('.agent-settings-unsaved').exists()).toBe(false)
+      await input(w, 'agent-quiet-hours').setValue('22:00-07:00')
+      expect(w.find('.agent-settings-unsaved').text()).toBe('Unsaved changes')
+      await button(w, 'Discard changes')!.trigger('click')
+      expect(w.find('.agent-settings-unsaved').exists()).toBe(false)
+    })
+  })
+
   describe('budget', () => {
     it("shows today's usage and when it resets", async () => {
       const { w } = await setup(
