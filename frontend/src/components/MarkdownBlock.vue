@@ -47,14 +47,17 @@ const renderInline = (nodes: MdInline[], g: G): VNodeChild[] => {
       case 'link': {
         const same = n.label.length === 0 || plainOf(n.label) === n.url
         if (!same) out.push(h('span', { class: 'agent-md-link' }, renderInline(n.label, g)))
-        out.push(h('span', { class: 'agent-md-url' }, visibleNodes(same ? n.url : ` (${n.url})`, g)))
+        const shown = n.title === undefined ? n.url : `${n.url} "${n.title}"`
+        out.push(h('span', { class: 'agent-md-url' }, visibleNodes(same ? shown : ` (${shown})`, g)))
         break
       }
-      case 'image':
+      case 'image': {
+        const target = n.title === undefined ? n.url : `${n.url} "${n.title}"`
         out.push(
-          h('span', { class: 'agent-md-image' }, visibleNodes(n.alt === '' ? n.url : `${n.alt} (${n.url})`, g))
+          h('span', { class: 'agent-md-image' }, visibleNodes(n.alt === '' ? target : `${n.alt} (${target})`, g))
         )
         break
+      }
       case 'br':
         out.push(h('br'))
         break

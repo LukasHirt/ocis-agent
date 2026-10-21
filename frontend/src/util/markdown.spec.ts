@@ -139,10 +139,18 @@ describe('parseMarkdown blocks', () => {
         head: [[T('a')], [T('b')], [T('c')]],
         rows: [
           [[T('1')], [T('2')], []],
-          [[T('x | y')], [T('3')], [T('4')]]
+          [[T('x | y')], [T('3')], [T('4')], [T('5')]]
         ]
       }
     ])
+  })
+
+  it('keeps only ASCII spaces and tabs as trimmed edges, so other invisible characters stay', () => {
+    expect(parse('\uFEFFhello\u2028')).toEqual([{ t: 'p', c: [T('\uFEFFhello\u2028')] }])
+    expect(parse('# \uFEFFtitle\u2029')).toEqual([{ t: 'h', level: 3, c: [T('\uFEFFtitle\u2029')] }])
+    expect(parse('\t hi \t')).toEqual([{ t: 'p', c: [T('hi')] }])
+    const r = parse('| a |\n|---|\n| \uFEFFx\u2028 |')
+    expect(r[0]).toMatchObject({ t: 'table', rows: [[[T('\uFEFFx\u2028')]]] })
   })
 
   it('parses inline markup in table cells', () => {
@@ -210,11 +218,16 @@ describe('parseMarkdown inlines', () => {
     expect(inl('`unclosed')).toEqual([T('`unclosed')])
   })
 
-  it('parses links as data, any scheme, title dropped', () => {
+  it('parses links as data, any scheme, with the title kept', () => {
     expect(inl('[a](javascript:alert(1))')).toEqual([
       { t: 'link', label: [T('a')], url: 'javascript:alert(1)' }
     ])
-    expect(inl('[a](https://e.x/y "t")')).toEqual([{ t: 'link', label: [T('a')], url: 'https://e.x/y' }])
+    expect(inl('[a](https://e.x/y "t")')).toEqual([
+      { t: 'link', label: [T('a')], url: 'https://e.x/y', title: 't' }
+    ])
+    expect(inl('![x](https://e/x.png "ti")')).toEqual([
+      { t: 'image', alt: 'x', url: 'https://e/x.png', title: 'ti' }
+    ])
     expect(inl('[a] (x)')).toEqual([T('[a] (x)')])
     expect(inl('[a](b c)')).toEqual([T('[a](b c)')])
   })

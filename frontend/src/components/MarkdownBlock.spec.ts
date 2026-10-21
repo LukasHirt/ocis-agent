@@ -61,6 +61,17 @@ describe('MarkdownBlock', () => {
     expect(w.element.querySelector('[href], [src]')).toBeNull()
   })
 
+  it('shows the title of a link as part of the muted text, and extra table cells', () => {
+    const w = render('[click](https://e.x/y "the title")')
+    expect(w.find('.agent-md-url').element.textContent).toBe(' (https://e.x/y "the title")')
+    const t = render('| a |\n|---|\n| 1 | extra |')
+    expect(t.findAll('td').map((c) => c.text())).toEqual(['1', 'extra'])
+  })
+
+  it('shows the invisible characters at the edges of a line as escapes', () => {
+    expect(render('\uFEFFhello').text()).toBe('\\u{FEFF}hello')
+  })
+
   it('shows only the url when the label equals it', () => {
     const w = render('[https://e.x](https://e.x)')
     expect(w.find('.agent-md-link').exists()).toBe(false)

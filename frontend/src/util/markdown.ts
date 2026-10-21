@@ -9,8 +9,8 @@ export type MdInline =
   | { t: 'text'; v: string }
   | { t: 'code'; v: string }
   | { t: 'strong' | 'em' | 'del'; c: MdInline[] }
-  | { t: 'link'; label: MdInline[]; url: string }
-  | { t: 'image'; alt: string; url: string }
+  | { t: 'link'; label: MdInline[]; url: string; title?: string }
+  | { t: 'image'; alt: string; url: string; title?: string }
   | { t: 'br' }
 export type MdAlign = 'left' | 'center' | 'right' | null
 export type MdBlock =
@@ -65,13 +65,23 @@ const isPunct = (c: string): boolean => {
 }
 const isDigit = (c: string | undefined): boolean => c !== undefined && c >= '0' && c <= '9'
 
+// trimAscii strips only spaces and tabs from both ends; String.trim() would
+// also remove U+FEFF, U+2028 and U+2029, which must stay for the escaping.
+const trimAscii = (s: string): string => {
+  let a = 0
+  let b = s.length
+  while (a < b && (s[a] === ' ' || s[a] === '\t')) a++
+  while (b > a && (s[b - 1] === ' ' || s[b - 1] === '\t')) b--
+  return s.slice(a, b)
+}
+
 // ----------------------------------------------------------------- inlines
 
 type Run = { t: 'run'; ch: string; rem: number }
 type Item = MdInline | Run
 
 type LinkScan =
-  | { k: 'ok'; label: string; url: string; end: number }
+  | { k: 'ok'; label: string; url: string; title?: string; end: number }
   | { k: 'noclose' } // no closing bracket before the end of the text
   | { k: 'end'; label: string } // `[label](ur` cut off by the end of the text
   | { k: 'fail' }
@@ -110,7 +120,7 @@ const scanLink = (text: string, open: number): LinkScan => {
   const url = text.slice(p, u)
   if (url === '') return { k: 'fail' }
   if (text[u] === ')') return { k: 'ok', label, url, end: u + 1 }
-  // an optional "title", accepted and dropped
+  // an optional "title", kept
   let w = u
   while (w < n && text[w] === ' ' && w - u < MAX_SPACES) w++
   if (w >= n) return { k: 'end', label }
@@ -123,7 +133,7 @@ const scanLink = (text: string, open: number): LinkScan => {
   while (x < n && text[x] === ' ' && x - t < MAX_SPACES) x++
   if (x >= n) return { k: 'end', label }
   if (text[x] !== ')') return { k: 'fail' }
-  return { k: 'ok', label, url, end: x + 1 }
+  return { k: 'ok', label, url, title: text.slice(w + 1, t), end: x + 1 }
 }
 
 const pushText = (out: MdInline[], v: string, ctx: Ctx) => {
@@ -336,7 +346,8 @@ const parseInline = (text: string, ctx: Ctx, closeOpen: boolean, baseDepth: numb
           items.push({
             t: 'link',
             label: sc.label === '' ? [] : parseInline(sc.label, ctx, false, 1),
-            url: sc.url
+            url: sc.url,
+            ...(sc.title === undefined ? {} : { title: sc.title })
           })
           i = sc.end
           ts = i
@@ -362,7 +373,12 @@ const parseInline = (text: string, ctx: Ctx, closeOpen: boolean, baseDepth: numb
         const sc = scanLink(text, i + 1)
         if (sc.k === 'ok') {
           flush(i)
-          items.push({ t: 'image', alt: sc.label, url: sc.url })
+          items.push({
+            t: 'image',
+            alt: sc.label,
+            url: sc.url,
+            ...(sc.title === undefined ? {} : { title: sc.title })
+          })
           i = sc.end
           ts = i
         } else if (closeOpen && sc.k === 'noclose') {
@@ -404,7 +420,7 @@ const parseInline = (text: string, ctx: Ctx, closeOpen: boolean, baseDepth: numb
 
 const codeContent = (raw: string): string => {
   let s = raw.indexOf('\n') >= 0 ? raw.split('\n').join(' ') : raw
-  if (s.length >= 2 && s[0] === ' ' && s[s.length - 1] === ' ' && s.trim() !== '') s = s.slice(1, -1)
+  if (s.length >= 2 && s[0] === ' ' && s[s.length - 1] === ' ' && trimAscii(s) !== '') s = s.slice(1, -1)
   return s
 }
 
@@ -487,7 +503,7 @@ const headingOf = (l: string, ind: number): { level: 3 | 4 | 5; text: string } |
   while (e < l.length && l[e] === '#') e++
   const k = e - ind
   if (k < 1 || k > 6 || l[e] !== ' ') return null
-  const t = l.slice(e + 1).trim()
+  const t = trimAscii(l.slice(e + 1))
   let end = t.length
   while (end > 0 && t[end - 1] === '#') end--
   let text = t
@@ -532,7 +548,7 @@ type Delim = ('left' | 'center' | 'right' | null)[]
 // splitRow splits a table row on unescaped pipes (`\|` becomes `|`), keeping
 // at most max cells.
 const splitRow = (line: string, max: number): string[] => {
-  let s = line.trim()
+  let s = trimAscii(line)
   if (s[0] === '|') s = s.slice(1)
   const cells: string[] = []
   let cur = ''
@@ -545,7 +561,7 @@ const splitRow = (line: string, max: number): string[] => {
       i += 2
       seg = i
     } else if (c === '|') {
-      cells.push((cur + s.slice(seg, i)).trim())
+      cells.push(trimAscii(cur + s.slice(seg, i)))
       cur = ''
       i++
       seg = i
@@ -554,7 +570,7 @@ const splitRow = (line: string, max: number): string[] => {
       i++
     }
   }
-  if (seg < s.length) cells.push((cur + s.slice(seg)).trim())
+  if (seg < s.length) cells.push(trimAscii(cur + s.slice(seg)))
   return cells
 }
 
@@ -603,7 +619,7 @@ const interrupts = (lines: string[], j: number, depth: number): boolean => {
 }
 
 const cleanLine = (l: string): string => {
-  const t = l.trim()
+  const t = trimAscii(l)
   return t.endsWith('\\') ? t.slice(0, -1) : t
 }
 
@@ -733,10 +749,10 @@ const parseBlocks = (lines: string[], depth: number, last: boolean, ctx: Ctx): M
         const headCells = ts.head.map((c) => (count(ctx), parseInline(c, ctx, lastLine && j === bodyStart, 0)))
         const rows: MdInline[][][] = []
         for (let r = bodyStart; r < j; r++) {
-          const raw = splitRow(lines[r], cols)
+          const raw = splitRow(lines[r], Infinity)
           const isLastRow = lastLine && r === j - 1
           const cells: MdInline[][] = []
-          for (let ci = 0; ci < cols; ci++) {
+          for (let ci = 0; ci < Math.max(cols, raw.length); ci++) {
             count(ctx)
             cells.push(parseInline(raw[ci] ?? '', ctx, isLastRow, 0))
           }
