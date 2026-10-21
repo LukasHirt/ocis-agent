@@ -248,6 +248,7 @@ func (st *streamState) event(data []byte) error {
 			continue // only the first choice is used
 		}
 		d := ch.Delta
+		emitted := false // a delta of this chunk reached onDelta
 		for _, r := range []*string{d.Reasoning, d.ReasoningContent} {
 			if r != nil && *r != "" {
 				st.reasoning += len(*r)
@@ -257,6 +258,7 @@ func (st *streamState) event(data []byte) error {
 				if !st.thinking {
 					st.thinking = true
 					st.emit(Delta{Thinking: true})
+					emitted = true
 				}
 			}
 		}
@@ -266,11 +268,18 @@ func (st *streamState) event(data []byte) error {
 			}
 			st.content.WriteString(*d.Content)
 			st.emit(Delta{Text: *d.Content})
+			emitted = true
 		}
 		for _, tc := range d.ToolCalls {
 			if err := st.callDelta(tc); err != nil {
 				return err
 			}
+		}
+		reasoned := d.Reasoning != nil && *d.Reasoning != "" || d.ReasoningContent != nil && *d.ReasoningContent != ""
+		if !emitted && (reasoned || len(d.ToolCalls) > 0) {
+			// reasoning or tool-call fragments only: a heartbeat, so the
+			// caller can store text it held back (the stream is alive)
+			st.emit(Delta{})
 		}
 		if ch.FinishReason != nil && *ch.FinishReason != "" {
 			f := *ch.FinishReason

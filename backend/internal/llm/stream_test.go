@@ -960,3 +960,30 @@ func TestStreamFuncAdapter(t *testing.T) {
 		t.Fatalf("Complete = %+v, %v", r, err)
 	}
 }
+
+// A chunk of reasoning or tool-call fragments only (no visible text, not
+// the first reasoning) reaches onDelta as an empty heartbeat, so a caller
+// that held text back can store it while the call streams; Thinking stays
+// once and the heartbeats carry nothing.
+func TestReasoningAndToolCallChunksAreHeartbeats(t *testing.T) {
+	srv := httptest.NewServer(sse(0,
+		ev(`{"choices":[{"index":0,"delta":{"reasoning":"hidden one"},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{"reasoning":"hidden two"},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{"content":"I'll save it:"},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"files__list","arguments":"{\"pa"}}]},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"/\"}"}}]},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{"content":"","tool_calls":[]},"finish_reason":null}]}`),
+		ev(`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`),
+		done,
+	))
+	defer srv.Close()
+	var log deltaLog
+	resp, err := streamClient(t, srv.URL, nil).CompleteStream(context.Background(), simpleReq(), log.add)
+	if err != nil || len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("resp = %+v, err = %v", resp, err)
+	}
+	want := []Delta{{Thinking: true}, {}, {Text: "I'll save it:"}, {}, {}}
+	if fmt.Sprint(log.d) != fmt.Sprint(want) {
+		t.Errorf("deltas = %+v, want %+v", log.d, want)
+	}
+}

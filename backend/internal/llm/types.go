@@ -90,6 +90,8 @@ type Provider interface {
 // Thinking when the model started its hidden reasoning (reported once; the
 // reasoning text itself is never passed on). Text is untrusted model output
 // and may belong to a call that fails later: it is never the final answer.
+// An empty Delta is a heartbeat: a chunk carried only reasoning or tool-call
+// fragments, so the call is alive (a caller may store text it held back).
 type Delta struct {
 	Text     string
 	Thinking bool
