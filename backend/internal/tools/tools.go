@@ -78,6 +78,9 @@ type Env struct {
 	Memory       *memory.Service
 	Reads        *ReadBudget    // per-job read allowance; nil means no cap
 	MemoryWrites *memory.Budget // per-job memory write allowance; nil means no cap
+	// WatchFolders are the policy's watch folders when the job started.
+	// files.recent_changes lists only these (arguments can only narrow them).
+	WatchFolders []string
 	Limits       Limits
 }
 

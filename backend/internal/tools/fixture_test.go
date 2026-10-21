@@ -42,6 +42,7 @@ func newFixture(t *testing.T) fixture {
 		env: Env{
 			UserID: "u1", DriveID: testDrive, Creds: ocisclient.AppToken("einstein", "pw"),
 			Files: client, Memory: memory.New(client, st, memory.Limits{}),
+			WatchFolders: []string{"/docs"},
 		},
 		fake: fake,
 		st:   st,

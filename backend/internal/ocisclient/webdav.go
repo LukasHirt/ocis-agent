@@ -89,7 +89,7 @@ type multistatus struct {
 // Hrefs that are not canonical, hold control characters or an encoded slash,
 // or point at another host are rejected.
 func (c *Client) hrefToPath(href, drive string) (string, error) {
-	bad := errors.New("ocisclient: PROPFIND: malformed href")
+	bad := fmt.Errorf("ocisclient: PROPFIND: href: %w", ErrMalformed)
 	u, err := url.Parse(href)
 	if err != nil {
 		return "", bad
@@ -105,7 +105,7 @@ func (c *Client) hrefToPath(href, drive string) (string, error) {
 	}
 	prefix := davPrefix + drive
 	if u.Path != prefix && !strings.HasPrefix(u.Path, prefix+"/") {
-		return "", errors.New("ocisclient: PROPFIND: href outside the requested space")
+		return "", fmt.Errorf("ocisclient: PROPFIND: href outside the requested space: %w", ErrMalformed)
 	}
 	rel := strings.TrimRight(strings.TrimPrefix(u.Path, prefix), "/")
 	if rel == "" {
@@ -137,7 +137,7 @@ func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string)
 	}
 	var ms multistatus
 	if err := xml.Unmarshal(resp.body, &ms); err != nil {
-		return nil, tg, errors.New("ocisclient: PROPFIND: malformed response")
+		return nil, tg, fmt.Errorf("ocisclient: PROPFIND: %w", ErrMalformed)
 	}
 	var out []Entry
 	for _, r := range ms.Responses {
@@ -163,7 +163,7 @@ func (c *Client) propfind(ctx context.Context, cr Creds, drive, p, depth string)
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return nil, tg, errors.New("ocisclient: PROPFIND: empty response")
+		return nil, tg, fmt.Errorf("ocisclient: PROPFIND: empty response: %w", ErrMalformed)
 	}
 	return out, tg, nil
 }
@@ -179,7 +179,7 @@ func (c *Client) Stat(ctx context.Context, cr Creds, drive, p string) (Entry, er
 			return e, nil
 		}
 	}
-	return Entry{}, errors.New("ocisclient: PROPFIND: the response does not describe the requested path")
+	return Entry{}, fmt.Errorf("ocisclient: PROPFIND: the response does not describe the requested path: %w", ErrMalformed)
 }
 
 // List returns the children of the folder at p, sorted by path.
@@ -199,7 +199,7 @@ func (c *Client) List(ctx context.Context, cr Creds, drive, p string) ([]Entry, 
 		}
 	}
 	if self == nil {
-		return nil, errors.New("ocisclient: PROPFIND: the response does not describe the requested path")
+		return nil, fmt.Errorf("ocisclient: PROPFIND: the response does not describe the requested path: %w", ErrMalformed)
 	}
 	if !self.Dir {
 		return nil, ErrNotDir

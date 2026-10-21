@@ -15,11 +15,14 @@ var (
 	ErrPrecondition = errors.New("ocisclient: precondition failed")
 	// ErrTooEarly: oCIS still postprocesses a fresh upload (425 to a GET)
 	// after the client waited a few seconds for it.
-	ErrTooEarly        = errors.New("ocisclient: file still being processed")
-	ErrExists          = errors.New("ocisclient: already exists")
-	ErrNotDir          = errors.New("ocisclient: not a directory")
-	ErrTooLarge        = errors.New("ocisclient: response too large")
-	ErrInvalidPath     = errors.New("ocisclient: invalid path")
+	ErrTooEarly    = errors.New("ocisclient: file still being processed")
+	ErrExists      = errors.New("ocisclient: already exists")
+	ErrNotDir      = errors.New("ocisclient: not a directory")
+	ErrTooLarge    = errors.New("ocisclient: response too large")
+	ErrInvalidPath = errors.New("ocisclient: invalid path")
+	// ErrMalformed: oCIS sent a response that cannot be trusted or parsed,
+	// such as a PROPFIND href with a control character or outside the space.
+	ErrMalformed       = errors.New("ocisclient: malformed response")
 	ErrNoCredentials   = errors.New("ocisclient: missing credentials")
 	ErrNoPersonalDrive = errors.New("ocisclient: no personal drive")
 	ErrStreamClosed    = errors.New("ocisclient: event stream closed by the server")

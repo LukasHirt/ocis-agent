@@ -4,7 +4,7 @@ package tools
 // register them next to their own.
 func All() []Tool {
 	return []Tool{
-		NewListSpaces(), NewList(), NewStat(), NewReadText(),
+		NewListSpaces(), NewList(), NewStat(), NewReadText(), NewRecentChanges(),
 		NewCreateFolder(), NewWriteNew(), NewOverwrite(), NewMove(), NewCopy(), NewDelete(),
 		NewMemoryList(), NewMemoryRead(), NewMemoryWrite(),
 	}
