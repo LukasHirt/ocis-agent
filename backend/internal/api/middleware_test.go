@@ -545,6 +545,27 @@ func TestRequestLogLine(t *testing.T) {
 	}
 }
 
+// healthz is logged under its registered pattern, not as unmatched; a wrong
+// method and an unknown path stay unmatched.
+func TestRequestLogLineRoutes(t *testing.T) {
+	f := newFixture(t)
+	f.serve(httptest.NewRequest(http.MethodGet, "/agent-api/healthz", nil))
+	f.serve(httptest.NewRequest(http.MethodPost, "/agent-api/healthz", nil))
+	f.serve(httptest.NewRequest(http.MethodGet, "/agent-api/nope", nil))
+	var routes []any
+	for _, l := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
+		if strings.Contains(l, `"msg":"api: request"`) {
+			var line map[string]any
+			_ = json.Unmarshal([]byte(l), &line)
+			routes = append(routes, line["route"])
+		}
+	}
+	want := []any{"GET /agent-api/healthz", "unmatched", "unmatched"}
+	if fmt.Sprint(routes) != fmt.Sprint(want) {
+		t.Errorf("routes = %v, want %v", routes, want)
+	}
+}
+
 // The pre-auth IP bucket counts failed authentications only. When it is
 // empty, a request with a token the validator has cached still proceeds (a
 // flood from the shared proxy IP does not lock out real users), anything

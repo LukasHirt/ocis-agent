@@ -223,6 +223,10 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		writeCode(w, r, http.StatusNotFound, "not_found")
 		return
 	}
+	// the log label of every matched route, also of healthz, which has no chain
+	if ri := infoFrom(r.Context()); ri != nil {
+		ri.route = pattern
+	}
 	s.mux.ServeHTTP(w, r)
 }
 

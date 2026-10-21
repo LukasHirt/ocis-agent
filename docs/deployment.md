@@ -363,9 +363,9 @@ than this binary supports"), so a downgrade means restoring the backup taken bef
   ready, when the database does not answer, or (worker role) without a live worker. Use `/readyz`
   for readiness and the API's healthz for liveness.
 - **Logs.** JSON lines on stderr. Every API request logs one line (`request_id`, method, route
-  pattern, status, duration, user id, error category); the request id is in the `X-Request-Id`
-  header and every error body, so a user's report can be matched. Health-check requests are logged
-  too. Useful categories: `rate_limited`, `upstream_unavailable` (oCIS failures),
+  pattern or `unmatched`, status, duration, user id, error category); the request id is in the
+  `X-Request-Id` header and every error body, so a user's report can be matched. Health-check
+  requests are logged too. Useful categories: `rate_limited`, `upstream_unavailable` (oCIS failures),
   `unauthenticated`, `panic`, `poll_failed`; worker and scheduler lines report job ids and fixed
   outcomes.
 - **Inside the extension.** Users see pauses (`pause_reason`), the kill switch and their budget in
