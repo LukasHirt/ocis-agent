@@ -61,7 +61,7 @@ func (g *Gate) Decide(ctx context.Context, userID, decidedBy string, items []Dec
 				return err
 			}
 			if err := g.event(tx, audit.Event{
-				UserID: userID, JobID: a.JobID, Kind: "approval_decided", Tool: a.Tool, Risk: a.Risk,
+				UserID: userID, JobID: a.JobID, Kind: audit.KindApprovalDecided, Tool: a.Tool, Risk: a.Risk,
 				ArgsHash: a.ArgsHash, Cred: "oidc", Outcome: string(a.State), Detail: "approval=" + a.ID,
 			}); err != nil {
 				return err
@@ -103,7 +103,7 @@ func (g *Gate) ExpireAndResume(ctx context.Context) (int, error) {
 		var order []key
 		for _, r := range refs {
 			if err := g.event(tx, audit.Event{
-				UserID: r.UserID, JobID: r.JobID, Kind: "approval_expired", Outcome: "expired", Detail: "approval=" + r.ID,
+				UserID: r.UserID, JobID: r.JobID, Kind: audit.KindApprovalExpired, Outcome: "expired", Detail: "approval=" + r.ID,
 			}); err != nil {
 				return err
 			}

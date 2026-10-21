@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,24 +128,33 @@ func refuseHEAD(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// listAudit is GET /agent-api/v1/audit?cursor=&limit=&job_id=&tool=&risk=
-// (ascending by seq; no chain fields).
+// descCursor prefixes the cursors of an order=desc listing, so a cursor
+// works only in the order that issued it.
+const descCursor = "d"
+
+// listAudit is GET /agent-api/v1/audit?cursor=&limit=&order=&job_id=&tool=&risk=&kind=
+// (no chain fields). order is asc (default, ascending by seq) or desc
+// (newest first); kind is one of the kinds the agent records (audit.IsKind).
 //
 // cursor is the seq of the last record the previous page covered: the next
-// page holds records with a greater seq. Without filters that is the last
-// returned event. With filters the handler reads pages of 500 and stops after
-// limit+1 matches (the extra one only proves there is more) or after 5000
-// scanned records. In the first case next_cursor is the seq of the last
-// returned match; in the second it is the seq of the last SCANNED record, so
-// a page may then hold fewer than limit events (even none) and still have a
-// next_cursor: keep following it until it is null. next_cursor is null only
-// when the end of the user's log was reached.
+// page holds records with a greater seq (asc) or a smaller one (desc). A desc
+// cursor carries the prefix "d", so a cursor is refused (400) in the other
+// order, and must name a record of the caller's own log (400 otherwise). An
+// asc cursor may be any seq: one past the end gives an empty last page.
+// Without filters that is the last returned event. With filters the handler
+// reads pages of 500 and stops after limit+1 matches (the extra one only
+// proves there is more) or after 5000 scanned records. In the first case
+// next_cursor is the seq of the last returned match; in the second it is the
+// seq of the last SCANNED record, so a page may then hold fewer than limit
+// events (even none) and still have a next_cursor: keep following it until
+// it is null. next_cursor is null only when the end of the user's log was
+// reached.
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
 	}
-	q, err := query(r, "cursor", "limit", "job_id", "tool", "risk")
+	q, err := query(r, "cursor", "limit", "order", "job_id", "tool", "risk", "kind")
 	if err != nil {
 		return err
 	}
@@ -152,13 +162,31 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var after int64
+	order, err := queryValue(q, "order")
+	if err != nil {
+		return err
+	}
+	var desc bool
+	switch order {
+	case "", "asc":
+	case "desc":
+		desc = true
+	default:
+		return errBadQuery
+	}
+	var pos int64 // the cursor's seq; 0: from the start of the order
 	cs, err := queryValue(q, "cursor")
 	if err != nil {
 		return err
 	}
 	if cs != "" {
-		if after, ok = parseSeq(cs); !ok {
+		if desc {
+			var found bool
+			if cs, found = strings.CutPrefix(cs, descCursor); !found {
+				return errBadQuery
+			}
+		}
+		if pos, ok = parseSeq(cs); !ok {
 			return errBadQuery
 		}
 	}
@@ -183,11 +211,34 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	if risk != "" && !riskNames[risk] {
 		return errBadQuery
 	}
-	filtered := jobID != "" || tool != "" || risk != ""
+	kind, err := queryValue(q, "kind")
+	if err != nil {
+		return err
+	}
+	if kind != "" && !audit.IsKind(kind) {
+		return errBadQuery
+	}
+	filtered := jobID != "" || tool != "" || risk != "" || kind != ""
 
 	out := auditPageView{Events: []auditEventView{}}
 	var next int64 // 0: no next page
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
+		if desc && pos > 0 {
+			// a desc cursor names a record of the caller's own log (asc
+			// cursors are not checked: existing clients probe with seqs
+			// past the end, which only yields an empty last page)
+			recs, err := tx.ReadAudit(p.UserID, pos-1, 1)
+			if err != nil {
+				return err
+			}
+			if len(recs) == 0 || recs[0].Seq != pos {
+				return errBadQuery
+			}
+		}
+		read := tx.ReadAudit
+		if desc {
+			read = tx.ReadAuditBefore
+		}
 		scanned := 0
 		for {
 			n := auditFetchPage
@@ -196,14 +247,15 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 			} else if rest := auditScanBudget - scanned; rest < n {
 				n = rest
 			}
-			recs, err := tx.ReadAudit(p.UserID, after, n)
+			recs, err := read(p.UserID, pos, n)
 			if err != nil {
 				return err
 			}
 			for _, rec := range recs {
 				scanned++
-				after = rec.Seq
-				if (jobID != "" && rec.JobID != jobID) || (tool != "" && rec.Tool != tool) || (risk != "" && rec.Risk != risk) {
+				pos = rec.Seq
+				if (jobID != "" && rec.JobID != jobID) || (tool != "" && rec.Tool != tool) ||
+					(risk != "" && rec.Risk != risk) || (kind != "" && rec.Kind != kind) {
 					continue
 				}
 				if len(out.Events) == limit {
@@ -220,7 +272,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 				return nil
 			}
 			if scanned >= auditScanBudget {
-				next = after // the scan budget is spent: continue after the last scanned record
+				next = pos // the scan budget is spent: continue after the last scanned record
 				return nil
 			}
 		}
@@ -230,6 +282,9 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	}
 	if next > 0 {
 		c := strconv.FormatInt(next, 10)
+		if desc {
+			c = descCursor + c
+		}
 		out.NextCursor = &c
 	}
 	writeJSON(w, http.StatusOK, out)

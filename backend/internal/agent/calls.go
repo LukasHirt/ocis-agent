@@ -224,7 +224,7 @@ func (r *Runner) applyOutcome(ctx context.Context, claim store.Claim, env tools.
 	var events []audit.Event
 	if auditDiff && out.Result.Diff != "" {
 		events = append(events, audit.Event{
-			Kind: "memory_changed", Tool: tool, Outcome: out.State.String(), Detail: textcap.Cut(out.Result.Diff, maxDiffDetail),
+			Kind: audit.KindMemoryChanged, Tool: tool, Outcome: out.State.String(), Detail: textcap.Cut(out.Result.Diff, maxDiffDetail),
 		})
 	}
 	if stop, err := r.record(ctx, claim, cp, callID, text, nil, events); stop || err != nil {
@@ -252,7 +252,7 @@ func (r *Runner) runError(ctx context.Context, claim store.Claim, tool string, e
 	case errors.Is(err, approvals.ErrTampered):
 		return true, r.end(ctx, claim, ending{
 			state: store.JobFailed, reason: ReasonInternal,
-			events: []audit.Event{{Kind: "tampered", Tool: tool, Outcome: "refused"}},
+			events: []audit.Event{{Kind: audit.KindTampered, Tool: tool, Outcome: "refused"}},
 		})
 	case errors.Is(err, approvals.ErrWrongJob), errors.Is(err, approvals.ErrBadCall), errors.Is(err, store.ErrNotFound):
 		return true, r.fail(ctx, claim, ReasonInternal)
@@ -267,7 +267,7 @@ func (r *Runner) deny(ctx context.Context, claim store.Claim, cp *Checkpoint, c 
 	text, _ := RenderResult(c.Name, "denied", tools.Result{}, reason)
 	detail := textcap.Cut(reason, maxDeniedDetail)
 	step := store.JobStep{JobID: claim.Job.ID, Kind: "tool", Tool: c.Name, CallID: c.ID, Status: "denied", Summary: detail}
-	ev := audit.Event{Kind: "policy_denied", Tool: c.Name, Outcome: "denied", Detail: detail}
+	ev := audit.Event{Kind: audit.KindPolicyDenied, Tool: c.Name, Outcome: "denied", Detail: detail}
 	return r.record(ctx, claim, cp, c.ID, text, &step, []audit.Event{ev})
 }
 

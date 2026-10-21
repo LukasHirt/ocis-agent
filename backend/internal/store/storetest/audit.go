@@ -165,6 +165,77 @@ func runAudit(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("ReadAuditBefore pages newest first", func(t *testing.T) {
+		st, _ := open(t, f)
+		appendN(t, st, "u1", 5)
+		appendN(t, st, "u2", 9)
+		read := func(user string, before int64, limit int) []int64 {
+			t.Helper()
+			var recs []audit.Record
+			err := st.View(bg(), func(tx store.Tx) error {
+				var err error
+				recs, err = tx.ReadAuditBefore(user, before, limit)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("ReadAuditBefore(%s, %d, %d): %v", user, before, limit, err)
+			}
+			var out []int64
+			for _, r := range recs {
+				if r.UserID != user {
+					t.Fatalf("record of %s in %s's page", r.UserID, user)
+				}
+				out = append(out, r.Seq)
+			}
+			return out
+		}
+		eq := func(got []int64, want ...int64) bool {
+			if len(got) != len(want) {
+				return false
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					return false
+				}
+			}
+			return true
+		}
+		if got := read("u1", 0, 2); !eq(got, 5, 4) {
+			t.Errorf("newest page = %v, want [5 4]", got)
+		}
+		if got := read("u1", 4, 2); !eq(got, 3, 2) {
+			t.Errorf("page before 4 = %v, want [3 2]", got)
+		}
+		if got := read("u1", 2, 2); !eq(got, 1) {
+			t.Errorf("page before 2 = %v, want [1]", got)
+		}
+		if got := read("u1", 1, 2); len(got) != 0 {
+			t.Errorf("page before 1 = %v, want none", got)
+		}
+		if got := read("u1", 100, 0); !eq(got, 5, 4, 3, 2, 1) {
+			t.Errorf("default limit from above the head = %v", got)
+		}
+		if got := read("u2", 0, 1000); len(got) != 9 || got[0] != 9 {
+			t.Errorf("u2 = %v", got)
+		}
+		if got := read("nobody", 0, 10); len(got) != 0 {
+			t.Errorf("unknown user = %v", got)
+		}
+		// a record read newest first is the same as read oldest first
+		var asc, desc []audit.Record
+		err := st.View(bg(), func(tx store.Tx) error {
+			var err error
+			if asc, err = tx.ReadAudit("u1", 2, 1); err != nil {
+				return err
+			}
+			desc, err = tx.ReadAuditBefore("u1", 4, 1)
+			return err
+		})
+		if err != nil || len(asc) != 1 || len(desc) != 1 || asc[0] != desc[0] {
+			t.Errorf("record 3 differs between orders: %+v %+v %v", asc, desc, err)
+		}
+	})
+
 	t.Run("concurrent appends keep one linear chain", func(t *testing.T) {
 		st, _ := open(t, f)
 		const workers, each = 10, 6

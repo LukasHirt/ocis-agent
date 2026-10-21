@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -54,15 +55,27 @@ func (t *tx) AppendAudit(ev audit.Event) (audit.Record, error) {
 
 // ReadAudit implements store.Tx.
 func (t *tx) ReadAudit(userID string, afterSeq int64, limit int) ([]audit.Record, error) {
+	return t.readAudit(`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
+		 FROM audit WHERE user_id = ? AND seq > ? ORDER BY seq LIMIT ?`, userID, afterSeq, limit)
+}
+
+// ReadAuditBefore implements store.Tx.
+func (t *tx) ReadAuditBefore(userID string, beforeSeq int64, limit int) ([]audit.Record, error) {
+	if beforeSeq <= 0 {
+		beforeSeq = math.MaxInt64
+	}
+	return t.readAudit(`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
+		 FROM audit WHERE user_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`, userID, beforeSeq, limit)
+}
+
+func (t *tx) readAudit(q, userID string, seq int64, limit int) ([]audit.Record, error) {
 	if limit <= 0 {
 		limit = defaultAuditLimit
 	}
 	if limit > maxAuditLimit {
 		limit = maxAuditLimit
 	}
-	rows, err := t.q.QueryContext(t.ctx,
-		`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
-		 FROM audit WHERE user_id = ? AND seq > ? ORDER BY seq LIMIT ?`, userID, afterSeq, limit)
+	rows, err := t.q.QueryContext(t.ctx, q, userID, seq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: read audit: %w", err)
 	}

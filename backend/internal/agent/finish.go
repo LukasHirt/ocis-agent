@@ -58,7 +58,7 @@ func (r *Runner) end(ctx context.Context, claim store.Claim, e ending) error {
 		if !ok {
 			return errNotRunning // roll back: nothing to record
 		}
-		events := append(append([]audit.Event(nil), e.events...), audit.Event{Kind: "job_finished", Outcome: string(e.state), Detail: e.reason})
+		events := append(append([]audit.Event(nil), e.events...), audit.Event{Kind: audit.KindJobFinished, Outcome: string(e.state), Detail: e.reason})
 		for _, ev := range events {
 			ev.UserID, ev.JobID, ev.TS = j.UserID, j.ID, r.cfg.Now()
 			if _, err := tx.AppendAudit(ev); err != nil {

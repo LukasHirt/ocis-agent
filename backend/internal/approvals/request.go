@@ -107,7 +107,7 @@ func (g *Gate) Request(ctx context.Context, claim store.Claim, pending []Pending
 				return err
 			}
 			if err := g.event(tx, audit.Event{
-				UserID: userID, JobID: jobID, Kind: "approval_requested", Tool: a.Tool, Risk: a.Risk,
+				UserID: userID, JobID: jobID, Kind: audit.KindApprovalRequested, Tool: a.Tool, Risk: a.Risk,
 				ArgsHash: a.ArgsHash, Outcome: "pending", Detail: "approval=" + a.ID,
 			}); err != nil {
 				return err

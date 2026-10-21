@@ -247,7 +247,7 @@ func (s *Server) deleteConversation(w http.ResponseWriter, r *http.Request) erro
 				return err
 			}
 		}
-		return s.appendAudit(tx, p.UserID, "conversation_deleted", "deleted", "jobs_cancelled="+strconv.Itoa(n))
+		return s.appendAudit(tx, p.UserID, audit.KindConversationDeleted, "deleted", "jobs_cancelled="+strconv.Itoa(n))
 	})
 	if err != nil {
 		return err
@@ -459,7 +459,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 		if _, err := tx.AppendAudit(audit.Event{
-			UserID: p.UserID, TS: now, JobID: job.ID, Kind: "chat_message", Cred: "oidc", Outcome: "queued",
+			UserID: p.UserID, TS: now, JobID: job.ID, Kind: audit.KindChatMessage, Cred: "oidc", Outcome: "queued",
 			Detail: "job=" + job.ID,
 		}); err != nil {
 			return err

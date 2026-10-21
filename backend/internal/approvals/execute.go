@@ -214,7 +214,7 @@ func (x *Executor) expire(ctx context.Context, claim store.Claim, a store.Approv
 			return err
 		}
 		if err := x.event(tx, audit.Event{
-			UserID: a.UserID, JobID: a.JobID, Kind: "approval_expired", Tool: a.Tool, Risk: a.Risk,
+			UserID: a.UserID, JobID: a.JobID, Kind: audit.KindApprovalExpired, Tool: a.Tool, Risk: a.Risk,
 			ArgsHash: a.ArgsHash, Outcome: "expired", Detail: "approval=" + a.ID + " was not executed",
 		}); err != nil {
 			return err
@@ -292,7 +292,7 @@ func (x *Executor) RunRead(ctx context.Context, claim store.Claim, env tools.Env
 			return err
 		}
 		return x.event(tx, audit.Event{
-			UserID: claim.Job.UserID, JobID: claim.Job.ID, Kind: "tool_call", Tool: d.Tool.Name(), Risk: d.Risk.String(),
+			UserID: claim.Job.UserID, JobID: claim.Job.ID, Kind: audit.KindToolCall, Tool: d.Tool.Name(), Risk: d.Risk.String(),
 			ArgsHash: d.ArgsHash, Cred: env.Creds.Kind(), Outcome: out.State.String(), Detail: out.detail(),
 		})
 	})
@@ -484,7 +484,7 @@ func (x *Executor) finish(ctx context.Context, claim store.Claim, env tools.Env,
 			}
 		}
 		if err := x.event(tx, audit.Event{
-			UserID: user, JobID: jobID, Kind: "action_executed", Tool: j.tool.Name(), Risk: j.risk.String(),
+			UserID: user, JobID: jobID, Kind: audit.KindActionExecuted, Tool: j.tool.Name(), Risk: j.risk.String(),
 			ArgsHash: j.argsHash, Cred: env.Creds.Kind(), Outcome: out.State.String(), Detail: out.detail(),
 		}); err != nil {
 			return err

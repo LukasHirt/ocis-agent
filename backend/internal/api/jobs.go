@@ -346,7 +346,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		if _, err := tx.AppendAudit(audit.Event{
-			UserID: p.UserID, TS: s.d.Now(), JobID: id, Kind: "job_cancelled", Cred: "oidc", Outcome: "cancelled",
+			UserID: p.UserID, TS: s.d.Now(), JobID: id, Kind: audit.KindJobCancelled, Cred: "oidc", Outcome: "cancelled",
 		}); err != nil {
 			return err
 		}

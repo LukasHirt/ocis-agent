@@ -213,7 +213,7 @@ func (x *Executor) finishOrphan(ctx context.Context, rec store.IdemRecord, a *st
 			}
 		}
 		return x.event(tx, audit.Event{
-			UserID: rec.UserID, JobID: jobID, Kind: "action_executed", Tool: meta.tool, Risk: meta.risk,
+			UserID: rec.UserID, JobID: jobID, Kind: audit.KindActionExecuted, Tool: meta.tool, Risk: meta.risk,
 			ArgsHash: meta.argsHash, Cred: meta.cred, Outcome: out.State.String(), Detail: "reconciled: " + out.detail(),
 		})
 	})

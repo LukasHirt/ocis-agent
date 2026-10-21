@@ -26,6 +26,9 @@ type Tx interface {
 	// ReadAudit returns records with seq > afterSeq in ascending order.
 	// limit <= 0 means 100; the maximum is 1000.
 	ReadAudit(userID string, afterSeq int64, limit int) ([]audit.Record, error)
+	// ReadAuditBefore returns records with seq < beforeSeq in descending
+	// order; beforeSeq <= 0 starts at the newest record. Limits as ReadAudit.
+	ReadAuditBefore(userID string, beforeSeq int64, limit int) ([]audit.Record, error)
 	// VerifyAudit recomputes the user's whole chain. Failures wrap
 	// audit.ErrChainBroken.
 	VerifyAudit(userID string) error

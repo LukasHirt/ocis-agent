@@ -258,9 +258,9 @@ func (s *Service) markUnauthorized(ctx context.Context, userID string) error {
 		if err := tx.SetAppTokenStatus(userID, store.TokenInvalid); err != nil {
 			return err
 		}
-		reason, kind := store.PauseCredentialInvalid, "token_invalid"
+		reason, kind := store.PauseCredentialInvalid, audit.KindTokenInvalid
 		if !s.now().Before(rec.ExpiresAt) {
-			reason, kind = store.PauseCredentialExpired, "token_expired"
+			reason, kind = store.PauseCredentialExpired, audit.KindTokenExpired
 		}
 		changed, err := tx.PausePolicy(userID, reason)
 		if err != nil {
@@ -286,7 +286,7 @@ func (s *Service) Seen(ctx context.Context, userID string) error {
 			return err
 		}
 		if cleared {
-			return s.audit(tx, userID, "agent_resumed", "oidc", "resumed", "dormant")
+			return s.audit(tx, userID, audit.KindAgentResumed, "oidc", "resumed", "dormant")
 		}
 		return nil
 	})
@@ -313,7 +313,7 @@ func (s *Service) PauseDormant(ctx context.Context, limit int) (int, error) {
 			if err != nil || !changed {
 				return err
 			}
-			return s.audit(tx, id, "agent_dormant", "app", "paused", "")
+			return s.audit(tx, id, audit.KindAgentDormant, "app", "paused", "")
 		})
 		if errors.Is(err, store.ErrNotFound) {
 			continue // the user's policy disappeared meanwhile
