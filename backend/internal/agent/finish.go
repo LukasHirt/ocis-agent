@@ -86,9 +86,20 @@ func (r *Runner) fail(ctx context.Context, claim store.Claim, reason string) err
 // requeue puts the job back to queued, claimable at now+delay, keeping the
 // stored checkpoint.
 func (r *Runner) requeue(ctx context.Context, claim store.Claim, delay time.Duration) error {
+	return r.requeueWith(ctx, claim, delay, nil)
+}
+
+// requeueWith is requeue that also records step (if set) in the same
+// transaction.
+func (r *Runner) requeueWith(ctx context.Context, claim store.Claim, delay time.Duration, step *store.JobStep) error {
 	at := r.cfg.Now().Add(delay)
 	var applied bool
 	err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
+		if step != nil {
+			if _, err := tx.AppendStep(*step, claim.Fence); err != nil {
+				return err
+			}
+		}
 		var err error
 		applied, err = tx.RequeueJob(claim, at, nil)
 		return err

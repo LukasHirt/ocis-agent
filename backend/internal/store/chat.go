@@ -66,8 +66,11 @@ type MessageFilter struct {
 // whether anything moved since the last look. Times are unix milliseconds;
 // a user with nothing has zeros.
 type ChangeMarks struct {
-	JobsAt     int64 // newest job update
-	MessagesAt int64 // newest message or conversation change
+	JobsAt int64 // newest job update
+	// MessagesAt is the newest message or conversation change, or the
+	// newest SetJobPartial of a running chat job (it goes down again when
+	// that job leaves running: a change too).
+	MessagesAt int64
 	PolicyAt   int64 // policy update
 	AuditSeq   int64 // last audit sequence number
 }

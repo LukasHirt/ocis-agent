@@ -119,6 +119,10 @@ type faultStore struct {
 	fails map[string]int
 	errs  map[string]error // the error of a failing method (errInjected if unset)
 	after map[string]func()
+	// partials records every SetJobPartial call (partial_test.go) at the
+	// time of now
+	partials []partialWrite
+	now      func() time.Time
 }
 
 // afterCommit runs fn once, outside any transaction, right after the next
@@ -280,7 +284,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}, errs: map[string]error{}, after: map[string]func(){}}
+	faults := &faultStore{Store: db, calls: map[string]int{}, fails: map[string]int{}, errs: map[string]error{}, after: map[string]func(){}, now: clk.Now}
 	var st store.Store = faults
 	if err := st.InTx(bg, func(tx store.Tx) error {
 		return tx.PutUser(store.User{ID: userID, Name: login, PersonalDriveID: drive})

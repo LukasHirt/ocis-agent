@@ -56,6 +56,7 @@ func TestKeysetPagesUseAnIndexRange(t *testing.T) {
 		"live proactive jobs":   {live, largs, "jobs_user_state (user_id=? AND state=?"},
 		"proactive jobs today":  {daily, dargs, "jobs_user (user_id=? AND created_at>?)"},
 		"change marks jobs":     {`SELECT COALESCE(MAX(updated_at), 0) FROM jobs WHERE user_id = ?`, []any{"u1"}, "jobs_user_updated (user_id=?)"},
+		"change marks partial":  {partialMarkQuery, []any{"u1"}, "jobs_user_state (user_id=? AND state=? AND trigger_kind=?)"},
 		"change marks messages": {`SELECT COALESCE(MAX(created_at), 0) FROM messages WHERE user_id = ?`, []any{"u1"}, "messages_user (user_id=?)"},
 	} {
 		rows, err := s.r.Query(`EXPLAIN QUERY PLAN `+q.sql, q.args...)

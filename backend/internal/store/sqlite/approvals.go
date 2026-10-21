@@ -431,7 +431,7 @@ func (t *tx) ResumeJobIfSettled(userID, jobID string) (bool, error) {
 	}
 	now := t.now()
 	res, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'queued', not_before = ?, updated_at = ?
+		`UPDATE jobs SET state = 'queued', not_before = ?, updated_at = ?, `+partialCleared+`
 		 WHERE id = ? AND user_id = ? AND state = 'waiting_approval'`, ms(now), ms(now), jobID, userID)
 	if err != nil {
 		return false, err

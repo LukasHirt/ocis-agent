@@ -14,8 +14,10 @@ const noAnswer = "(no answer)"
 
 // turn makes one model call and records it. stop means the job was released
 // (final answer, a limit, a model error); otherwise the new assistant message
-// holds tool calls to process.
-func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp *Checkpoint) (bool, error) {
+// holds tool calls to process, and shown reports whether the streamed text
+// before them is still stored on the job as its partial answer (every
+// release clears it).
+func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp *Checkpoint, shown *bool) (bool, error) {
 	if cp.Turns >= r.cfg.MaxSteps {
 		// also after a crash right after the turn that reached the limit
 		return true, r.fail(ctx, claim, ReasonStepLimit)
@@ -35,9 +37,13 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 		Tools:     r.specs,
 		MaxTokens: r.cfg.MaxTokens,
 	}
-	resp, err := r.d.Provider.Complete(ctx, req)
+	resp, p, err := r.complete(ctx, claim, req)
 	if err != nil {
-		return true, r.modelError(ctx, claim, err)
+		if lost(err) {
+			return true, err // the lease went while the answer streamed
+		}
+		// a partial answer of the failed call is cleared by the release
+		return true, r.modelError(ctx, claim, err, spentStep(claim, resp))
 	}
 	step := store.JobStep{
 		JobID: claim.Job.ID, Kind: "llm", Status: "ok",
@@ -67,8 +73,16 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 		return true, r.end(ctx, claim, ending{state: store.JobFailed, reason: ReasonTooLarge, step: &step})
 	}
 	if len(calls) == 0 {
-		// the step, the answer and the release in one transaction
+		// the step, the answer and the release (which clears the partial)
+		// in one transaction
 		return true, r.end(ctx, claim, ending{state: store.JobSucceeded, checkpoint: raw, step: &step, answer: cp.Answer})
+	}
+	if p != nil {
+		// the calls take a while: show all the text before them meanwhile
+		if err := p.final(); err != nil {
+			return true, fmt.Errorf("agent: save partial answer: %w", err)
+		}
+		*shown = p.shown()
 	}
 	if err := r.d.Store.InTx(ctx, func(tx store.Tx) error {
 		if _, err := tx.AppendStep(step, claim.Fence); err != nil {
@@ -84,18 +98,39 @@ func (r *Runner) turn(ctx context.Context, claim store.Claim, env tools.Env, cp 
 	return false, nil
 }
 
-// modelError maps a provider error to the job's fate. The error text never
+// spentStep is the llm step that charges the usage a failed call still
+// reports (a stream that had started: its estimate), or nil.
+func spentStep(claim store.Claim, resp llm.CompletionResponse) *store.JobStep {
+	if resp.Usage.In <= 0 && resp.Usage.Out <= 0 {
+		return nil
+	}
+	return &store.JobStep{
+		JobID: claim.Job.ID, Kind: "llm", Status: "failed",
+		TokensIn: int64(max(resp.Usage.In, 0)), TokensOut: int64(max(resp.Usage.Out, 0)),
+	}
+}
+
+// modelError maps a provider error to the job's fate; step (if set) charges
+// the failed call's usage in the same transaction. The error text never
 // leaves this function: only fixed reasons are recorded.
-func (r *Runner) modelError(ctx context.Context, claim store.Claim, err error) error {
+func (r *Runner) modelError(ctx context.Context, claim store.Claim, err error, step *store.JobStep) error {
 	switch {
 	case isCtxErr(ctx, err):
+		if step != nil {
+			// the job stays ours until the caller requeues it: charge now
+			// (best effort; a lost lease loses the charge)
+			_ = r.d.Store.InTx(context.WithoutCancel(ctx), func(tx store.Tx) error {
+				_, err := tx.AppendStep(*step, claim.Fence)
+				return err
+			})
+		}
 		return err
 	case llm.Retryable(err):
-		return r.backoff(ctx, claim)
+		return r.requeueWith(ctx, claim, requeueDelay(r.cfg.RequeueDelay, claim.Job.Runs), step)
 	case errors.Is(err, llm.ErrAuth):
-		return r.fail(ctx, claim, ReasonModelAuth)
+		return r.end(ctx, claim, ending{state: store.JobFailed, reason: ReasonModelAuth, step: step})
 	case errors.Is(err, llm.ErrRejected):
-		return r.fail(ctx, claim, ReasonModelRejected)
+		return r.end(ctx, claim, ending{state: store.JobFailed, reason: ReasonModelRejected, step: step})
 	}
-	return r.fail(ctx, claim, ReasonModelBad)
+	return r.end(ctx, claim, ending{state: store.JobFailed, reason: ReasonModelBad, step: step})
 }
