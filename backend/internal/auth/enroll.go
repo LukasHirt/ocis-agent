@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -192,7 +193,7 @@ func (s *Service) Enroll(ctx context.Context, id Identity, bearer ocisclient.Sec
 		if _, err := tx.ClearPause(id.UserID, store.PauseCredentialInvalid, store.PauseCredentialRevoked, store.PauseCredentialExpired); err != nil {
 			return err
 		}
-		return s.audit(tx, id.UserID, "token_created", "oidc", "ok", label)
+		return s.audit(tx, id.UserID, audit.KindTokenCreated, "oidc", "ok", label)
 	})
 	if err != nil {
 		abandon(false, false)

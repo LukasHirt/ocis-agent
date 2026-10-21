@@ -24,7 +24,7 @@ func (g *Gate) SettleEnded(ctx context.Context, limit int) (int, error) {
 		}
 		for _, r := range refs {
 			if err := g.event(tx, audit.Event{
-				UserID: r.UserID, JobID: r.JobID, Kind: "approval_expired", Outcome: "expired",
+				UserID: r.UserID, JobID: r.JobID, Kind: audit.KindApprovalExpired, Outcome: "expired",
 				Detail: "approval=" + r.ID + "; job ended",
 			}); err != nil {
 				return err

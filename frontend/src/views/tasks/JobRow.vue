@@ -20,11 +20,22 @@
         <span v-text="$gettext('Created')" />
         <time :datetime="job.created_at" v-text="formatTime(job.created_at)" />
       </span>
-      <span v-if="job.updated_at" class="agent-job-changed">
-        <span v-text="ended ? $gettext('Ended') : $gettext('Updated')" />
+      <span v-if="job.ended_at" class="agent-job-changed">
+        <span v-text="$gettext('Ended')" />
+        <time :datetime="job.ended_at" v-text="formatTime(job.ended_at)" />
+      </span>
+      <span v-else-if="job.updated_at" class="agent-job-changed">
+        <span v-text="$gettext('Updated')" />
         <time :datetime="job.updated_at" v-text="formatTime(job.updated_at)" />
       </span>
       <span class="agent-job-steps" v-text="steps" />
+      <span v-if="tokensIn > 0 || tokensOut > 0" class="agent-job-tokens" v-text="tokens" />
+      <router-link
+        v-if="conversation"
+        class="agent-job-conversation"
+        :to="{ name: `${APPID}-chat-conversation`, params: { id: conversation } }"
+        v-text="$gettext('Open the conversation')"
+      />
     </div>
     <p v-if="job.error" class="agent-job-error">
       <span v-if="reason" v-text="reason" />
@@ -39,19 +50,24 @@ import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
 import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
-import { isLiveState } from '../../stores/jobs'
-import { errorText, stateLabel, triggerLabel } from './labels'
+import { conversationOf, errorText, stateLabel, tokenCount, triggerLabel } from './labels'
 import type { Job } from '../../api/types'
 
 // JobRow is one job in the list: its goal (untrusted text, cut to two
-// lines by CSS only; the detail has it all), state, trigger, times, steps
-// and error. It links to the job's detail.
+// lines by CSS only; the detail has it all), state, trigger, times, steps,
+// tokens and error. It links to the job's detail and a chat job to its
+// conversation.
 const props = defineProps<{ job: Job }>()
 const { $gettext, $ngettext, interpolate } = useGettext()
 
 const state = computed(() => stateLabel(String(props.job.state ?? ''), $gettext))
 const trigger = computed(() => triggerLabel(String(props.job.trigger_kind ?? ''), $gettext))
-const ended = computed(() => !isLiveState(props.job.state) && state.value.known)
+const conversation = computed(() => conversationOf(props.job))
+const tokensIn = computed(() => tokenCount(props.job.tokens_in))
+const tokensOut = computed(() => tokenCount(props.job.tokens_out))
+const tokens = computed(() =>
+  interpolate($gettext('%{in} in, %{out} out'), { in: String(tokensIn.value), out: String(tokensOut.value) })
+)
 const reason = computed(() => errorText(String(props.job.error ?? ''), $gettext))
 const steps = computed(() => {
   const n = typeof props.job.steps_count === 'number' ? props.job.steps_count : 0

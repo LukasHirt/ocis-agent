@@ -18,7 +18,7 @@ func appendN(t *testing.T, st store.Store, user string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		mustTx(t, st, func(tx store.Tx) error {
-			_, err := tx.AppendAudit(ev(user, "tool_call"))
+			_, err := tx.AppendAudit(ev(user, audit.KindToolCall))
 			return err
 		})
 	}
@@ -39,7 +39,18 @@ func readAll(t *testing.T, st store.Store, user string) []audit.Record {
 }
 
 func verifyAudit(st store.Store, user string) error {
-	return st.View(bg(), func(tx store.Tx) error { return tx.VerifyAudit(user) })
+	_, err := verifyCount(st, user)
+	return err
+}
+
+func verifyCount(st store.Store, user string) (int64, error) {
+	var n int64
+	err := st.View(bg(), func(tx store.Tx) error {
+		var err error
+		n, err = tx.VerifyAudit(user)
+		return err
+	})
+	return n, err
 }
 
 func init() { register("Audit", runAudit) }
@@ -76,17 +87,33 @@ func runAudit(t *testing.T, f Factory) {
 		if len(u2) != 2 || u2[0].Seq != 1 || u2[0].PrevHash != audit.Genesis {
 			t.Errorf("u2 chain = %+v", u2)
 		}
-		for _, u := range []string{"u1", "u2"} {
-			if err := verifyAudit(st, u); err != nil {
-				t.Errorf("VerifyAudit(%s): %v", u, err)
+		for u, want := range map[string]int64{"u1": 3, "u2": 2} {
+			if n, err := verifyCount(st, u); err != nil || n != want {
+				t.Errorf("VerifyAudit(%s) = %d, %v, want %d", u, n, err, want)
 			}
+		}
+	})
+
+	t.Run("verify counts every record of a long chain", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustTx(t, st, func(tx store.Tx) error {
+			for i := 0; i < 1203; i++ {
+				if _, err := tx.AppendAudit(ev("u1", audit.KindToolCall)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		appendN(t, st, "u2", 1)
+		if n, err := verifyCount(st, "u1"); err != nil || n != 1203 {
+			t.Fatalf("VerifyAudit = %d, %v, want 1203", n, err)
 		}
 	})
 
 	t.Run("an empty log verifies", func(t *testing.T) {
 		st, _ := open(t, f)
-		if err := verifyAudit(st, "nobody"); err != nil {
-			t.Fatalf("VerifyAudit of an empty log: %v", err)
+		if n, err := verifyCount(st, "nobody"); err != nil || n != 0 {
+			t.Fatalf("VerifyAudit of an empty log = %d, %v", n, err)
 		}
 	})
 
@@ -95,7 +122,7 @@ func runAudit(t *testing.T, f Factory) {
 		var rec audit.Record
 		mustTx(t, st, func(tx store.Tx) error {
 			var err error
-			rec, err = tx.AppendAudit(ev("u1", "pause"))
+			rec, err = tx.AppendAudit(ev("u1", audit.KindAgentPaused))
 			return err
 		})
 		if !rec.TS.Equal(clk.Now()) {
@@ -106,7 +133,7 @@ func runAudit(t *testing.T, f Factory) {
 	t.Run("an explicit timestamp is kept at millisecond precision", func(t *testing.T) {
 		st, _ := open(t, f)
 		want := time.Date(2025, 5, 6, 7, 8, 9, 123456789, time.UTC)
-		e := ev("u1", "pause")
+		e := ev("u1", audit.KindAgentPaused)
 		e.TS = want
 		var rec audit.Record
 		mustTx(t, st, func(tx store.Tx) error {
@@ -135,11 +162,28 @@ func runAudit(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("events need a kind the agent records", func(t *testing.T) {
+		st, _ := open(t, f)
+		mustUser(t, st, "u1")
+		for _, k := range []string{"x", "Tool_call", "tool_call ", "made_up"} {
+			err := st.InTx(bg(), func(tx store.Tx) error {
+				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: k})
+				return err
+			})
+			if !errors.Is(err, store.ErrInvalid) {
+				t.Errorf("kind %q: err = %v, want ErrInvalid", k, err)
+			}
+		}
+		if n := len(readAll(t, st, "u1")); n != 0 {
+			t.Errorf("%d events stored", n)
+		}
+	})
+
 	t.Run("a rolled-back append leaves no gap", func(t *testing.T) {
 		st, _ := open(t, f)
 		boom := errors.New("boom")
 		_ = st.InTx(bg(), func(tx store.Tx) error {
-			if _, err := tx.AppendAudit(ev("u1", "a")); err != nil {
+			if _, err := tx.AppendAudit(ev("u1", audit.KindToolCall)); err != nil {
 				return err
 			}
 			return boom
@@ -165,6 +209,77 @@ func runAudit(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("ReadAuditBefore pages newest first", func(t *testing.T) {
+		st, _ := open(t, f)
+		appendN(t, st, "u1", 5)
+		appendN(t, st, "u2", 9)
+		read := func(user string, before int64, limit int) []int64 {
+			t.Helper()
+			var recs []audit.Record
+			err := st.View(bg(), func(tx store.Tx) error {
+				var err error
+				recs, err = tx.ReadAuditBefore(user, before, limit)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("ReadAuditBefore(%s, %d, %d): %v", user, before, limit, err)
+			}
+			var out []int64
+			for _, r := range recs {
+				if r.UserID != user {
+					t.Fatalf("record of %s in %s's page", r.UserID, user)
+				}
+				out = append(out, r.Seq)
+			}
+			return out
+		}
+		eq := func(got []int64, want ...int64) bool {
+			if len(got) != len(want) {
+				return false
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					return false
+				}
+			}
+			return true
+		}
+		if got := read("u1", 0, 2); !eq(got, 5, 4) {
+			t.Errorf("newest page = %v, want [5 4]", got)
+		}
+		if got := read("u1", 4, 2); !eq(got, 3, 2) {
+			t.Errorf("page before 4 = %v, want [3 2]", got)
+		}
+		if got := read("u1", 2, 2); !eq(got, 1) {
+			t.Errorf("page before 2 = %v, want [1]", got)
+		}
+		if got := read("u1", 1, 2); len(got) != 0 {
+			t.Errorf("page before 1 = %v, want none", got)
+		}
+		if got := read("u1", 100, 0); !eq(got, 5, 4, 3, 2, 1) {
+			t.Errorf("default limit from above the head = %v", got)
+		}
+		if got := read("u2", 0, 1000); len(got) != 9 || got[0] != 9 {
+			t.Errorf("u2 = %v", got)
+		}
+		if got := read("nobody", 0, 10); len(got) != 0 {
+			t.Errorf("unknown user = %v", got)
+		}
+		// a record read newest first is the same as read oldest first
+		var asc, desc []audit.Record
+		err := st.View(bg(), func(tx store.Tx) error {
+			var err error
+			if asc, err = tx.ReadAudit("u1", 2, 1); err != nil {
+				return err
+			}
+			desc, err = tx.ReadAuditBefore("u1", 4, 1)
+			return err
+		})
+		if err != nil || len(asc) != 1 || len(desc) != 1 || asc[0] != desc[0] {
+			t.Errorf("record 3 differs between orders: %+v %+v %v", asc, desc, err)
+		}
+	})
+
 	t.Run("concurrent appends keep one linear chain", func(t *testing.T) {
 		st, _ := open(t, f)
 		const workers, each = 10, 6
@@ -175,7 +290,7 @@ func runAudit(t *testing.T, f Factory) {
 				defer wg.Done()
 				for i := 0; i < each; i++ {
 					err := st.InTx(bg(), func(tx store.Tx) error {
-						_, err := tx.AppendAudit(ev("u1", "tool_call"))
+						_, err := tx.AppendAudit(ev("u1", audit.KindToolCall))
 						return err
 					})
 					if err != nil {

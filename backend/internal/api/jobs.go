@@ -180,20 +180,33 @@ func validID(s string) bool {
 	return true
 }
 
-func summaryOf(j store.Job, steps int) store.JobSummary {
-	return store.JobSummary{
+// summaryOf is the list projection of a job and its steps (the detail and
+// the cancel load both anyway).
+func summaryOf(j store.Job, steps []store.JobStep) store.JobSummary {
+	s := store.JobSummary{
 		ID: j.ID, UserID: j.UserID, TriggerKind: j.TriggerKind, TriggerRef: j.TriggerRef, Goal: j.Goal, State: j.State,
 		Attempt: j.Attempt, Runs: j.Runs, NotBefore: j.NotBefore, Error: j.Error, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
-		StepCount: steps,
+		EndedAt: j.EndedAt, StepCount: len(steps),
 	}
+	for _, st := range steps {
+		s.TokensIn += st.TokensIn
+		s.TokensOut += st.TokensOut
+	}
+	return s
 }
 
 func jobViewOf(j store.JobSummary) jobView {
-	return jobView{
+	v := jobView{
 		ID: j.ID, TriggerKind: j.TriggerKind, Goal: capText(j.Goal, maxGoalView), State: string(j.State),
 		Attempt: j.Attempt, Runs: j.Runs, CreatedAt: timeView(j.CreatedAt), UpdatedAt: timeView(j.UpdatedAt),
-		Error: j.Error, StepsCount: j.StepCount,
+		EndedAt: timeView(j.EndedAt), Error: j.Error, StepsCount: j.StepCount, TokensIn: j.TokensIn, TokensOut: j.TokensOut,
 	}
+	// only a chat job's ref is shown: it is the conversation id the server
+	// assigned; refs of other triggers are not part of the view
+	if j.TriggerKind == store.TriggerChat {
+		v.TriggerRef = j.TriggerRef
+	}
+	return v
 }
 
 // listJobs is GET /agent-api/v1/jobs?state=&limit=&cursor= (newest first;
@@ -302,7 +315,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		v = jobDetailView{jobView: jobViewOf(summaryOf(j, len(steps))), Steps: make([]stepView, 0, len(steps))}
+		v = jobDetailView{jobView: jobViewOf(summaryOf(j, steps)), Steps: make([]stepView, 0, len(steps))}
 		for _, st := range steps {
 			v.Steps = append(v.Steps, stepView{
 				N: st.N, Kind: st.Kind, Tool: st.Tool, CallID: st.CallID, Status: st.Status,
@@ -346,7 +359,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		if _, err := tx.AppendAudit(audit.Event{
-			UserID: p.UserID, TS: s.d.Now(), JobID: id, Kind: "job_cancelled", Cred: "oidc", Outcome: "cancelled",
+			UserID: p.UserID, TS: s.d.Now(), JobID: id, Kind: audit.KindJobCancelled, Cred: "oidc", Outcome: "cancelled",
 		}); err != nil {
 			return err
 		}
@@ -358,7 +371,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		v = jobViewOf(summaryOf(j, len(steps)))
+		v = jobViewOf(summaryOf(j, steps))
 		return nil
 	})
 	if err != nil {

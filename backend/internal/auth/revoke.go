@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -47,7 +48,7 @@ func (s *Service) Revoke(ctx context.Context, userID string, bearer ocisclient.S
 	unlock := s.lockUser(userID)
 	defer unlock()
 	prefix := s.LabelPrefix()
-	return s.revokeLocked(ctx, userID, bearer, "token_deleted",
+	return s.revokeLocked(ctx, userID, bearer, audit.KindTokenDeleted,
 		func(label string) bool { return strings.HasPrefix(label, prefix) })
 }
 
@@ -61,7 +62,7 @@ func (s *Service) RevokeAll(ctx context.Context, userID string, bearer ocisclien
 	}
 	unlock := s.lockUser(userID)
 	defer unlock()
-	return s.revokeLocked(ctx, userID, bearer, "token_revoked_all", func(string) bool { return true })
+	return s.revokeLocked(ctx, userID, bearer, audit.KindTokenRevokedAll, func(string) bool { return true })
 }
 
 // revokeLocked deletes the matching tokens with the OIDC bearer, confirms by
@@ -169,7 +170,7 @@ func (s *Service) Unenroll(ctx context.Context, userID string, bearer ocisclient
 		return fmt.Errorf("auth: unenroll: %w", err)
 	}
 	prefix := s.LabelPrefix()
-	if _, err := s.revokeLocked(ctx, userID, bearer, "token_deleted",
+	if _, err := s.revokeLocked(ctx, userID, bearer, audit.KindTokenDeleted,
 		func(label string) bool { return strings.HasPrefix(label, prefix) }); err != nil {
 		return err
 	}
@@ -180,7 +181,7 @@ func (s *Service) Unenroll(ctx context.Context, userID string, bearer ocisclient
 		}
 	}
 	if err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
-		if err := s.audit(tx, userID, "unenrolled", "oidc", "ok", ""); err != nil {
+		if err := s.audit(tx, userID, audit.KindUnenrolled, "oidc", "ok", ""); err != nil {
 			return err
 		}
 		return tx.DeleteUser(userID)

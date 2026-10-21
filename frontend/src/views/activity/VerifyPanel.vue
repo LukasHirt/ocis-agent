@@ -27,13 +27,32 @@ import { useAuditStore } from '../../stores/audit'
 // log. It shows fixed texts only and always says what the check cannot
 // detect.
 const audit = useAuditStore()
-const { $gettext } = useGettext()
+const { $gettext, $ngettext, interpolate } = useGettext()
 
-const resultText = computed(() =>
-  audit.verifyResult === 'ok'
-    ? $gettext('The log is intact: no recorded event was changed.')
-    : $gettext('The chain is broken: events in the log were changed or removed.')
-)
+const resultText = computed(() => {
+  const n = audit.verifyChecked ?? 0
+  if (audit.verifyResult === 'ok') {
+    return interpolate(
+      $ngettext('Verified %{n} event: it was not changed.', 'Verified %{n} events: no recorded event was changed.', n),
+      { n },
+      true
+    )
+  }
+  const at = audit.verifyBrokenAt
+  if (at === null) return $gettext('The chain is broken: events in the log were changed or removed.')
+  const where = interpolate(
+    $gettext('The chain breaks at event %{seq}: that event was changed, or events before it were removed.'),
+    { seq: at },
+    true
+  )
+  if (n === 0) return where
+  const before = interpolate(
+    $ngettext('The %{n} event before it is intact.', 'The %{n} events before it are intact.', n),
+    { n },
+    true
+  )
+  return where + ' ' + before
+})
 </script>
 
 <style>

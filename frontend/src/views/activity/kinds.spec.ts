@@ -9,6 +9,7 @@ describe('activity kinds', () => {
       'approval_requested',
       'approval_decided',
       'approval_expired',
+      'approval_acknowledged',
       'tool_call',
       'action_executed',
       'policy_denied',

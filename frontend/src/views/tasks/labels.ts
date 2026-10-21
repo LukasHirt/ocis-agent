@@ -1,4 +1,4 @@
-import type { JobState } from '../../api/types'
+import type { Job, JobState } from '../../api/types'
 
 type Gettext = (msgid: string) => string
 
@@ -56,6 +56,14 @@ export const triggerLabel = (kind: string, t: Gettext): string | null => {
   }
   return null
 }
+
+// conversationOf is the id of the conversation a chat job answers, or
+// null for any other job.
+export const conversationOf = (job: Pick<Job, 'trigger_kind' | 'trigger_ref'>): string | null =>
+  job.trigger_kind === 'chat' && typeof job.trigger_ref === 'string' && job.trigger_ref !== '' ? job.trigger_ref : null
+
+// tokenCount is a token count from the API, or 0 when it is not one.
+export const tokenCount = (n: unknown): number => (typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : 0)
 
 // errorText is shared with the chat screen (a failed question, a notice).
 export { errorText } from '../../util/reasons'

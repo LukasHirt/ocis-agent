@@ -42,6 +42,7 @@ describe('describeError', () => {
       'job_ended',
       'stale_arguments',
       'already_decided',
+      'not_acknowledgeable',
       'limit_reached',
       'budget_exhausted',
       'too_many_pending',

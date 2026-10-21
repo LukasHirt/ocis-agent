@@ -76,13 +76,13 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request) error {
 		// replace it (a later resume would clear it for good). Keep it and
 		// record that the request was seen.
 		if pol.Paused && keepsPause(pol.PauseReason) {
-			return s.appendAudit(tx, p.UserID, "agent_paused", "kept_pause", "reason="+pol.PauseReason)
+			return s.appendAudit(tx, p.UserID, audit.KindAgentPaused, "kept_pause", "reason="+pol.PauseReason)
 		}
 		changed, err := tx.PausePolicy(p.UserID, store.PauseUser)
 		if err != nil || !changed {
 			return err
 		}
-		return s.appendAudit(tx, p.UserID, "agent_paused", "paused", "")
+		return s.appendAudit(tx, p.UserID, audit.KindAgentPaused, "paused", "")
 	})
 	if err != nil {
 		return err
@@ -131,7 +131,7 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) error {
 		if err != nil || !cleared {
 			return err
 		}
-		return s.appendAudit(tx, p.UserID, "agent_resumed", "resumed", "reason="+reason)
+		return s.appendAudit(tx, p.UserID, audit.KindAgentResumed, "resumed", "reason="+reason)
 	})
 	if err != nil {
 		return err
@@ -245,7 +245,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		// names only: values can be paths and are the user's data
-		return s.appendAudit(tx, p.UserID, "policy_changed", "changed", strings.Join(changed, ","))
+		return s.appendAudit(tx, p.UserID, audit.KindPolicyChanged, "changed", strings.Join(changed, ","))
 	})
 	if err != nil {
 		return err

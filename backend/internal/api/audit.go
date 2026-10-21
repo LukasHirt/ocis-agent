@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,24 +128,34 @@ func refuseHEAD(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// listAudit is GET /agent-api/v1/audit?cursor=&limit=&job_id=&tool=&risk=
-// (ascending by seq; no chain fields).
+// descCursor prefixes the cursors of an order=desc listing, so a cursor
+// works only in the order that issued it.
+const descCursor = "d"
+
+// listAudit is GET /agent-api/v1/audit?cursor=&limit=&order=&job_id=&tool=&risk=&kind=
+// (no chain fields). order is asc (default, ascending by seq) or desc
+// (newest first); kind is one of the kinds the agent records (audit.IsKind).
 //
 // cursor is the seq of the last record the previous page covered: the next
-// page holds records with a greater seq. Without filters that is the last
-// returned event. With filters the handler reads pages of 500 and stops after
-// limit+1 matches (the extra one only proves there is more) or after 5000
-// scanned records. In the first case next_cursor is the seq of the last
-// returned match; in the second it is the seq of the last SCANNED record, so
-// a page may then hold fewer than limit events (even none) and still have a
-// next_cursor: keep following it until it is null. next_cursor is null only
-// when the end of the user's log was reached.
+// page holds records with a greater seq (asc) or a smaller one (desc). A desc
+// cursor carries the prefix "d", so a cursor is refused (400) in the other
+// order. In both orders a cursor must name a record of the caller's own log
+// (400 otherwise); the log is append-only, so a cursor once issued stays
+// valid, and the newest record as an asc cursor gives an empty last page.
+// Without filters that is the last returned event. With filters the handler
+// reads pages of 500 and stops after limit+1 matches (the extra one only
+// proves there is more) or after 5000 scanned records. In the first case
+// next_cursor is the seq of the last returned match; in the second it is the
+// seq of the last SCANNED record, so a page may then hold fewer than limit
+// events (even none) and still have a next_cursor: keep following it until
+// it is null. next_cursor is null only when the end of the user's log was
+// reached.
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
 	}
-	q, err := query(r, "cursor", "limit", "job_id", "tool", "risk")
+	q, err := query(r, "cursor", "limit", "order", "job_id", "tool", "risk", "kind")
 	if err != nil {
 		return err
 	}
@@ -152,13 +163,31 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var after int64
+	order, err := queryValue(q, "order")
+	if err != nil {
+		return err
+	}
+	var desc bool
+	switch order {
+	case "", "asc":
+	case "desc":
+		desc = true
+	default:
+		return errBadQuery
+	}
+	var pos int64 // the cursor's seq; 0: from the start of the order
 	cs, err := queryValue(q, "cursor")
 	if err != nil {
 		return err
 	}
 	if cs != "" {
-		if after, ok = parseSeq(cs); !ok {
+		if desc {
+			var found bool
+			if cs, found = strings.CutPrefix(cs, descCursor); !found {
+				return errBadQuery
+			}
+		}
+		if pos, ok = parseSeq(cs); !ok {
 			return errBadQuery
 		}
 	}
@@ -183,11 +212,32 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	if risk != "" && !riskNames[risk] {
 		return errBadQuery
 	}
-	filtered := jobID != "" || tool != "" || risk != ""
+	kind, err := queryValue(q, "kind")
+	if err != nil {
+		return err
+	}
+	if kind != "" && !audit.IsKind(kind) {
+		return errBadQuery
+	}
+	filtered := jobID != "" || tool != "" || risk != "" || kind != ""
 
 	out := auditPageView{Events: []auditEventView{}}
 	var next int64 // 0: no next page
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
+		if pos > 0 {
+			// a cursor (either order) names a record of the caller's own log
+			recs, err := tx.ReadAudit(p.UserID, pos-1, 1)
+			if err != nil {
+				return err
+			}
+			if len(recs) == 0 || recs[0].Seq != pos {
+				return errBadQuery
+			}
+		}
+		read := tx.ReadAudit
+		if desc {
+			read = tx.ReadAuditBefore
+		}
 		scanned := 0
 		for {
 			n := auditFetchPage
@@ -196,14 +246,15 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 			} else if rest := auditScanBudget - scanned; rest < n {
 				n = rest
 			}
-			recs, err := tx.ReadAudit(p.UserID, after, n)
+			recs, err := read(p.UserID, pos, n)
 			if err != nil {
 				return err
 			}
 			for _, rec := range recs {
 				scanned++
-				after = rec.Seq
-				if (jobID != "" && rec.JobID != jobID) || (tool != "" && rec.Tool != tool) || (risk != "" && rec.Risk != risk) {
+				pos = rec.Seq
+				if (jobID != "" && rec.JobID != jobID) || (tool != "" && rec.Tool != tool) ||
+					(risk != "" && rec.Risk != risk) || (kind != "" && rec.Kind != kind) {
 					continue
 				}
 				if len(out.Events) == limit {
@@ -220,7 +271,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 				return nil
 			}
 			if scanned >= auditScanBudget {
-				next = after // the scan budget is spent: continue after the last scanned record
+				next = pos // the scan budget is spent: continue after the last scanned record
 				return nil
 			}
 		}
@@ -230,6 +281,9 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	}
 	if next > 0 {
 		c := strconv.FormatInt(next, 10)
+		if desc {
+			c = descCursor + c
+		}
 		out.NextCursor = &c
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -238,7 +292,9 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 
 // verifyAudit is GET /agent-api/v1/audit/verify (heavyLimiter: one per user,
 // maxVerifies in the process; 429 rate_limited with Retry-After otherwise); it runs
-// under the request deadline. HEAD is 405.
+// under the request deadline. HEAD is 405. The result counts the events that
+// verified and, for a broken chain, names the seq of the first failing one;
+// the message is fixed text, never event data.
 func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
@@ -255,12 +311,22 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	defer s.heavy.release(p.UserID, heavyVerify)
-	err := s.d.Store.View(r.Context(), func(tx store.Tx) error { return tx.VerifyAudit(p.UserID) })
+	var checked int64
+	err := s.d.Store.View(r.Context(), func(tx store.Tx) error {
+		var err error
+		checked, err = tx.VerifyAudit(p.UserID)
+		return err
+	})
+	var ce *audit.ChainError
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, auditVerifyView{OK: true, Limitation: auditLimitation})
+		writeJSON(w, http.StatusOK, auditVerifyView{OK: true, Limitation: auditLimitation, Checked: checked})
 	case errors.Is(err, audit.ErrChainBroken):
-		writeJSON(w, http.StatusOK, auditVerifyView{OK: false, Message: auditBrokenMessage, Limitation: auditLimitation})
+		v := auditVerifyView{OK: false, Message: auditBrokenMessage, Limitation: auditLimitation, Checked: checked}
+		if errors.As(err, &ce) {
+			v.BrokenAt = &ce.Seq
+		}
+		writeJSON(w, http.StatusOK, v)
 	default:
 		return err
 	}

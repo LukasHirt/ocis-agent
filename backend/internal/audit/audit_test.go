@@ -152,3 +152,56 @@ func TestVerifierFromACheckpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifierCountsCheckedRecords(t *testing.T) {
+	v := NewVerifier()
+	if v.Checked() != 0 {
+		t.Fatalf("fresh verifier checked %d", v.Checked())
+	}
+	for _, r := range chain(5) {
+		if err := v.Add(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v.Checked() != 5 {
+		t.Fatalf("checked = %d, want 5", v.Checked())
+	}
+}
+
+// A failure names the seq of the first record whose link or hash fails and
+// stops counting there.
+func TestVerifierReportsWhereTheChainBreaks(t *testing.T) {
+	cases := map[string]struct {
+		recs    func() []Record
+		at      int64
+		checked int64
+	}{
+		"modified middle": {func() []Record { r := chain(4); r[1].Detail = "x"; return r }, 2, 1},
+		"deleted middle":  {func() []Record { r := chain(4); return append(r[:1], r[2:]...) }, 3, 1},
+		"deleted first":   {func() []Record { return chain(3)[1:] }, 2, 0},
+		"rehashed middle": {func() []Record {
+			r := chain(3)
+			r[1].Detail = "x"
+			r[1].Hash = Hash(r[1].PrevHash, r[1].Seq, r[1].Event)
+			return r
+		}, 3, 2},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := NewVerifier()
+			var err error
+			for _, r := range c.recs() {
+				if err = v.Add(r); err != nil {
+					break
+				}
+			}
+			var ce *ChainError
+			if !errors.As(err, &ce) || !errors.Is(err, ErrChainBroken) {
+				t.Fatalf("err = %v, want a ChainError wrapping ErrChainBroken", err)
+			}
+			if ce.Seq != c.at || v.Checked() != c.checked {
+				t.Fatalf("broken at %d after %d checked, want %d after %d", ce.Seq, v.Checked(), c.at, c.checked)
+			}
+		})
+	}
+}

@@ -194,7 +194,8 @@ func ids(list []map[string]any) []string {
 	return out
 }
 
-var jobKeys = []string{"id", "trigger_kind", "goal", "state", "attempt", "runs", "created_at", "updated_at", "error", "steps_count"}
+var jobKeys = []string{"id", "trigger_kind", "trigger_ref", "goal", "state", "attempt", "runs", "created_at", "updated_at",
+	"ended_at", "error", "steps_count", "tokens_in", "tokens_out"}
 
 func wantKeys(t *testing.T, m map[string]any, keys ...string) {
 	t.Helper()
@@ -592,13 +593,16 @@ func TestListsLoadNoCheckpointsAndFetchBounded(t *testing.T) {
 	s := newWorkStack(t, func(d *Deps) { spy.Store = d.Store; d.Store = spy })
 	for i := range 3 {
 		c := s.startJob(t, einsteinID, "chat", fmt.Sprint(i))
-		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok"})
-		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok"})
+		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok", TokensIn: 7, TokensOut: 2})
+		s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok", TokensIn: 3, TokensOut: 1})
 		s.requestApprovals(t, c, `{"n":1}`)
 	}
 	spy.reset()
 	p := s.listJobs(t, "einstein", "?limit=2")
-	if len(p.Jobs) != 2 || p.Jobs[0]["steps_count"] != float64(2) || p.NextCursor == nil {
+	// the step count and the token sums come with the summaries (the spy
+	// refuses ListSteps and GetJob: no query per row)
+	if len(p.Jobs) != 2 || p.Jobs[0]["steps_count"] != float64(2) || p.Jobs[1]["tokens_in"] != float64(10) ||
+		p.Jobs[1]["tokens_out"] != float64(3) || p.NextCursor == nil {
 		t.Fatalf("jobs = %v", p.Jobs)
 	}
 	s.listJobs(t, "einstein", "?limit=200&cursor="+*p.NextCursor)
@@ -653,3 +657,68 @@ type discardWriter struct{ h http.Header }
 func (w discardWriter) Header() http.Header         { return w.h }
 func (w discardWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (w discardWriter) WriteHeader(int)             {}
+
+func TestJobTriggerRefEndTimeAndTokens(t *testing.T) {
+	s := newWorkStack(t)
+	insert := func(trigger, ref string) store.Job {
+		t.Helper()
+		var j store.Job
+		s.mustTx(t, func(tx store.Tx) error {
+			var err error
+			j, err = tx.InsertJob(store.Job{UserID: einsteinID, TriggerKind: trigger, TriggerRef: ref, Goal: "g",
+				NotBefore: s.fake.Now().AddDate(1, 0, 0)})
+			return err
+		})
+		return j
+	}
+	conv := store.NewID()
+	chat := insert(store.TriggerChat, conv)
+	other := insert("file_change", "not-an-id-to-show")
+
+	// a job that ran: two model turns and a tool step, then succeeded
+	c := s.startJob(t, einsteinID, "chat", "ran")
+	s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok", TokensIn: 100, TokensOut: 20})
+	s.addStep(t, c, store.JobStep{Kind: "tool", Tool: "files.read", CallID: "c0", Status: "done"})
+	s.addStep(t, c, store.JobStep{Kind: "llm", Status: "ok", TokensIn: 150, TokensOut: 30})
+	s.fake.Advance(time.Minute)
+	s.finishJob(t, c, store.JobSucceeded, checkpointWith(t, "done"), "")
+	endedAt := s.fake.Now().UTC().Format(time.RFC3339)
+
+	byID := map[string]map[string]any{}
+	for _, m := range s.listJobs(t, "einstein", "").Jobs {
+		wantKeys(t, m, jobKeys...)
+		byID[m["id"].(string)] = m
+	}
+	detail := func(id string) map[string]any {
+		t.Helper()
+		rec := s.as("einstein", http.MethodGet, jobsPath+"/"+id, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("detail %s = %d %s", id, rec.Code, rec.Body.String())
+		}
+		return decode(t, rec)
+	}
+	for _, src := range []string{"list", "detail"} {
+		get := func(id string) map[string]any {
+			if src == "list" {
+				return byID[id]
+			}
+			return detail(id)
+		}
+		if m := get(chat.ID); m["trigger_ref"] != conv || m["ended_at"] != nil || m["tokens_in"] != float64(0) || m["tokens_out"] != float64(0) {
+			t.Errorf("%s: chat job = %v", src, m)
+		}
+		if m := get(other.ID); m["trigger_ref"] != "" || m["ended_at"] != nil {
+			t.Errorf("%s: non-chat job = %v", src, m)
+		}
+		if m := get(c.Job.ID); m["ended_at"] != endedAt || m["tokens_in"] != float64(250) || m["tokens_out"] != float64(50) ||
+			m["steps_count"] != float64(3) {
+			t.Errorf("%s: finished job = %v, want ended_at %s", src, m, endedAt)
+		}
+	}
+	// cancel returns the end time of the cancel
+	s.fake.Advance(time.Minute)
+	rec := s.as("einstein", http.MethodPost, jobsPath+"/"+chat.ID+"/cancel", "")
+	if m := decode(t, rec); rec.Code != http.StatusOK || m["ended_at"] != s.fake.Now().UTC().Format(time.RFC3339) || m["trigger_ref"] != conv {
+		t.Errorf("cancel = %d %v", rec.Code, m)
+	}
+}

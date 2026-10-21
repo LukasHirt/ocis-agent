@@ -21,14 +21,20 @@ type Tx interface {
 
 	// AppendAudit adds an event to the user's chain, assigning the sequence
 	// number, previous hash and hash inside the transaction. A zero TS becomes
-	// Now(). UserID and Kind are required.
+	// Now(). UserID and Kind are required, and Kind must be one of the
+	// audit.Kind* constants (audit.IsKind); anything else is ErrInvalid.
 	AppendAudit(ev audit.Event) (audit.Record, error)
 	// ReadAudit returns records with seq > afterSeq in ascending order.
 	// limit <= 0 means 100; the maximum is 1000.
 	ReadAudit(userID string, afterSeq int64, limit int) ([]audit.Record, error)
-	// VerifyAudit recomputes the user's whole chain. Failures wrap
-	// audit.ErrChainBroken.
-	VerifyAudit(userID string) error
+	// ReadAuditBefore returns records with seq < beforeSeq in descending
+	// order; beforeSeq <= 0 starts at the newest record. Limits as ReadAudit.
+	ReadAuditBefore(userID string, beforeSeq int64, limit int) ([]audit.Record, error)
+	// VerifyAudit recomputes the user's whole chain and returns the number of
+	// records that verified. A broken chain is an *audit.ChainError (wrapping
+	// audit.ErrChainBroken) with the seq of the first failing record; the
+	// count then stops before it.
+	VerifyAudit(userID string) (int64, error)
 
 	// PutDEK stores a wrapped data-encryption key. ErrConflict if the id
 	// exists; a zero CreatedAt becomes Now().
@@ -90,7 +96,9 @@ type Tx interface {
 	// the maximum is 500.
 	ListJobs(userID string, f JobFilter) ([]Job, error)
 	// ListJobSummaries is ListJobs without the checkpoints and with each
-	// job's step count, in one query (same order, filter and limits).
+	// job's step count and token sums (TokensIn, TokensOut over its steps,
+	// 0 without steps) and its EndedAt (zero while live), in one query (same
+	// order, filter and limits; no query per job).
 	ListJobSummaries(userID string, f JobFilter) ([]JobSummary, error)
 	// CancelJob cancels a job that is not terminal yet. ErrNotFound, or
 	// ErrConflict if the job is already terminal.
@@ -156,6 +164,14 @@ type Tx interface {
 	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
 	// means 50; the maximum is 500.
 	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)
+	// ListApprovalsToVerify is ListApprovals restricted to the approvals
+	// whose NeedsVerification is true. It examines at most maxScan
+	// candidates (<= 0 or more than MaxVerifyScan: MaxVerifyScan) in list
+	// order, reading their state and result but not their args. If it
+	// stopped because of maxScan, scannedTo is the key of the last row it
+	// examined: everything up to it is covered, so a client continues after
+	// it. Otherwise scannedTo is nil.
+	ListApprovalsToVerify(userID string, f ApprovalFilter, maxScan int) (list []Approval, scannedTo *PageKey, err error)
 	// DecideApproval records the user's decision (approved or rejected) on a
 	// pending approval. ErrNotFound; ErrConflict if it is no longer pending;
 	// ErrExpired if it is past ExpiresAt (state unchanged); ErrInvalid if the
@@ -168,6 +184,17 @@ type Tx interface {
 	// the edges ApprovalTransitionAllowed permits. ErrInvalid for any other
 	// edge, ErrNotFound, ErrConflict if the current state is not from.
 	TransitionApproval(userID, id string, from, to ApprovalState, patch ApprovalPatch) (Approval, error)
+	// AcknowledgeApproval records that the user checked the uncertain
+	// outcome of a settled approval (Terminal and OutcomeUncertain): it sets
+	// AcknowledgedAt and AcknowledgedBy and changes nothing else, so the
+	// state machine and what may execute are untouched. Settled approvals
+	// never move again, so an acknowledgement is never followed by another
+	// outcome. changed is false (and nothing is written) if it was already
+	// acknowledged. ErrNotFound; ErrInvalid if by is empty; ErrConflict if
+	// the approval is not settled or its outcome is certain. Run it in the
+	// same transaction as the approval_acknowledged audit event (when
+	// changed).
+	AcknowledgeApproval(userID, id, by string) (a Approval, changed bool, err error)
 	// ExpireApprovals moves every pending approval past its ExpiresAt to
 	// expired and returns what it changed. Run it in the same transaction as
 	// ResumeJobIfSettled for every returned ref: the refs are never returned

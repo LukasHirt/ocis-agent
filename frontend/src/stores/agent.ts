@@ -32,6 +32,10 @@ export const FULL_REFRESH_MIN_MS = 1_000
 // server's cap), at most APPROVAL_MAX_PAGES of them per full refresh.
 export const APPROVAL_PAGE_LIMIT = 100
 export const APPROVAL_MAX_PAGES = 10
+// A head refresh of the list to verify follows empty pages (the server caps
+// the candidates one request examines, so a page may be empty and carry a
+// cursor) up to VERIFY_HEAD_PAGES, stopping at the first non-empty page.
+export const VERIFY_HEAD_PAGES = 5
 
 export type Resource = 'status' | 'approvals' | 'settings'
 const RESOURCES: readonly Resource[] = ['status', 'approvals', 'settings']
@@ -45,7 +49,7 @@ type Depth = 'head' | 'full'
 
 export interface ApprovalsState {
   pending: Approval[] // newest first; includes ended jobs' approvals (job_ended)
-  verify: Approval[] // state unknown: the user must check the outcome
+  verify: Approval[] // needs_verification: the user must check the outcome
   counts: { pending: number; live: number; verify: number } // of the loaded lists
   complete: boolean // pending: false when more pages exist than were read
   verifyComplete: boolean // verify: false when more pages exist than were read
@@ -120,8 +124,17 @@ const approvalsOf = (
   verifyComplete
 })
 
-// Codes after which a decision's list is out of date.
-const REFETCH_CODES = new Set(['stale_arguments', 'expired', 'already_decided', 'job_ended', 'not_found', 'conflict'])
+// Codes after which a decision's (or an acknowledgement's) list is out of
+// date.
+const REFETCH_CODES = new Set([
+  'stale_arguments',
+  'expired',
+  'already_decided',
+  'job_ended',
+  'not_found',
+  'conflict',
+  'not_acknowledgeable'
+])
 
 // useAgentStore keeps the agent's status, the pending approvals and the
 // settings fresh: refreshAll on every ready and poll of the event stream,
@@ -134,6 +147,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   const status = shallowRef<Status | null>(null)
   const approvals = shallowRef<ApprovalsState>(emptyApprovals())
   const settings = shallowRef<Settings | null>(null)
+  // the views acknowledgements of this session returned, by approval id
+  const acknowledged = shallowRef<Map<string, Approval>>(new Map())
   const loading = reactive<Record<Resource, boolean>>({ status: false, approvals: false, settings: false })
   const errors = reactive<Record<Resource, string | null>>({ status: null, approvals: null, settings: null })
   const error = computed(() => errors.status ?? errors.approvals ?? errors.settings ?? null)
@@ -193,23 +208,25 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       }
     },
     approvals: async (s, depth) => {
-      const pages = depth === 'full' ? APPROVAL_MAX_PAGES : 1
-      const list = async (state?: string) => {
+      const full = depth === 'full'
+      const list = async (needsVerification?: true) => {
+        const pages = full ? APPROVAL_MAX_PAGES : needsVerification ? VERIFY_HEAD_PAGES : 1
         const out: Approval[] = []
         let cursor: string | undefined
         for (let i = 0; i < pages; i++) {
           const page = await s.client.listApprovals(
-            { state, limit: APPROVAL_PAGE_LIMIT, cursor },
+            { needsVerification, limit: APPROVAL_PAGE_LIMIT, cursor },
             s.abort.signal
           )
           if (!Array.isArray(page?.approvals)) throw new ApiError(502, 'internal')
           out.push(...page.approvals)
           if (!page.next_cursor) return { out, complete: true }
           cursor = page.next_cursor
+          if (!full && out.length > 0) break
         }
         return { out, complete: false }
       }
-      const [pending, verify] = await Promise.all([list(), list('unknown')])
+      const [pending, verify] = await Promise.all([list(), list(true)])
       return () => {
         approvals.value = approvalsOf(pending.out, verify.out, pending.complete, verify.complete)
       }
@@ -342,6 +359,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   // reset forgets everything of a session, so a new one (maybe of another
   // user in the same page) never shows old data or errors.
   const reset = () => {
+    acknowledged.value = new Map()
     status.value = null
     approvals.value = emptyApprovals()
     settings.value = null
@@ -436,7 +454,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     const cur = approvals.value
     approvals.value = approvalsOf(
       cur.pending.filter((a) => !ids.has(a.id)),
-      cur.verify,
+      cur.verify.filter((a) => !ids.has(a.id)),
       cur.complete,
       cur.verifyComplete
     )
@@ -471,6 +489,22 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       () => s.client.bulkDecide(decision, items)
     )
   }
+
+  // acknowledge records that the user checked the outcome of an action
+  // whose outcome is unknown; it then leaves the list to verify.
+  const acknowledge = async (id: string): Promise<Approval> => {
+    const s = active()
+    const v = await decided(s, [id], () => s.client.acknowledge(id))
+    if (session === s && v && typeof v === 'object' && v.id === id) {
+      acknowledged.value = new Map(acknowledged.value).set(id, v)
+    }
+    return v
+  }
+
+  // viewOf is the view an acknowledgement returned for this approval (so
+  // a card read before it, such as one in the history, shows it as
+  // checked), else the approval as given.
+  const viewOf = (a: Approval): Approval => acknowledged.value.get(a.id) ?? a
 
   const saveSettings = async (update: SettingsUpdate): Promise<Settings> => {
     const s = active()
@@ -568,6 +602,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     refreshSettings,
     decide,
     bulkDecide,
+    acknowledge,
+    viewOf,
     saveSettings,
     enrol,
     pause,

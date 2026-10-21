@@ -39,15 +39,25 @@
             <time :datetime="job.created_at" v-text="formatTime(job.created_at)" />
           </dd>
         </template>
-        <template v-if="job.updated_at">
-          <dt class="agent-job-detail-changed" v-text="ended ? $gettext('Ended') : $gettext('Last change')" />
+        <template v-if="job.ended_at">
+          <dt class="agent-job-detail-changed" v-text="$gettext('Ended')" />
+          <dd class="agent-job-detail-ended"><time :datetime="job.ended_at" v-text="formatTime(job.ended_at)" /></dd>
+        </template>
+        <template v-else-if="job.updated_at">
+          <dt class="agent-job-detail-changed" v-text="$gettext('Last change')" />
           <dd><time :datetime="job.updated_at" v-text="formatTime(job.updated_at)" /></dd>
         </template>
         <dt v-text="$gettext('Runs')" />
         <dd class="agent-job-detail-runs" v-text="String(job.runs ?? 0)" />
         <dt v-text="$gettext('Tokens used')" />
-        <dd class="agent-job-detail-tokens" v-text="tokensText(jobs.tokens.in, jobs.tokens.out)" />
+        <dd class="agent-job-detail-tokens" v-text="tokensText(tokenCount(job.tokens_in), tokenCount(job.tokens_out))" />
       </dl>
+      <router-link
+        v-if="conversation"
+        class="agent-job-detail-conversation"
+        :to="{ name: `${APPID}-chat-conversation`, params: { id: conversation } }"
+        v-text="$gettext('Open the conversation')"
+      />
 
       <p v-if="job.error" class="agent-job-detail-error">
         <span v-if="reason" v-text="reason" />
@@ -129,11 +139,12 @@ import RiskBadge from '../../components/RiskBadge.vue'
 import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
 import { isLiveState, useJobsStore } from '../../stores/jobs'
-import { errorText, stateLabel, stepKindLabel, triggerLabel } from './labels'
+import { conversationOf, errorText, stateLabel, stepKindLabel, tokenCount, triggerLabel } from './labels'
 import type { JobState } from '../../api/types'
 
 // JobDetail shows the open job of the jobs store: goal, facts, error, the
-// pending approvals (decided in the inbox only), the answer and the steps.
+// pending approvals (decided in the inbox only), the answer and the steps;
+// a chat job links to its conversation.
 // Goal, answer, tools, statuses and summaries are untrusted text.
 const jobs = useJobsStore()
 const { $gettext, interpolate } = useGettext()
@@ -146,7 +157,7 @@ const approvals = computed(() => jobs.detailApprovals)
 const state = computed(() => stateLabel(String(job.value?.state ?? ''), $gettext))
 const trigger = computed(() => triggerLabel(String(job.value?.trigger_kind ?? ''), $gettext))
 const live = computed(() => isLiveState(job.value?.state))
-const ended = computed(() => !live.value && state.value.known)
+const conversation = computed(() => (job.value ? conversationOf(job.value) : null))
 const waiting = computed(() => job.value?.state === ('waiting_approval' satisfies JobState))
 const reason = computed(() => errorText(String(job.value?.error ?? ''), $gettext))
 

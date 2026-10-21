@@ -94,6 +94,7 @@ func (s *stack) decide(login, id, body string) *httptest.ResponseRecorder {
 var approvalKeys = []string{
 	"id", "job_id", "call_id", "tool", "risk", "args", "args_hash", "target_etag", "rationale", "preview", "state",
 	"requested_at", "expires_at", "decided_by", "decided_at", "executed_at", "outcome", "job_ended", "needs_verification",
+	"acknowledged_at", "acknowledged_by",
 }
 
 const secretArgs = `{"content":"SECRET-ARGS-CONTENT","path":"/notes/SECRET-ARGS-PATH.txt"}`
@@ -615,7 +616,7 @@ func TestBulkDecisionOnASettledExpiredApproval(t *testing.T) {
 
 // conflictDecider answers like Gate.Decide when the approval stopped being
 // pending after the handler's pre-check (a concurrent decision).
-type conflictDecider struct{}
+type conflictDecider struct{ fakeDecider }
 
 func (conflictDecider) Decide(context.Context, string, string, []approvals.DecisionItem) ([]store.Approval, error) {
 	return nil, fmt.Errorf("approvals: %w", store.ErrConflict)

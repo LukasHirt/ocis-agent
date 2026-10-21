@@ -18,6 +18,9 @@ const (
 	JobCancelled       JobState = "cancelled"
 )
 
+// JobStates are all job states.
+var JobStates = []JobState{JobQueued, JobRunning, JobWaitingApproval, JobSucceeded, JobFailed, JobCancelled}
+
 // Valid reports whether s is a known state.
 func (s JobState) Valid() bool {
 	switch s {
@@ -47,6 +50,9 @@ type Job struct {
 	Error       string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// EndedAt is when the job reached a terminal state (set by the
+	// transition that ends it); zero while it is live.
+	EndedAt time.Time
 }
 
 // JobFilter narrows ListJobs and ListJobSummaries.
@@ -70,7 +76,8 @@ type PageKey struct {
 }
 
 // JobSummary is a job without its checkpoint (which can be up to 1 MiB)
-// plus the number of its steps: the projection for job lists.
+// plus the number of its steps and the sums of their token counts: the
+// projection for job lists, computed in the list query itself.
 type JobSummary struct {
 	ID          string
 	UserID      string
@@ -84,7 +91,10 @@ type JobSummary struct {
 	Error       string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	EndedAt     time.Time
 	StepCount   int
+	TokensIn    int64
+	TokensOut   int64
 }
 
 // JobStatus is the light lookup of a job (GetJobStatus): its state, its

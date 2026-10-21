@@ -64,6 +64,14 @@ describe('createClient: request shape per method', () => {
       `/approvals?state=all&job_id=${ID}&limit=20&cursor=${ID}`,
       undefined
     ],
+    [
+      'listApprovals needing verification',
+      (c) => c.listApprovals({ needsVerification: true, limit: 100 }),
+      'GET',
+      '/approvals?needs_verification=true&limit=100',
+      undefined
+    ],
+    ['acknowledge', (c) => c.acknowledge(ID), 'POST', `/approvals/${ID}/acknowledge`, {}],
     ['getApproval', (c) => c.getApproval(ID), 'GET', `/approvals/${ID}`, undefined],
     [
       'decide',
@@ -124,6 +132,13 @@ describe('createClient: request shape per method', () => {
       (c) => c.listAudit({ cursor: '42', limit: 10, jobId: ID, tool: 'files.write', risk: 'write' }),
       'GET',
       `/audit?cursor=42&limit=10&job_id=${ID}&tool=files.write&risk=write`,
+      undefined
+    ],
+    [
+      'listAudit newest first by kind',
+      (c) => c.listAudit({ order: 'desc', cursor: 'd42', kind: 'approval_decided', limit: 50 }),
+      'GET',
+      '/audit?order=desc&cursor=d42&limit=50&kind=approval_decided',
       undefined
     ],
     ['verifyAudit', (c) => c.verifyAudit(), 'GET', '/audit/verify', undefined]
@@ -262,6 +277,33 @@ describe('createClient: path and query encoding', () => {
     expect(e).toBeInstanceOf(ApiError)
     expect(e.code).toBe('invalid_request')
     expect(platform.fetch).not.toHaveBeenCalled()
+  })
+
+  it('refuses audit cursors and orders the server does not issue without a request', async () => {
+    const { client, platform } = setup()
+    const bad: unknown[] = [
+      { order: 'desc', cursor: '42' }, // an ascending cursor in the newest-first order
+      { cursor: 'd42' }, // a newest-first cursor in the ascending order
+      { order: 'desc', cursor: 'd' },
+      { order: 'desc', cursor: 'd-1' },
+      { order: 'newest' },
+      { kind: 'Tool_Call' },
+      { kind: 'a&b' }
+    ]
+    for (const p of bad) {
+      const e = (await caught(client.listAudit(p as never))) as ApiError
+      expect(e.code, JSON.stringify(p)).toBe('invalid_request')
+    }
+    expect(platform.fetch).not.toHaveBeenCalled()
+  })
+
+  it('sends needs_verification only as true', async () => {
+    const { client, calls, platform } = setup()
+    await client.listApprovals({ needsVerification: false })
+    expect(calls()[0][0]).toBe('/agent-api/v1/approvals')
+    const e = (await caught(client.listApprovals({ needsVerification: 'yes' } as never))) as ApiError
+    expect(e.code).toBe('invalid_request')
+    expect(platform.fetch).toHaveBeenCalledTimes(1)
   })
 
   it('omits empty optional parameters', async () => {

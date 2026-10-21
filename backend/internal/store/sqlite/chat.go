@@ -140,7 +140,7 @@ func (t *tx) DeleteConversation(userID, id string) ([]string, error) {
 	}
 	rows, err := t.q.QueryContext(t.ctx,
 		`SELECT id FROM jobs WHERE user_id = ? AND trigger_kind = 'chat' AND trigger_ref = ?
-		   AND state NOT IN ('succeeded','failed','cancelled') ORDER BY created_at, id`, userID, id)
+		   AND state NOT IN `+terminalJobStates+` ORDER BY created_at, id`, userID, id)
 	if err != nil {
 		return nil, err
 	}

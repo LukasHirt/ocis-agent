@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef } from 'vue'
+import { ref, shallowRef } from 'vue'
 import { useAgentStore, type SessionHandle, type StoreEvent } from './agent'
 import { ApiError, describeError, isAbortError } from '../api/errors'
 import { coalesce } from '../util/coalesce'
@@ -40,8 +40,6 @@ export interface DetailApprovals {
 const isJob = (v: unknown): v is Job =>
   typeof v === 'object' && v !== null && typeof (v as { id?: unknown }).id === 'string'
 
-const count = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0)
-
 // useJobsStore holds the tasks screen's data: the job list (newest first,
 // one state filter) and the open job with its steps and pending
 // approvals. It refreshes on the agent store's events only while attached
@@ -67,15 +65,6 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
 
   const cancelling = ref(false)
   const actionError = ref<string | null>(null)
-
-  const tokens = computed(() => {
-    const out = { in: 0, out: 0 }
-    for (const s of detail.value?.steps ?? []) {
-      out.in += count(s.tokens_in)
-      out.out += count(s.tokens_out)
-    }
-    return out
-  })
 
   let bound: SessionHandle | null = null
   let listGen = 0 // grows on reset and filter change: older list answers are dropped
@@ -396,7 +385,6 @@ export const useJobsStore = defineStore('ocis-agent-jobs', () => {
     detailError,
     detailMissing,
     detailApprovals,
-    tokens,
     cancelling,
     actionError,
     attach,

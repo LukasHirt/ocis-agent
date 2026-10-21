@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -19,6 +20,9 @@ const (
 func (t *tx) AppendAudit(ev audit.Event) (audit.Record, error) {
 	if ev.UserID == "" || ev.Kind == "" {
 		return audit.Record{}, store.Invalid("an audit event needs a user id and a kind")
+	}
+	if !audit.IsKind(ev.Kind) {
+		return audit.Record{}, store.Invalid("the audit event kind is not one the agent records")
 	}
 	if ev.TS.IsZero() {
 		ev.TS = t.now()
@@ -54,15 +58,27 @@ func (t *tx) AppendAudit(ev audit.Event) (audit.Record, error) {
 
 // ReadAudit implements store.Tx.
 func (t *tx) ReadAudit(userID string, afterSeq int64, limit int) ([]audit.Record, error) {
+	return t.readAudit(`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
+		 FROM audit WHERE user_id = ? AND seq > ? ORDER BY seq LIMIT ?`, userID, afterSeq, limit)
+}
+
+// ReadAuditBefore implements store.Tx.
+func (t *tx) ReadAuditBefore(userID string, beforeSeq int64, limit int) ([]audit.Record, error) {
+	if beforeSeq <= 0 {
+		beforeSeq = math.MaxInt64
+	}
+	return t.readAudit(`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
+		 FROM audit WHERE user_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`, userID, beforeSeq, limit)
+}
+
+func (t *tx) readAudit(q, userID string, seq int64, limit int) ([]audit.Record, error) {
 	if limit <= 0 {
 		limit = defaultAuditLimit
 	}
 	if limit > maxAuditLimit {
 		limit = maxAuditLimit
 	}
-	rows, err := t.q.QueryContext(t.ctx,
-		`SELECT user_id, seq, ts, job_id, kind, tool, risk, args_hash, cred, outcome, detail, prev_hash, hash
-		 FROM audit WHERE user_id = ? AND seq > ? ORDER BY seq LIMIT ?`, userID, afterSeq, limit)
+	rows, err := t.q.QueryContext(t.ctx, q, userID, seq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: read audit: %w", err)
 	}
@@ -83,20 +99,20 @@ func (t *tx) ReadAudit(userID string, afterSeq int64, limit int) ([]audit.Record
 }
 
 // VerifyAudit implements store.Tx.
-func (t *tx) VerifyAudit(userID string) error {
+func (t *tx) VerifyAudit(userID string) (int64, error) {
 	v := audit.NewVerifier()
 	var after int64
 	for {
 		recs, err := t.ReadAudit(userID, after, verifyPageSize)
 		if err != nil {
-			return err
+			return v.Checked(), err
 		}
 		if len(recs) == 0 {
-			return nil
+			return v.Checked(), nil
 		}
 		for _, r := range recs {
 			if err := v.Add(r); err != nil {
-				return err
+				return v.Checked(), err
 			}
 		}
 		after = recs[len(recs)-1].Seq

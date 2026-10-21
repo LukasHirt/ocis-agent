@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/memory"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -275,7 +276,7 @@ func (s *Server) auditMemoryEdit(r *http.Request, p Principal, ch memory.Change,
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
 	defer cancel()
 	err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
-		return s.appendAudit(tx, p.UserID, "memory_edited", outcome, detail)
+		return s.appendAudit(tx, p.UserID, audit.KindMemoryEdited, outcome, detail)
 	})
 	if err != nil {
 		var id string

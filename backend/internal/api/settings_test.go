@@ -621,7 +621,7 @@ func TestSettingsAuditListsNamesOnly(t *testing.T) {
 	if !s.policy(t, einsteinID).UpdatedAt.Equal(updated) {
 		t.Fatal("a no-op PUT rewrote the policy")
 	}
-	if err := s.st.View(bg, func(tx store.Tx) error { return tx.VerifyAudit(einsteinID) }); err != nil {
+	if err := s.st.View(bg, func(tx store.Tx) error { _, err := tx.VerifyAudit(einsteinID); return err }); err != nil {
 		t.Fatal(err)
 	}
 }

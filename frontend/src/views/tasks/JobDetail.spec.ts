@@ -28,8 +28,19 @@ const button = (w: VueWrapper, label: string) => w.findAll('button').find((b) =>
 describe('JobDetail', () => {
   it('shows the goal, state, trigger, times, attempts and token usage', async () => {
     const st = jobsState({
-      jobs: [jobOf('j1', { state: 'succeeded', runs: 2, goal: 'Sort my notes' })],
-      steps: { j1: [stepOf(1, { tokens_in: 1200, tokens_out: 34 }), stepOf(2, { tokens_in: 800, tokens_out: 66 })] },
+      jobs: [
+        jobOf('j1', {
+          state: 'succeeded',
+          runs: 2,
+          goal: 'Sort my notes',
+          tokens_in: 2000,
+          tokens_out: 100,
+          updated_at: '2026-01-01T11:00:00Z',
+          ended_at: '2026-01-01T10:30:00Z'
+        })
+      ],
+      // the job's own totals count, not a sum over the steps read
+      steps: { j1: [stepOf(1, { tokens_in: 1, tokens_out: 1 })] },
       answers: { j1: 'All sorted' }
     })
     const { w } = await setup(st)
@@ -38,10 +49,23 @@ describe('JobDetail', () => {
     expect(w.find('.agent-job-detail-trigger').text()).toBe('Chat question')
     expect(w.find('.agent-job-detail-created time').attributes('datetime')).toBe('2026-01-01T10:00:00Z')
     expect(w.find('.agent-job-detail-changed').text()).toContain('Ended')
+    expect(w.find('.agent-job-detail-ended time').attributes('datetime')).toBe('2026-01-01T10:30:00Z')
     expect(w.find('.agent-job-detail-runs').text()).toBe('2')
     expect(w.find('.agent-job-detail-tokens').text()).toBe('2000 in, 100 out')
     expect(w.find('.agent-job-detail-answer').text()).toBe('All sorted')
     expect(button(w, 'Cancel task')).toBeUndefined()
+  })
+
+  it('links a chat job back to its conversation', async () => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1', { trigger_kind: 'chat', trigger_ref: 'conv-1' })] }))
+    const link = w.find('.agent-job-detail-conversation')
+    expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'agent-chat-conversation', params: { id: 'conv-1' } })
+    expect(link.text()).toBe('Open the conversation')
+  })
+
+  it('has no conversation link for other jobs', async () => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1', { trigger_kind: 'proactive', trigger_ref: 'x' })] }))
+    expect(w.find('.agent-job-detail-conversation').exists()).toBe(false)
   })
 
   it('links back to the list', async () => {

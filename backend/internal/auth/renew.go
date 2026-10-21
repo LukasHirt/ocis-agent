@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owncloud/ocis-agent/backend/internal/audit"
 	"github.com/owncloud/ocis-agent/backend/internal/ocisclient"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
 )
@@ -91,7 +92,7 @@ func (s *Service) Renew(ctx context.Context, userID string) (Renewed, error) {
 		}); err != nil {
 			return err
 		}
-		return s.audit(tx, userID, "token_renewed", "app", "ok", label)
+		return s.audit(tx, userID, audit.KindTokenRenewed, "app", "ok", label)
 	})
 	if err != nil {
 		discard()
@@ -158,13 +159,13 @@ func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclie
 			clean = false
 			continue
 		}
-		kind := "token_deleted"
+		kind := audit.KindTokenDeleted
 		if !existed[label] {
 			if s.now().Sub(l.CreatedAt) < labelGrace {
 				clean = false
 				continue
 			}
-			kind = "token_label_closed"
+			kind = audit.KindTokenLabelClosed
 		}
 		err := s.d.Store.InTx(cctx, func(tx store.Tx) error {
 			if err := tx.MarkTokenLabelDeleted(userID, label); err != nil {
@@ -176,7 +177,7 @@ func (s *Service) cleanupOrphans(ctx context.Context, userID string, cr ocisclie
 			clean = false
 			continue
 		}
-		if kind == "token_deleted" {
+		if kind == audit.KindTokenDeleted {
 			deleted++
 		} else {
 			closed++
@@ -260,7 +261,7 @@ func (s *Service) Sweep(ctx context.Context, userID string) (SweepResult, error)
 			if err != nil || !changed {
 				return err
 			}
-			return s.audit(tx, userID, "token_anomaly", "app", "paused", fmt.Sprintf("unknown=%d", res.Unknown))
+			return s.audit(tx, userID, audit.KindTokenAnomaly, "app", "paused", fmt.Sprintf("unknown=%d", res.Unknown))
 		})
 		if err != nil {
 			return res, fmt.Errorf("auth: sweep: pause: %w", err)

@@ -15,16 +15,17 @@ const (
 	maxApprovalLimit     = 500
 
 	approvalColumns = `id, user_id, job_id, call_id, tool, risk, args, args_hash, target_etag, rationale, preview,
-	idem_key, state, requested_at, expires_at, decided_by, decided_at, executed_at, result`
+	idem_key, state, requested_at, expires_at, decided_by, decided_at, executed_at, result, acknowledged_at, acknowledged_by`
 )
 
 func scanApproval(row scanner) (store.Approval, error) {
 	var a store.Approval
 	var args, preview, state, result string
 	var requested, expires int64
-	var decided, executed sql.NullInt64
+	var decided, executed, acked sql.NullInt64
 	if err := row.Scan(&a.ID, &a.UserID, &a.JobID, &a.CallID, &a.Tool, &a.Risk, &args, &a.ArgsHash, &a.TargetETag,
-		&a.Rationale, &preview, &a.IdemKey, &state, &requested, &expires, &a.DecidedBy, &decided, &executed, &result); err != nil {
+		&a.Rationale, &preview, &a.IdemKey, &state, &requested, &expires, &a.DecidedBy, &decided, &executed, &result,
+		&acked, &a.AcknowledgedBy); err != nil {
 		return store.Approval{}, err
 	}
 	a.Args = json.RawMessage(args)
@@ -41,6 +42,10 @@ func scanApproval(row scanner) (store.Approval, error) {
 	}
 	if result != "" {
 		a.Result = json.RawMessage(result)
+	}
+	if acked.Valid {
+		k := fromMS(acked.Int64)
+		a.AcknowledgedAt = &k
 	}
 	return a, nil
 }
@@ -76,8 +81,9 @@ func (t *tx) InsertApproval(a store.Approval, fence int64) (store.Approval, erro
 	a.State, a.RequestedAt = store.ApprovalPending, fromMS(ms(now))
 	a.ExpiresAt = fromMS(ms(a.ExpiresAt))
 	a.DecidedBy, a.DecidedAt, a.ExecutedAt, a.Result = "", nil, nil, nil
+	a.AcknowledgedAt, a.AcknowledgedBy = nil, ""
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO approvals(`+approvalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,'')`,
+		`INSERT INTO approvals(`+approvalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,'',NULL,'')`,
 		a.ID, a.UserID, a.JobID, a.CallID, a.Tool, a.Risk, string(a.Args), a.ArgsHash, a.TargetETag, a.Rationale,
 		string(a.Preview), a.IdemKey, string(a.State), ms(a.RequestedAt), ms(a.ExpiresAt), a.DecidedBy)
 	switch {
@@ -119,13 +125,14 @@ func (t *tx) CountPendingOfLiveJobs(userID string) (int, error) {
 	var n int
 	err := t.q.QueryRowContext(t.ctx,
 		`SELECT COUNT(*) FROM approvals a JOIN jobs j ON j.id = a.job_id AND j.user_id = a.user_id
-		 WHERE a.user_id = ? AND a.state = 'pending' AND j.state NOT IN ('succeeded', 'failed', 'cancelled')`,
+		 WHERE a.user_id = ? AND a.state = 'pending' AND j.state NOT IN `+terminalJobStates,
 		userID).Scan(&n)
 	return n, err
 }
 
-// ListApprovals implements store.Tx.
-func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Approval, error) {
+// approvalListQuery is the FROM ... ORDER BY tail of a list query and its
+// arguments, with the limit clamped.
+func approvalListQuery(userID string, f store.ApprovalFilter, extra string) (string, []any, int, error) {
 	limit := f.Limit
 	if limit <= 0 {
 		limit = defaultApprovalLimit
@@ -134,7 +141,7 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		limit = maxApprovalLimit
 	}
 	if f.MaxBytes < 0 {
-		return nil, store.Invalid("the byte budget must not be negative")
+		return "", nil, 0, store.Invalid("the byte budget must not be negative")
 	}
 	query := ` FROM approvals WHERE user_id = ?`
 	args := []any{userID}
@@ -150,25 +157,105 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
+	query += extra
 	cond, cargs, err := keysetBefore("requested_at", f.Before)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	query += cond + ` ORDER BY requested_at DESC, id DESC`
+	return query, append(args, cargs...), limit, nil
+}
+
+// ListApprovals implements store.Tx.
+func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Approval, error) {
+	query, args, limit, err := approvalListQuery(userID, f, "")
 	if err != nil {
 		return nil, err
 	}
-	query += cond + ` ORDER BY requested_at DESC, id DESC LIMIT ?`
-	args = append(args, cargs...)
+	query += ` LIMIT ?`
 	args = append(args, limit)
-
 	if f.MaxBytes > 0 {
 		// first the sizes, then only the rows within the budget
 		ids, err := t.approvalsWithin(query, args, f.MaxBytes)
-		if err != nil || len(ids) == 0 {
+		if err != nil {
 			return nil, err
 		}
-		marks := strings.Repeat(",?", len(ids))[1:]
-		query = ` FROM approvals WHERE user_id = ? AND id IN (` + marks + `) ORDER BY requested_at DESC, id DESC`
-		args = append([]any{userID}, ids...)
+		return t.approvalsByID(userID, ids)
 	}
-	rows, err := t.q.QueryContext(t.ctx, `SELECT `+approvalColumns+query, args...)
+	return t.queryApprovals(query, args)
+}
+
+// ListApprovalsToVerify implements store.Tx.
+func (t *tx) ListApprovalsToVerify(userID string, f store.ApprovalFilter, maxScan int) ([]store.Approval, *store.PageKey, error) {
+	if maxScan <= 0 || maxScan > store.MaxVerifyScan {
+		maxScan = store.MaxVerifyScan
+	}
+	// the candidates; Approval.NeedsVerification decides on each
+	query, args, limit, err := approvalListQuery(userID, f,
+		` AND acknowledged_at IS NULL AND (state = 'unknown' OR result != '')`)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT id, requested_at, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0), state, result`+
+			query+` LIMIT ?`, append(args, maxScan)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ids []any
+	var total int64
+	var last store.PageKey
+	scanned, stopped := 0, false
+	for rows.Next() {
+		var id, state, result string
+		var at, n int64
+		if err := rows.Scan(&id, &at, &n, &state, &result); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		scanned++
+		last = store.PageKey{At: fromMS(at), ID: id}
+		a := store.Approval{State: store.ApprovalState(state)}
+		if result != "" {
+			a.Result = json.RawMessage(result)
+		}
+		if !a.NeedsVerification() {
+			continue
+		}
+		ids = append(ids, id)
+		if total += n; len(ids) >= limit || (f.MaxBytes > 0 && total >= f.MaxBytes) {
+			stopped = true
+			break
+		}
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	var to *store.PageKey
+	if !stopped && scanned == maxScan {
+		to = &last
+	}
+	list, err := t.approvalsByID(userID, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	return list, to, nil
+}
+
+// approvalsByID loads the user's approvals with these ids in list order.
+func (t *tx) approvalsByID(userID string, ids []any) ([]store.Approval, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	marks := strings.Repeat(",?", len(ids))[1:]
+	return t.queryApprovals(` FROM approvals WHERE user_id = ? AND id IN (`+marks+`) ORDER BY requested_at DESC, id DESC`,
+		append([]any{userID}, ids...))
+}
+
+func (t *tx) queryApprovals(tail string, args []any) ([]store.Approval, error) {
+	rows, err := t.q.QueryContext(t.ctx, `SELECT `+approvalColumns+tail, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +294,36 @@ func (t *tx) approvalsWithin(tail string, args []any, budget int64) ([]any, erro
 		}
 	}
 	return ids, rows.Err()
+}
+
+// AcknowledgeApproval implements store.Tx.
+func (t *tx) AcknowledgeApproval(userID, id, by string) (store.Approval, bool, error) {
+	if by == "" {
+		return store.Approval{}, false, store.Invalid("an acknowledgement needs to record who acknowledged")
+	}
+	a, err := t.GetApproval(userID, id)
+	if err != nil {
+		return store.Approval{}, false, err
+	}
+	if a.AcknowledgedAt != nil {
+		return a, false, nil
+	}
+	if !a.State.Terminal() || !a.OutcomeUncertain() {
+		return store.Approval{}, false, fmt.Errorf("%w: the outcome of the approval is not uncertain", store.ErrConflict)
+	}
+	now := fromMS(ms(t.now()))
+	res, err := t.q.ExecContext(t.ctx,
+		`UPDATE approvals SET acknowledged_at = ?, acknowledged_by = ?
+		 WHERE id = ? AND user_id = ? AND acknowledged_at IS NULL AND state = ? AND result = ?`,
+		ms(now), by, id, userID, string(a.State), string(a.Result))
+	if err != nil {
+		return store.Approval{}, false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.Approval{}, false, fmt.Errorf("%w: the approval changed", store.ErrConflict)
+	}
+	a.AcknowledgedAt, a.AcknowledgedBy = &now, by
+	return a, true, nil
 }
 
 // DecideApproval implements store.Tx.

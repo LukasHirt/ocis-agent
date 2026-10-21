@@ -120,7 +120,7 @@ func (t *tx) ListStartedIdempotentOfEndedJobs(olderThan time.Time, limit int) ([
 		     WHEN instr(i.idem_key, ':') > 0 THEN substr(i.idem_key, 1, instr(i.idem_key, ':') - 1)
 		     ELSE i.idem_key END
 		 WHERE i.state = 'started' AND i.started_at <= ?
-		   AND (j.id IS NULL OR j.state IN ('succeeded', 'failed', 'cancelled'))
+		   AND (j.id IS NULL OR j.state IN `+terminalJobStates+`)
 		 ORDER BY i.started_at, i.idem_key LIMIT ?`, olderThan, limit)
 }
 

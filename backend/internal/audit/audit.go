@@ -19,6 +19,21 @@ var Genesis = strings.Repeat("0", 64)
 // ErrChainBroken is wrapped by every verification failure.
 var ErrChainBroken = errors.New("audit: chain broken")
 
+// ChainError is a verification failure: Seq is the sequence number of the
+// first record whose chain link or hash does not match. It wraps
+// ErrChainBroken. Reason is a fixed text, never record content.
+type ChainError struct {
+	UserID string
+	Seq    int64
+	Reason string
+}
+
+func (e *ChainError) Error() string {
+	return fmt.Sprintf("%v: user %s seq %d: %s", ErrChainBroken, e.UserID, e.Seq, e.Reason)
+}
+
+func (e *ChainError) Unwrap() error { return ErrChainBroken }
+
 // Event is what callers append. The store assigns Seq, PrevHash and Hash.
 type Event struct {
 	UserID   string
@@ -74,6 +89,7 @@ func writeInt(h hash.Hash, n int64) {
 type Verifier struct {
 	nextSeq int64
 	prev    string
+	checked int64
 }
 
 // NewVerifier starts at the beginning of a chain.
@@ -87,20 +103,24 @@ func NewVerifierFrom(nextSeq int64, prev string) *Verifier {
 	return &Verifier{nextSeq: nextSeq, prev: prev}
 }
 
-// Add checks the next record. It fails if the sequence has a gap, the record
-// does not point at its predecessor, or its own hash does not match its
-// content.
+// Add checks the next record. It fails with a *ChainError if the sequence
+// has a gap, the record does not point at its predecessor, or its own hash
+// does not match its content.
 func (v *Verifier) Add(r Record) error {
 	if r.Seq != v.nextSeq {
-		return fmt.Errorf("%w: user %s: expected seq %d, got %d", ErrChainBroken, r.UserID, v.nextSeq, r.Seq)
+		return &ChainError{UserID: r.UserID, Seq: r.Seq, Reason: fmt.Sprintf("expected seq %d", v.nextSeq)}
 	}
 	if r.PrevHash != v.prev {
-		return fmt.Errorf("%w: user %s seq %d: prev_hash does not match the previous record", ErrChainBroken, r.UserID, r.Seq)
+		return &ChainError{UserID: r.UserID, Seq: r.Seq, Reason: "prev_hash does not match the previous record"}
 	}
 	if want := Hash(r.PrevHash, r.Seq, r.Event); r.Hash != want {
-		return fmt.Errorf("%w: user %s seq %d: hash does not match the record content", ErrChainBroken, r.UserID, r.Seq)
+		return &ChainError{UserID: r.UserID, Seq: r.Seq, Reason: "hash does not match the record content"}
 	}
 	v.nextSeq++
 	v.prev = r.Hash
+	v.checked++
 	return nil
 }
+
+// Checked is the number of records Add accepted.
+func (v *Verifier) Checked() int64 { return v.checked }

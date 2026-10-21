@@ -375,7 +375,7 @@ func runCore(t *testing.T, f Factory) {
 			if err := tx.AddTokenLabel("u1", "l"); err != nil {
 				return err
 			}
-			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "unenrolled"})
+			_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindUnenrolled})
 			return err
 		})
 		mustTx(t, st, func(tx store.Tx) error { return tx.DeleteUser("u1") })
@@ -397,7 +397,7 @@ func runCore(t *testing.T, f Factory) {
 			if err != nil || len(recs) != 1 {
 				t.Errorf("audit after delete = %+v, %v", recs, err)
 			}
-			if err := tx.VerifyAudit("u1"); err != nil {
+			if _, err := tx.VerifyAudit("u1"); err != nil {
 				t.Errorf("VerifyAudit after delete: %v", err)
 			}
 			return nil

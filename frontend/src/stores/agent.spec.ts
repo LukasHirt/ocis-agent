@@ -3,7 +3,7 @@ import { ApiError } from '../api/errors'
 import type { EventClient, EventClientOptions, Timers } from '../api/events'
 import { apiErr, approvalOf, json, settingsOf, statusOf } from '../test/fixtures'
 import { makePlatform, type FakePlatform } from '../test/platform'
-import { FULL_REFRESH_MIN_MS, useAgentStore } from './agent'
+import { FULL_REFRESH_MIN_MS, VERIFY_HEAD_PAGES, useAgentStore } from './agent'
 
 const gettext = (s: string) => s
 
@@ -28,7 +28,7 @@ const defaultHandlers = (over: Record<string, Handler> = {}): Record<string, Han
   'GET /status': () => json(statusOf()),
   'GET /settings': () => json(settingsOf()),
   'GET /approvals': (url) =>
-    url.searchParams.get('state') === 'unknown'
+    url.searchParams.get('needs_verification') === 'true'
       ? json({ approvals: [approvalOf('u1', { state: 'unknown', needs_verification: true })], next_cursor: null })
       : json({ approvals: [approvalOf('a1'), approvalOf('a2', { job_ended: true })], next_cursor: null }),
   ...over
@@ -152,7 +152,7 @@ describe('useAgentStore', () => {
     const s = (current = setup(
       defaultHandlers({
         'GET /approvals': (url) => {
-          if (url.searchParams.get('state') === 'unknown') return json({ approvals: [], next_cursor: null })
+          if (url.searchParams.get('needs_verification') === 'true') return json({ approvals: [], next_cursor: null })
           return url.searchParams.get('cursor') === 'p2'
             ? json({ approvals: [approvalOf('b')], next_cursor: null })
             : json({ approvals: [approvalOf('a')], next_cursor: 'p2' })
@@ -165,9 +165,9 @@ describe('useAgentStore', () => {
     expect(s.store.approvals.complete).toBe(true)
   })
 
-  // two pages of pending and two of unknown approvals
+  // two pages of pending approvals and two of approvals to verify
   const twoPages = (): Handler => (url) => {
-    const unknown = url.searchParams.get('state') === 'unknown'
+    const unknown = url.searchParams.get('needs_verification') === 'true'
     const second = url.searchParams.get('cursor') === 'p2'
     const id = (unknown ? 'u' : 'a') + (second ? '2' : '1')
     const extra = unknown ? { state: 'unknown', needs_verification: true } : {}
@@ -409,7 +409,7 @@ describe('useAgentStore', () => {
         },
         'GET /approvals': async (url) => {
           if (slow) await gate
-          return url.searchParams.get('state') === 'unknown'
+          return url.searchParams.get('needs_verification') === 'true'
             ? json({ approvals: [], next_cursor: null })
             : json({ approvals: [approvalOf('a1'), approvalOf('a2')], next_cursor: null })
         }
@@ -436,6 +436,144 @@ describe('useAgentStore', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).code).toBe('stale_arguments')
     expect(s.server.count('GET /approvals')).toBe(ap + 2)
+  })
+
+  // the list to verify: `empty` empty pages with cursors (the server's scan
+  // cap), then u1 on a last page
+  const capped = (empty: number): Handler => (url) => {
+    if (url.searchParams.get('needs_verification') !== 'true') return json({ approvals: [], next_cursor: null })
+    const at = Number(url.searchParams.get('cursor')?.slice(1) ?? '0')
+    if (at < empty) return json({ approvals: [], next_cursor: 'k' + (at + 1) })
+    return json({ approvals: [approvalOf('u1', { state: 'unknown', needs_verification: true })], next_cursor: null })
+  }
+  const verifyReads = (s: ReturnType<typeof setup>) =>
+    s.server.calls.filter((c) => c.key === 'GET /approvals' && c.url.searchParams.has('needs_verification')).length
+
+  it('follows empty pages of the list to verify on a change event, up to a bound', async () => {
+    const s = (current = setup(defaultHandlers({ 'GET /approvals': capped(3) })))
+    s.start()
+    await flush()
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
+    const before = verifyReads(s)
+    await s.events.made.opts!.onChanged(['activity'])
+    await flush()
+    expect(verifyReads(s) - before).toBe(4)
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
+    expect(s.store.approvals.verifyComplete).toBe(true)
+  })
+
+  it('stops following the list to verify on a change event at the bound', async () => {
+    const s = (current = setup(defaultHandlers({ 'GET /approvals': capped(VERIFY_HEAD_PAGES + 2) })))
+    s.start()
+    await flush()
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1']) // a full read follows every page
+    const before = verifyReads(s)
+    await s.events.made.opts!.onChanged(['jobs'])
+    await flush()
+    expect(verifyReads(s) - before).toBe(VERIFY_HEAD_PAGES)
+    expect(s.store.approvals.verify).toEqual([])
+    expect(s.store.approvals.verifyComplete).toBe(false)
+  })
+
+  it('stops at the first non-empty page of the list to verify on a change event', async () => {
+    const s = (current = setup(
+      defaultHandlers({
+        'GET /approvals': (url) => {
+          if (url.searchParams.get('needs_verification') !== 'true') return json({ approvals: [], next_cursor: null })
+          const c = url.searchParams.get('cursor')
+          if (c === null) return json({ approvals: [], next_cursor: 'k1' })
+          if (c === 'k1') return json({ approvals: [approvalOf('u1', { needs_verification: true })], next_cursor: 'k2' })
+          return json({ approvals: [approvalOf('u2', { needs_verification: true })], next_cursor: null })
+        }
+      })
+    ))
+    s.start()
+    await flush()
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1', 'u2'])
+    const before = verifyReads(s)
+    await s.events.made.opts!.onChanged(['jobs'])
+    await flush()
+    expect(verifyReads(s) - before).toBe(2)
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
+    expect(s.store.approvals.verifyComplete).toBe(false)
+  })
+
+  it('keeps the view an acknowledgement returned, also after the session reset forgets it', async () => {
+    const s = (current = setup(
+      defaultHandlers({
+        'POST /approvals/u1/acknowledge': () =>
+          json(approvalOf('u1', { state: 'unknown', needs_verification: false, acknowledged_at: '2026-01-01T12:00:00Z' }))
+      })
+    ))
+    s.start()
+    await flush()
+    const stale = approvalOf('u1', { state: 'unknown', needs_verification: true })
+    expect(s.store.viewOf(stale)).toBe(stale)
+    await s.store.acknowledge('u1')
+    expect(s.store.viewOf(stale).needs_verification).toBe(false)
+    expect(s.store.viewOf(stale).acknowledged_at).toBe('2026-01-01T12:00:00Z')
+    expect(s.store.viewOf(approvalOf('u2')).id).toBe('u2')
+    s.store.stop()
+    expect(s.store.viewOf(stale)).toBe(stale)
+  })
+
+  it('reads the approvals to verify with the needs_verification filter', async () => {
+    const s = (current = setup())
+    s.start()
+    await flush()
+    const reads = s.server.calls.filter((c) => c.key === 'GET /approvals').map((c) => c.url.search)
+    expect(reads).toEqual(['?limit=100', '?needs_verification=true&limit=100'])
+  })
+
+  it('acknowledge sends the confirmation, drops the item at once and refreshes', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let acked = false
+    const s = (current = setup(
+      defaultHandlers({
+        'POST /approvals/u1/acknowledge': () => {
+          acked = true
+          return json(approvalOf('u1', { state: 'unknown', acknowledged_at: '2026-01-01T12:00:00Z' }))
+        },
+        'GET /approvals': async (url) => {
+          if (url.searchParams.get('needs_verification') !== 'true') return json({ approvals: [], next_cursor: null })
+          if (acked) await gate
+          return json({
+            approvals: acked ? [] : [approvalOf('u1', { state: 'unknown', needs_verification: true })],
+            next_cursor: null
+          })
+        }
+      })
+    ))
+    s.start()
+    await flush()
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
+    const ap = s.server.count('GET /approvals')
+    const p = s.store.acknowledge('u1')
+    await flush()
+    expect(s.server.calls.find((c) => c.key === 'POST /approvals/u1/acknowledge')?.body).toEqual({})
+    expect(s.store.approvals.verify).toEqual([])
+    expect(s.store.approvals.counts.verify).toBe(0)
+    release()
+    await p
+    expect(s.server.count('GET /approvals')).toBe(ap + 2)
+    expect(s.store.approvals.verify).toEqual([])
+  })
+
+  it.each([
+    [409, 'not_acknowledgeable'],
+    [404, 'not_found']
+  ])('acknowledge refreshes and rethrows on %i %s', async (status, code) => {
+    const s = (current = setup(
+      defaultHandlers({ 'POST /approvals/u1/acknowledge': () => apiErr(status, code) })
+    ))
+    s.start()
+    await flush()
+    const ap = s.server.count('GET /approvals')
+    const err = await s.store.acknowledge('u1').catch((e) => e)
+    expect((err as ApiError).code).toBe(code)
+    expect(s.server.count('GET /approvals')).toBe(ap + 2)
+    expect(s.store.approvals.verify.map((a) => a.id)).toEqual(['u1'])
   })
 
   it('bulkDecide sends every item and drops the decided ones', async () => {

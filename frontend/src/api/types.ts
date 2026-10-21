@@ -126,14 +126,18 @@ export type JobState = 'queued' | 'running' | 'waiting_approval' | 'succeeded' |
 export interface Job {
   id: string
   trigger_kind: string
+  trigger_ref: string // the conversation id of a chat job, else ''
   goal: string // untrusted, capped
   state: JobState | (string & {})
   attempt: number
   runs: number
   created_at: string | null
   updated_at: string | null
+  ended_at: string | null // null while the job is live
   error: string // a fixed reason text, safe to show
   steps_count: number
+  tokens_in: number // summed over the job's steps
+  tokens_out: number
 }
 
 export interface Step {
@@ -194,7 +198,9 @@ export interface Approval {
   executed_at: string | null
   outcome: Outcome | null
   job_ended: boolean
-  needs_verification: boolean
+  needs_verification: boolean // the outcome is uncertain and not acknowledged
+  acknowledged_at: string | null // when the user said they checked the outcome
+  acknowledged_by: string
 }
 
 export type ApprovalPage = Page<'approvals', Approval>
@@ -286,6 +292,8 @@ export interface AuditVerify {
   ok: boolean
   message?: string
   limitation: string
+  checked: number // the events verified (on a break: those before it)
+  broken_at?: number // the seq of the first event that does not verify
 }
 
 export interface ApiErrorBody {

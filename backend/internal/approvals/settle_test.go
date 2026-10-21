@@ -44,7 +44,7 @@ func TestSettleEndedExpiresAndAuditsTheApprovalsOfAnEndedJob(t *testing.T) {
 			t.Fatalf("no audit record for %s: %v", a.ID, got)
 		}
 	}
-	if err := f.st.View(bg, func(tx store.Tx) error { return tx.VerifyAudit(userID) }); err != nil {
+	if err := f.st.View(bg, func(tx store.Tx) error { _, err := tx.VerifyAudit(userID); return err }); err != nil {
 		t.Fatalf("audit chain: %v", err)
 	}
 

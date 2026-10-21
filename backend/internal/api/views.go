@@ -139,18 +139,25 @@ type settingsModels struct {
 // user's own text for chat jobs and a server-made instruction for proactive
 // ones (which must never embed file names); it is shown as untrusted text
 // either way and capped at maxGoalView. Error is the runner's fixed reason
-// text (agent.Reason*), safe to show.
+// text (agent.Reason*), safe to show. TriggerRef is the conversation id of
+// a chat job (a server-made id) and empty for every other job. EndedAt is
+// when the job reached a terminal state (null while it is live); TokensIn
+// and TokensOut are the sums over its steps.
 type jobView struct {
 	ID          string  `json:"id"`
 	TriggerKind string  `json:"trigger_kind"`
+	TriggerRef  string  `json:"trigger_ref"`
 	Goal        string  `json:"goal"` // untrusted, capped
 	State       string  `json:"state"`
 	Attempt     int     `json:"attempt"`
 	Runs        int     `json:"runs"`
 	CreatedAt   *string `json:"created_at"`
 	UpdatedAt   *string `json:"updated_at"`
+	EndedAt     *string `json:"ended_at"`
 	Error       string  `json:"error"`
 	StepsCount  int     `json:"steps_count"`
+	TokensIn    int64   `json:"tokens_in"`
+	TokensOut   int64   `json:"tokens_out"`
 }
 
 // jobDetailView is GET /jobs/{id}: the job, its timeline and the final
@@ -210,7 +217,9 @@ type approvalView struct {
 	ExecutedAt        *string         `json:"executed_at"`
 	Outcome           *outcomeView    `json:"outcome"` // null while undecided or not yet run
 	JobEnded          bool            `json:"job_ended"`
-	NeedsVerification bool            `json:"needs_verification"`
+	NeedsVerification bool            `json:"needs_verification"` // uncertain outcome, not acknowledged
+	AcknowledgedAt    *string         `json:"acknowledged_at"`
+	AcknowledgedBy    string          `json:"acknowledged_by"`
 }
 
 // outcomeView is how a decided approval ended. State is done, failed,
@@ -263,6 +272,10 @@ type auditVerifyView struct {
 	OK         bool   `json:"ok"`
 	Message    string `json:"message,omitempty"`
 	Limitation string `json:"limitation"`
+	// Checked is the number of events that verified; BrokenAt the seq of the
+	// first event whose chain link or hash fails (only when broken).
+	Checked  int64  `json:"checked"`
+	BrokenAt *int64 `json:"broken_at,omitempty"`
 }
 
 // auditExportView is one line of the export: the complete, uncapped record

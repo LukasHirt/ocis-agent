@@ -14,7 +14,7 @@ import (
 func TestAuditTriggersRejectUpdateAndDelete(t *testing.T) {
 	s := openSQLite(t)
 	if err := s.InTx(context.Background(), func(tx store.Tx) error {
-		_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "x"})
+		_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindToolCall})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestVerifyAuditDetectsDirectDatabaseTampering(t *testing.T) {
 		s := openSQLite(t)
 		for i := 0; i < 4; i++ {
 			if err := s.InTx(context.Background(), func(tx store.Tx) error {
-				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: "x", Detail: strconv.Itoa(i)})
+				_, err := tx.AppendAudit(audit.Event{UserID: "u1", Kind: audit.KindToolCall, Detail: strconv.Itoa(i)})
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -41,8 +41,22 @@ func TestVerifyAuditDetectsDirectDatabaseTampering(t *testing.T) {
 		}
 		return s
 	}
-	verify := func(s *Store) error {
-		return s.View(context.Background(), func(tx store.Tx) error { return tx.VerifyAudit("u1") })
+	// verify checks that the chain breaks at seq at after checked records
+	verify := func(t *testing.T, s *Store, at, checked int64) {
+		t.Helper()
+		var n int64
+		err := s.View(context.Background(), func(tx store.Tx) error {
+			var err error
+			n, err = tx.VerifyAudit("u1")
+			return err
+		})
+		var ce *audit.ChainError
+		if !errors.Is(err, audit.ErrChainBroken) || !errors.As(err, &ce) {
+			t.Fatalf("err = %v, want a ChainError", err)
+		}
+		if ce.Seq != at || n != checked {
+			t.Fatalf("broken at %d after %d checked, want %d after %d", ce.Seq, n, at, checked)
+		}
 	}
 	exec := func(t *testing.T, s *Store, q string) {
 		t.Helper()
@@ -55,24 +69,18 @@ func TestVerifyAuditDetectsDirectDatabaseTampering(t *testing.T) {
 		s := prepare(t)
 		exec(t, s, `DROP TRIGGER audit_no_update`)
 		exec(t, s, `UPDATE audit SET detail = 'tampered' WHERE user_id = 'u1' AND seq = 2`)
-		if err := verify(s); !errors.Is(err, audit.ErrChainBroken) {
-			t.Fatalf("err = %v, want ErrChainBroken", err)
-		}
+		verify(t, s, 2, 1)
 	})
 	t.Run("deleted middle record", func(t *testing.T) {
 		s := prepare(t)
 		exec(t, s, `DROP TRIGGER audit_no_delete`)
 		exec(t, s, `DELETE FROM audit WHERE user_id = 'u1' AND seq = 2`)
-		if err := verify(s); !errors.Is(err, audit.ErrChainBroken) {
-			t.Fatalf("err = %v, want ErrChainBroken", err)
-		}
+		verify(t, s, 3, 1)
 	})
 	t.Run("deleted first record", func(t *testing.T) {
 		s := prepare(t)
 		exec(t, s, `DROP TRIGGER audit_no_delete`)
 		exec(t, s, `DELETE FROM audit WHERE user_id = 'u1' AND seq = 1`)
-		if err := verify(s); !errors.Is(err, audit.ErrChainBroken) {
-			t.Fatalf("err = %v, want ErrChainBroken", err)
-		}
+		verify(t, s, 2, 0)
 	})
 }
