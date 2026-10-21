@@ -189,6 +189,23 @@ describe('useAuditStore: live updates', () => {
     expect(seqs(audit.events)).toEqual([8, 1])
   })
 
+  it('never makes up a cursor when next_cursor does not advance, but reads the newest page afresh', async () => {
+    let n = 0
+    const { audit, events, server } = await setup(auditState(), (c) => {
+      if (c.path !== '/audit') return undefined
+      n++
+      if (n === 1) return json({ events: [eventOf(1)], next_cursor: null })
+      if (n === 2) return json({ events: [], next_cursor: '1' }) // the cursor it was sent
+      return json({ events: [eventOf(2), eventOf(1)], next_cursor: null })
+    })
+    await audit.refresh()
+    events().onChanged(['activity'])
+    await flushPromises()
+    // the server's cursors must name existing events: nothing past them is sent
+    expect(auditReads(server.calls)).toEqual([newest(), forward('1'), newest()])
+    expect(seqs(audit.events)).toEqual([2, 1])
+  })
+
   it('reads new events of a log that was empty', async () => {
     const st = auditState()
     const { audit, events } = await setup(st)

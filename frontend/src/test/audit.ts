@@ -30,9 +30,10 @@ export interface AuditState {
 export const auditState = (over: Partial<AuditState> = {}): AuditState => ({ events: [], ...over })
 
 // auditHandler answers the audit routes from the state, like the server:
-// ascending by seq (the cursor is the seq after which a page starts) or,
-// with order=desc, newest first (the cursor "d<seq>" names an event of the
-// log, the page starts below it); kind filters; a next_cursor (the last
+// ascending by seq (the cursor names an event of the log, the page starts
+// after it) or, with order=desc, newest first (the cursor "d<seq>" names an
+// event of the log, the page starts below it); a cursor naming no event is
+// 400; kind filters; a next_cursor (the last
 // returned seq) only when more follow.
 export const auditHandler =
   (st: AuditState): Handler =>
@@ -45,7 +46,7 @@ export const auditHandler =
       const cs = c.query.get('cursor')
       if (cs !== null && !(desc ? /^d[1-9]\d{0,17}$/ : /^[1-9]\d{0,17}$/).test(cs)) return apiErr(400, 'invalid_request')
       const pos = cs === null ? 0 : Number(desc ? cs.slice(1) : cs)
-      if (desc && pos > 0 && !st.events.some((e) => e.seq === pos)) return apiErr(400, 'invalid_request')
+      if (pos > 0 && !st.events.some((e) => e.seq === pos)) return apiErr(400, 'invalid_request')
       const limit = Number(c.query.get('limit') ?? '50')
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) return apiErr(400, 'invalid_request')
       const kind = c.query.get('kind')

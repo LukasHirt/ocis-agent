@@ -139,8 +139,9 @@ const descCursor = "d"
 // cursor is the seq of the last record the previous page covered: the next
 // page holds records with a greater seq (asc) or a smaller one (desc). A desc
 // cursor carries the prefix "d", so a cursor is refused (400) in the other
-// order, and must name a record of the caller's own log (400 otherwise). An
-// asc cursor may be any seq: one past the end gives an empty last page.
+// order. In both orders a cursor must name a record of the caller's own log
+// (400 otherwise); the log is append-only, so a cursor once issued stays
+// valid, and the newest record as an asc cursor gives an empty last page.
 // Without filters that is the last returned event. With filters the handler
 // reads pages of 500 and stops after limit+1 matches (the extra one only
 // proves there is more) or after 5000 scanned records. In the first case
@@ -223,10 +224,8 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) error {
 	out := auditPageView{Events: []auditEventView{}}
 	var next int64 // 0: no next page
 	err = s.d.Store.View(r.Context(), func(tx store.Tx) error {
-		if desc && pos > 0 {
-			// a desc cursor names a record of the caller's own log (asc
-			// cursors are not checked: existing clients probe with seqs
-			// past the end, which only yields an empty last page)
+		if pos > 0 {
+			// a cursor (either order) names a record of the caller's own log
 			recs, err := tx.ReadAudit(p.UserID, pos-1, 1)
 			if err != nil {
 				return err

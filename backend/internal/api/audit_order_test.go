@@ -205,16 +205,64 @@ func TestAuditRefusesForeignCursors(t *testing.T) {
 	if got := seqs(getAudit(t, f, "?order=desc&cursor=d5")); len(got) != 4 || got[0] != 4 {
 		t.Errorf("before her last record: %v", got)
 	}
-	// asc cursors are unchanged: a seq past the end is an empty last page
-	// (existing clients probe for the end of the log that way)
-	for _, c := range []string{"5", "7", "1000"} {
-		if l := getAudit(t, f, "?cursor="+c); len(l.Events) != 0 || l.NextCursor != nil {
-			t.Errorf("asc cursor %s: %v cursor %v", c, seqs(l), l.NextCursor)
-		}
+	// an asc cursor must name a record of her log too: bob's seqs past
+	// her end are refused, filtered or not
+	f.bearer = otherToken
+	bobAsc := getAudit(t, f, "?limit=7")
+	f.bearer = goodToken
+	if *bobAsc.NextCursor != "7" {
+		t.Fatalf("bob's asc cursor %s", *bobAsc.NextCursor)
 	}
-	// a user without any audit record has no valid desc cursor
+	for _, q := range []string{
+		"?cursor=" + *bobAsc.NextCursor, "?cursor=6", "?cursor=1000", "?order=asc&cursor=9",
+		"?tool=files.read&cursor=7", "?kind=tool_call&cursor=6",
+	} {
+		wantError(t, f.do(http.MethodGet, auditPath+q, ""), http.StatusBadRequest, "invalid_request")
+	}
+	// her last record is a valid asc cursor: an empty last page
+	if l := getAudit(t, f, "?cursor=5"); len(l.Events) != 0 || l.NextCursor != nil {
+		t.Errorf("after her last record: %v cursor %v", seqs(l), l.NextCursor)
+	}
+	// a user without any audit record has no valid cursor in either order
 	f2 := newFixture(t)
 	wantError(t, f2.do(http.MethodGet, auditPath+"?order=desc&cursor=d1", ""), http.StatusBadRequest, "invalid_request")
+	wantError(t, f2.do(http.MethodGet, auditPath+"?cursor=1", ""), http.StatusBadRequest, "invalid_request")
+}
+
+func TestAuditAscCursorMustNameAnExistingEvent(t *testing.T) {
+	f := newFixture(t)
+	seedAudit(t, f.st, aliceID.UserID, 7, nil)
+	// unknown: past the end of the log
+	for _, q := range []string{"?cursor=8", "?cursor=999999", "?order=asc&cursor=8", "?limit=1&kind=tool_call&cursor=8"} {
+		wantError(t, f.do(http.MethodGet, auditPath+q, ""), http.StatusBadRequest, "invalid_request")
+	}
+	// a cursor the server issued works and continues after it
+	p1 := getAudit(t, f, "?limit=3")
+	if p1.NextCursor == nil || *p1.NextCursor != "3" {
+		t.Fatalf("first page cursor %v", p1.NextCursor)
+	}
+	p2 := getAudit(t, f, "?limit=3&cursor="+*p1.NextCursor)
+	if got := seqs(p2); len(got) != 3 || got[0] != 4 || got[2] != 6 || p2.NextCursor == nil || *p2.NextCursor != "6" {
+		t.Fatalf("second page %v cursor %v", got, p2.NextCursor)
+	}
+	// the last page has a null cursor
+	p3 := getAudit(t, f, "?limit=3&cursor="+*p2.NextCursor)
+	if got := seqs(p3); len(got) != 1 || got[0] != 7 || p3.NextCursor != nil {
+		t.Fatalf("last page %v cursor %v", got, p3.NextCursor)
+	}
+	// any existing seq is a valid cursor (the log is append-only), the
+	// newest one gives an empty last page
+	if got := seqs(getAudit(t, f, "?cursor=1")); len(got) != 6 || got[0] != 2 {
+		t.Fatalf("after 1: %v", got)
+	}
+	if l := getAudit(t, f, "?cursor=7"); len(l.Events) != 0 || l.NextCursor != nil {
+		t.Fatalf("after the newest: %v cursor %v", seqs(l), l.NextCursor)
+	}
+	// a cursor stays valid while the log grows
+	seedAudit(t, f.st, aliceID.UserID, 2, nil)
+	if got := seqs(getAudit(t, f, "?cursor=7")); len(got) != 2 || got[0] != 8 {
+		t.Fatalf("after growth: %v", got)
+	}
 }
 
 func TestAuditRejectsUnknownOrderAndKind(t *testing.T) {

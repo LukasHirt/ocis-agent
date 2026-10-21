@@ -125,7 +125,9 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     )
 
   // forward reads every event of the kind after `after`, following
-  // next_cursor; it returns null when more than maxPages pages follow.
+  // next_cursor; it returns null when more than maxPages pages follow or
+  // the server's cursor does not advance (only cursors the server issued
+  // are sent: one that names no event of the log is refused).
   const forward = async (s: SessionHandle, k: string, after: number, maxPages: number): Promise<AuditEvent[] | null> => {
     const out: AuditEvent[] = []
     let c = after
@@ -136,7 +138,9 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
       )
       out.push(...p.events.filter((e) => e.seq > after))
       if (p.next === null) return out
-      c = Math.max(Number(p.next), c + 1)
+      const next = Number(p.next)
+      if (next <= c) return null
+      c = next
     }
     return null
   }
