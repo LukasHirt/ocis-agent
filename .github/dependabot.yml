@@ -25,6 +25,19 @@ updates:
     ignore:
       # deliberately pinned to the oCIS Web release
       - dependency-name: "@ownclouders/*"
+      # provided by the host at runtime (the extension build treats them as externals), so a
+      # major version must match the oCIS Web release, not the latest upstream
+      - dependency-name: "pinia"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vue"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vue-router"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vue3-gettext"
+        update-types: ["version-update:semver-major"]
+      # vue-tsc (type check) does not work with the native TypeScript 7 compiler yet
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       minor-and-patch:
         update-types:
