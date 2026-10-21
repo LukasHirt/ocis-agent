@@ -12,6 +12,7 @@ import (
 
 	"github.com/owncloud/ocis-agent/backend/internal/agent"
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
+	"github.com/owncloud/ocis-agent/backend/internal/config"
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 	"github.com/owncloud/ocis-agent/backend/internal/llm/llmtest"
 	"github.com/owncloud/ocis-agent/backend/internal/store"
@@ -551,5 +552,23 @@ func TestTheRunnerEnforcesTheOperatorsDailyTokenCap(t *testing.T) {
 	}
 	if err := r.stop(t, 15*time.Second); err != nil {
 		t.Errorf("Run = %v", err)
+	}
+}
+
+// The operator's model timeout and reasoning effort reach the OpenAI client.
+func TestTheModelClientGetsTheTimeoutAndReasoningEffort(t *testing.T) {
+	cat, err := llm.NewCatalog("qwen3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := openAIConfig(config.LLMConfig{
+		BaseURL: "http://localhost:11434/v1", Catalog: cat, AllowHTTP: true,
+		Timeout: 15 * time.Minute, ReasoningEffort: "low",
+	})
+	if c.Timeout != 15*time.Minute || c.ReasoningEffort != "low" || c.Model != "qwen3" || c.BaseURL != "http://localhost:11434/v1" || !c.AllowHTTP {
+		t.Errorf("OpenAIConfig = %+v", c)
+	}
+	if _, err := llm.NewOpenAI(c); err != nil {
+		t.Errorf("NewOpenAI: %v", err)
 	}
 }

@@ -238,10 +238,7 @@ func (a *App) buildWorkers(opts Options) error {
 	cfg := a.cfg
 	provider := opts.Provider
 	if provider == nil {
-		p, err := llm.NewOpenAI(llm.OpenAIConfig{
-			BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Catalog.Default,
-			AllowedHosts: cfg.LLM.AllowedHosts, AllowHTTP: cfg.LLM.AllowHTTP,
-		})
+		p, err := llm.NewOpenAI(openAIConfig(cfg.LLM))
 		if err != nil {
 			return fmt.Errorf("app: model provider: %w", err)
 		}
@@ -315,4 +312,13 @@ func (a *App) DebugAddr() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.debugAddr
+}
+
+// openAIConfig is the client configuration for the operator's model endpoint.
+func openAIConfig(l config.LLMConfig) llm.OpenAIConfig {
+	return llm.OpenAIConfig{
+		BaseURL: l.BaseURL, APIKey: l.APIKey, Model: l.Catalog.Default,
+		AllowedHosts: l.AllowedHosts, AllowHTTP: l.AllowHTTP,
+		Timeout: l.Timeout, ReasoningEffort: l.ReasoningEffort,
+	}
 }

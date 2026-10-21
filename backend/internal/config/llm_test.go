@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
@@ -147,6 +148,13 @@ func TestLLMRefusals(t *testing.T) {
 		{"allowed hosts alone", map[string]string{"AGENT_LLM_ALLOWED_HOSTS": "a.example.com"}, "AGENT_LLM_BASE_URL"},
 		{"not a url", with(map[string]string{"AGENT_LLM_BASE_URL": "api.example.com"}), "AGENT_LLM_BASE_URL"},
 		{"ipv6 zone id", with(map[string]string{"AGENT_LLM_BASE_URL": "https://[fe80::1%25en0]:443/v1"}), "AGENT_LLM_BASE_URL"},
+		{"timeout not a duration", with(map[string]string{"AGENT_LLM_TIMEOUT": "ten minutes"}), "AGENT_LLM_TIMEOUT"},
+		{"timeout too short", with(map[string]string{"AGENT_LLM_TIMEOUT": "9s"}), "AGENT_LLM_TIMEOUT"},
+		{"timeout too long", with(map[string]string{"AGENT_LLM_TIMEOUT": "31m"}), "AGENT_LLM_TIMEOUT"},
+		{"timeout without base url", map[string]string{"AGENT_LLM_TIMEOUT": "5m"}, "AGENT_LLM_BASE_URL"},
+		{"unknown reasoning effort", with(map[string]string{"AGENT_LLM_REASONING_EFFORT": "max"}), "AGENT_LLM_REASONING_EFFORT"},
+		{"upper-case reasoning effort", with(map[string]string{"AGENT_LLM_REASONING_EFFORT": "LOW"}), "AGENT_LLM_REASONING_EFFORT"},
+		{"reasoning effort without base url", map[string]string{"AGENT_LLM_REASONING_EFFORT": "low"}, "AGENT_LLM_BASE_URL"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
@@ -207,5 +215,32 @@ func TestLLMUnreadableKeyFileDoesNotLeakTheKey(t *testing.T) {
 	}))
 	if err == nil || strings.Contains(err.Error(), "sk-real-key-value") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLLMTimeoutAndReasoningEffort(t *testing.T) {
+	base := map[string]string{"AGENT_LLM_BASE_URL": "http://localhost:11434/v1", "AGENT_LLM_MODEL": "qwen3"}
+	cfg, err := Load(llmEnv(base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LLM.Timeout != 120*time.Second || cfg.LLM.ReasoningEffort != "" {
+		t.Errorf("defaults: Timeout = %v, ReasoningEffort = %q, want 120s and empty", cfg.LLM.Timeout, cfg.LLM.ReasoningEffort)
+	}
+	for _, c := range []struct {
+		timeout, effort string
+		want            time.Duration
+	}{{"10s", "none", 10 * time.Second}, {" 15m ", "low", 15 * time.Minute}, {"30m", " medium ", 30 * time.Minute}, {"2m", "high", 2 * time.Minute}} {
+		env := map[string]string{"AGENT_LLM_TIMEOUT": c.timeout, "AGENT_LLM_REASONING_EFFORT": c.effort}
+		for k, v := range base {
+			env[k] = v
+		}
+		cfg, err := Load(llmEnv(env))
+		if err != nil {
+			t.Fatalf("Load(%q, %q): %v", c.timeout, c.effort, err)
+		}
+		if cfg.LLM.Timeout != c.want || cfg.LLM.ReasoningEffort != strings.TrimSpace(c.effort) {
+			t.Errorf("Load(%q, %q): Timeout = %v, ReasoningEffort = %q", c.timeout, c.effort, cfg.LLM.Timeout, cfg.LLM.ReasoningEffort)
+		}
 	}
 }

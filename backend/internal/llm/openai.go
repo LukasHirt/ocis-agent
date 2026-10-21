@@ -31,6 +31,22 @@ type OpenAIConfig struct {
 	HTTPClient       *http.Client
 	MaxResponseBytes int64 // default 4 MiB
 	MaxToolCalls     int   // default 16
+	// Timeout bounds one whole call, reading the response included; 0 means
+	// the HTTPClient's timeout, or 120s. A slow local model may need more.
+	Timeout time.Duration
+	// ReasoningEffort is sent as reasoning_effort when not empty; see
+	// ValidReasoningEffort.
+	ReasoningEffort string
+}
+
+// ValidReasoningEffort reports whether e is a reasoning_effort value the
+// client may send: none, low, medium or high.
+func ValidReasoningEffort(e string) bool {
+	switch e {
+	case "none", "low", "medium", "high":
+		return true
+	}
+	return false
 }
 
 // OpenAI is a Provider for OpenAI-compatible chat-completions endpoints. It
@@ -42,6 +58,7 @@ type OpenAI struct {
 	client      *http.Client
 	maxResponse int64
 	maxCalls    int
+	effort      string
 }
 
 // NewOpenAI validates the configuration and returns the client.
@@ -75,12 +92,19 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		return nil, errors.New("llm: an API key is required for a non-loopback endpoint")
 	}
 
+	if cfg.ReasoningEffort != "" && !ValidReasoningEffort(cfg.ReasoningEffort) {
+		return nil, errors.New("llm: the reasoning effort must be none, low, medium or high")
+	}
+
 	client := &http.Client{Timeout: defaultTimeout}
 	if cfg.HTTPClient != nil {
 		c := *cfg.HTTPClient
 		client = &c
 	}
-	if client.Timeout == 0 {
+	if cfg.Timeout > 0 {
+		client.Timeout = cfg.Timeout
+	}
+	if client.Timeout <= 0 {
 		client.Timeout = defaultTimeout
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -91,6 +115,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		client:      client,
 		maxResponse: cfg.MaxResponseBytes,
 		maxCalls:    cfg.MaxToolCalls,
+		effort:      cfg.ReasoningEffort,
 	}
 	if o.maxResponse <= 0 {
 		o.maxResponse = defaultMaxResponse

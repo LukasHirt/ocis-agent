@@ -413,3 +413,78 @@ func TestTheKeyDoesNotAppearWhenTheClientOrConfigIsPrinted(t *testing.T) {
 		}
 	}
 }
+
+func TestTheConfiguredTimeoutBoundsTheCallAndIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	o := newClient(t, srv.URL, func(c *OpenAIConfig) { c.Timeout = 100 * time.Millisecond })
+	start := time.Now()
+	_, err := o.Complete(context.Background(), simpleReq())
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the call took %v, the timeout was not applied", took)
+	}
+	if !errors.Is(err, ErrUnavailable) || !Retryable(err) {
+		t.Fatalf("err = %v, want a retryable ErrUnavailable", err)
+	}
+	for _, leak := range []string{srv.URL, "127.0.0.1", "sk-test", "http"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error %q leaks %q", err, leak)
+		}
+	}
+}
+
+func TestTheTimeoutDefaultsTo120sAndOverridesAGivenClient(t *testing.T) {
+	o := newClient(t, "http://127.0.0.1:1", nil)
+	if o.client.Timeout != 120*time.Second {
+		t.Errorf("default timeout = %v, want 120s", o.client.Timeout)
+	}
+	o = newClient(t, "http://127.0.0.1:1", func(c *OpenAIConfig) {
+		c.HTTPClient = &http.Client{Timeout: time.Second}
+		c.Timeout = 10 * time.Minute
+	})
+	if o.client.Timeout != 10*time.Minute {
+		t.Errorf("timeout = %v, want 10m", o.client.Timeout)
+	}
+}
+
+func TestReasoningEffortIsSentOnlyWhenConfigured(t *testing.T) {
+	for _, effort := range []string{"", "none", "low", "medium", "high"} {
+		t.Run("effort="+effort, func(t *testing.T) {
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				reply(w, `{"choices":[{"message":{"content":"x"},"finish_reason":"stop"}]}`)
+			}))
+			defer srv.Close()
+			o := newClient(t, srv.URL, func(c *OpenAIConfig) { c.ReasoningEffort = effort })
+			if _, err := o.Complete(context.Background(), simpleReq()); err != nil {
+				t.Fatal(err)
+			}
+			v, ok := got["reasoning_effort"]
+			if effort == "" {
+				if ok {
+					t.Errorf("reasoning_effort = %v, want it omitted", v)
+				}
+				return
+			}
+			if v != effort {
+				t.Errorf("reasoning_effort = %v, want %q", v, effort)
+			}
+		})
+	}
+}
+
+func TestNewOpenAIRefusesAnUnknownReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"max", "LOW", " low", "minimal"} {
+		_, err := NewOpenAI(OpenAIConfig{BaseURL: "https://api.example.com/v1", APIKey: "k", Model: "m", ReasoningEffort: effort})
+		if err == nil {
+			t.Errorf("effort %q accepted", effort)
+		}
+	}
+}
