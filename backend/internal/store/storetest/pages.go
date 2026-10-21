@@ -93,8 +93,9 @@ func runPages(t *testing.T, f Factory) {
 			t.Fatalf("claimed %s", ca.Job.ID)
 		}
 		mustTx(t, st, func(tx store.Tx) error {
-			for range 3 {
-				if _, err := tx.AppendStep(store.JobStep{JobID: a.ID, Kind: "llm", Status: "ok"}, ca.Fence); err != nil {
+			for i := range 3 {
+				step := store.JobStep{JobID: a.ID, Kind: "llm", Status: "ok", TokensIn: int64(10 * (i + 1)), TokensOut: int64(i + 1)}
+				if _, err := tx.AppendStep(step, ca.Fence); err != nil {
 					return err
 				}
 			}
@@ -114,6 +115,13 @@ func runPages(t *testing.T, f Factory) {
 		if s.StepCount != 3 || got[0].StepCount != 0 || s.State != store.JobFailed || s.Error != "boom" || s.Goal != "a" ||
 			s.UserID != "u1" || s.TriggerKind != "chat" || s.Runs != 1 || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.NotBefore.IsZero() {
 			t.Errorf("summary = %+v", s)
+		}
+		// token sums over the steps; a job without steps has zero
+		if s.TokensIn != 60 || s.TokensOut != 6 || got[0].TokensIn != 0 || got[0].TokensOut != 0 {
+			t.Errorf("token sums = %d/%d and %d/%d", s.TokensIn, s.TokensOut, got[0].TokensIn, got[0].TokensOut)
+		}
+		if !s.EndedAt.Equal(s.UpdatedAt) || !got[0].EndedAt.IsZero() {
+			t.Errorf("ended_at = %v (updated %v) and %v", s.EndedAt, s.UpdatedAt, got[0].EndedAt)
 		}
 		full := getJob(t, st, "u1", a.ID)
 		if s.ID != full.ID || s.Attempt != full.Attempt || !s.CreatedAt.Equal(full.CreatedAt) || !s.UpdatedAt.Equal(full.UpdatedAt) {

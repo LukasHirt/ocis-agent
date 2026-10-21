@@ -677,6 +677,89 @@ func runJobs(t *testing.T, f Factory) {
 		}
 	})
 
+	t.Run("ended_at is set by the transition that ends a job and only by it", func(t *testing.T) {
+		st, clk := open(t, f)
+		mustUser(t, st, "u1")
+		ended := func(id string) time.Time {
+			t.Helper()
+			j := getJob(t, st, "u1", id)
+			var s store.JobSummary
+			for _, x := range listSummaries(t, st, "u1", store.JobFilter{Limit: 500}) {
+				if x.ID == id {
+					s = x
+				}
+			}
+			if !s.EndedAt.Equal(j.EndedAt) {
+				t.Errorf("%s: summary ended_at %v, job %v", id, s.EndedAt, j.EndedAt)
+			}
+			return j.EndedAt
+		}
+
+		// live states have none; a release to succeeded sets it at that time
+		j := addJob(t, st, "u1", "ok")
+		if e := ended(j.ID); !e.IsZero() {
+			t.Errorf("queued job ended at %v", e)
+		}
+		clk.Advance(time.Second)
+		c := mustClaim(t, st, "w")
+		if e := ended(j.ID); !e.IsZero() {
+			t.Errorf("running job ended at %v", e)
+		}
+		release(t, st, c, store.JobWaitingApproval)
+		if e := ended(j.ID); !e.IsZero() {
+			t.Errorf("waiting job ended at %v", e)
+		}
+		mustTx(t, st, func(tx store.Tx) error { _, err := tx.ResumeJobIfSettled("u1", j.ID); return err })
+		c = mustClaim(t, st, "w")
+		release(t, st, c, store.JobQueued)
+		if e := ended(j.ID); !e.IsZero() {
+			t.Errorf("requeued job ended at %v", e)
+		}
+		c = mustClaim(t, st, "w")
+		clk.Advance(time.Minute)
+		endOK := clk.Now()
+		release(t, st, c, store.JobSucceeded)
+		if e := ended(j.ID); !e.Equal(endOK) {
+			t.Errorf("succeeded at %v, want %v", e, endOK)
+		}
+		// writes refused on the ended job do not move it
+		clk.Advance(time.Minute)
+		_ = st.InTx(bg(), func(tx store.Tx) error { return tx.CancelJob("u1", j.ID) })
+		if e := ended(j.ID); !e.Equal(endOK) {
+			t.Errorf("after a refused cancel: %v, want %v", e, endOK)
+		}
+
+		// failed by the runner, cancelled by the user, failed by the reaper
+		f1 := addJob(t, st, "u1", "fail")
+		c = mustClaim(t, st, "w")
+		clk.Advance(time.Second)
+		mustTx(t, st, func(tx store.Tx) error { _, err := tx.ReleaseJob(c, store.JobFailed, nil, "boom"); return err })
+		if e := ended(f1.ID); !e.Equal(clk.Now()) {
+			t.Errorf("failed at %v, want %v", e, clk.Now())
+		}
+		x := addJob(t, st, "u1", "cancel")
+		clk.Advance(time.Second)
+		mustTx(t, st, func(tx store.Tx) error { return tx.CancelJob("u1", x.ID) })
+		if e := ended(x.ID); !e.Equal(clk.Now()) {
+			t.Errorf("cancelled at %v, want %v", e, clk.Now())
+		}
+		p := addJob(t, st, "u1", "poison")
+		mustClaim(t, st, "w")
+		clk.Advance(3 * time.Minute)
+		mustTx(t, st, func(tx store.Tx) error { _, err := tx.ReapExpired(1, backoffMinutes); return err })
+		if got := getJob(t, st, "u1", p.ID); got.State != store.JobFailed || !got.EndedAt.Equal(clk.Now()) {
+			t.Errorf("reaped job = %s ended at %v, want %v", got.State, got.EndedAt, clk.Now())
+		}
+		// a requeue by the reaper does not end the job
+		r := addJob(t, st, "u1", "requeue")
+		mustClaim(t, st, "w")
+		clk.Advance(3 * time.Minute)
+		mustTx(t, st, func(tx store.Tx) error { _, err := tx.ReapExpired(5, backoffMinutes); return err })
+		if got := getJob(t, st, "u1", r.ID); got.State != store.JobQueued || !got.EndedAt.IsZero() {
+			t.Errorf("requeued job = %s ended at %v", got.State, got.EndedAt)
+		}
+	})
+
 	t.Run("a duplicate job id conflicts", func(t *testing.T) {
 		st, _ := open(t, f)
 		mustUser(t, st, "u1")

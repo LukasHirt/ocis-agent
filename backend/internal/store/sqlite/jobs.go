@@ -15,7 +15,7 @@ const (
 	defaultJobLimit = 50
 	maxJobLimit     = 500
 
-	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at`
+	jobColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, checkpoint, error, created_at, updated_at, ended_at`
 )
 
 // leaseHeld is the fence condition shared by the fenced writes: the user's
@@ -30,15 +30,15 @@ type scanner interface{ Scan(dest ...any) error }
 func scanJob(row scanner) (store.Job, error) {
 	var j store.Job
 	var state, checkpoint string
-	var notBefore, created, updated int64
+	var notBefore, created, updated, ended int64
 	err := row.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
-		&notBefore, &checkpoint, &j.Error, &created, &updated)
+		&notBefore, &checkpoint, &j.Error, &created, &updated, &ended)
 	if err != nil {
 		return store.Job{}, err
 	}
 	j.State = store.JobState(state)
 	j.Checkpoint = json.RawMessage(checkpoint)
-	j.NotBefore, j.CreatedAt, j.UpdatedAt = fromMS(notBefore), fromMS(created), fromMS(updated)
+	j.NotBefore, j.CreatedAt, j.UpdatedAt, j.EndedAt = fromMS(notBefore), fromMS(created), fromMS(updated), endedAt(ended)
 	return j, nil
 }
 
@@ -54,7 +54,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	if j.ID == "" {
 		j.ID = store.NewID()
 	}
-	j.State, j.Attempt, j.Runs, j.Error = store.JobQueued, 0, 0, ""
+	j.State, j.Attempt, j.Runs, j.Error, j.EndedAt = store.JobQueued, 0, 0, "", time.Time{}
 	if j.NotBefore.IsZero() {
 		j.NotBefore = now
 	}
@@ -63,7 +63,7 @@ func (t *tx) InsertJob(j store.Job) (store.Job, error) {
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	_, err := t.q.ExecContext(t.ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO jobs(`+jobColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
 		j.ID, j.UserID, j.TriggerKind, j.TriggerRef, j.Goal, string(j.State), j.Attempt, j.Runs,
 		ms(j.NotBefore), string(j.Checkpoint), j.Error, ms(j.CreatedAt), ms(j.UpdatedAt))
 	switch {
@@ -202,11 +202,28 @@ func (t *tx) ListJobs(userID string, f store.JobFilter) ([]store.Job, error) {
 }
 
 // jobSummaryColumns are jobColumns without the checkpoint, plus the step
-// count (a correlated count over the job_steps primary key). Not selecting
-// the checkpoint keeps it out of Go memory, but SQLite still reads its
-// overflow pages from disk for the columns stored after it in the row.
-const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at,
-	(SELECT COUNT(*) FROM job_steps s WHERE s.job_id = jobs.id)`
+// count and the token sums (correlated subqueries over the job_steps
+// primary key, part of the one list query: no query per row). Not
+// selecting the checkpoint keeps it out of Go memory, but SQLite still
+// reads its overflow pages from disk for the columns stored after it in the
+// row.
+const jobSummaryColumns = `id, user_id, trigger_kind, trigger_ref, goal, state, attempt, runs, not_before, error, created_at, updated_at, ended_at,
+	(SELECT COUNT(*) FROM job_steps s WHERE s.job_id = jobs.id),
+	(SELECT COALESCE(SUM(s.tokens_in), 0) FROM job_steps s WHERE s.job_id = jobs.id),
+	(SELECT COALESCE(SUM(s.tokens_out), 0) FROM job_steps s WHERE s.job_id = jobs.id)`
+
+// endedAt maps the stored end time (0 while the job is live) to a time.
+func endedAt(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return fromMS(v)
+}
+
+// endedAtSet is the SET clause of a transition: ended_at becomes the
+// transition's time if the new state (the first placeholder) is terminal.
+// The callers only move live jobs, so an end time is never replaced.
+const endedAtSet = `ended_at = CASE WHEN ? IN ('succeeded', 'failed', 'cancelled') THEN ? ELSE ended_at END`
 
 // ListJobSummaries implements store.Tx.
 func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSummary, error) {
@@ -223,13 +240,13 @@ func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSumm
 	for rows.Next() {
 		var j store.JobSummary
 		var state string
-		var notBefore, created, updated int64
+		var notBefore, created, updated, ended int64
 		if err := rows.Scan(&j.ID, &j.UserID, &j.TriggerKind, &j.TriggerRef, &j.Goal, &state, &j.Attempt, &j.Runs,
-			&notBefore, &j.Error, &created, &updated, &j.StepCount); err != nil {
+			&notBefore, &j.Error, &created, &updated, &ended, &j.StepCount, &j.TokensIn, &j.TokensOut); err != nil {
 			return nil, err
 		}
 		j.State = store.JobState(state)
-		j.NotBefore, j.CreatedAt, j.UpdatedAt = fromMS(notBefore), fromMS(created), fromMS(updated)
+		j.NotBefore, j.CreatedAt, j.UpdatedAt, j.EndedAt = fromMS(notBefore), fromMS(created), fromMS(updated), endedAt(ended)
 		out = append(out, j)
 	}
 	return out, rows.Err()
@@ -238,8 +255,8 @@ func (t *tx) ListJobSummaries(userID string, f store.JobFilter) ([]store.JobSumm
 // CancelJob implements store.Tx.
 func (t *tx) CancelJob(userID, jobID string) error {
 	res, err := t.q.ExecContext(t.ctx,
-		`UPDATE jobs SET state = 'cancelled', updated_at = ?
-		 WHERE id = ? AND user_id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')`,
+		`UPDATE jobs SET state = 'cancelled', updated_at = ?1, ended_at = ?1
+		 WHERE id = ?2 AND user_id = ?3 AND state NOT IN ('succeeded', 'failed', 'cancelled')`,
 		ms(t.now()), jobID, userID)
 	if err != nil {
 		return err
@@ -432,12 +449,14 @@ func (t *tx) ReleaseJob(c store.Claim, next store.JobState, checkpoint json.RawM
 	if n, _ := res.RowsAffected(); n == 0 {
 		return false, t.diagnoseJobWrite(c.Job.UserID, c.Job.ID, true)
 	}
+	now := ms(t.now())
 	res, err = t.q.ExecContext(t.ctx,
 		`UPDATE jobs SET state = ?, checkpoint = CASE WHEN ? = '' THEN checkpoint ELSE ? END, error = ?,
 		     attempt = CASE WHEN ? IN ('queued','waiting_approval') AND attempt > 0 THEN attempt - 1 ELSE attempt END,
-		     updated_at = ?
+		     updated_at = ?, `+endedAtSet+`
 		 WHERE id = ? AND user_id = ? AND state = 'running'`,
-		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), ms(t.now()), c.Job.ID, c.Job.UserID)
+		string(next), string(checkpoint), string(checkpoint), errMsg, string(next), now, string(next), now,
+		c.Job.ID, c.Job.UserID)
 	if err != nil {
 		return false, err
 	}
@@ -481,7 +500,8 @@ func (t *tx) ReapExpired(maxAttempts int, backoff func(attempt int) time.Duratio
 	for _, s := range jobs {
 		if s.attempt >= maxAttempts {
 			_, err = t.q.ExecContext(t.ctx,
-				`UPDATE jobs SET state = 'failed', error = 'max attempts exceeded', updated_at = ? WHERE id = ?`, ms(now), s.id)
+				`UPDATE jobs SET state = 'failed', error = 'max attempts exceeded', updated_at = ?1, ended_at = ?1 WHERE id = ?2`,
+				ms(now), s.id)
 			res.Failed++
 		} else {
 			_, err = t.q.ExecContext(t.ctx,

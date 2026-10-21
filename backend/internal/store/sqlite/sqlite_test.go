@@ -199,3 +199,60 @@ func TestDatabaseFilesArePrivate(t *testing.T) {
 		}
 	}
 }
+
+// TestJobEndedAtBackfill: the migration that adds jobs.ended_at fills it
+// from updated_at for the jobs that had already ended, and leaves live jobs
+// without one.
+func TestJobEndedAtBackfill(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := s.w.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	var live, done store.Job
+	if err := s.InTx(context.Background(), func(tx store.Tx) error {
+		if err := tx.PutUser(store.User{ID: "u1", Name: "n", PersonalDriveID: "d"}); err != nil {
+			return err
+		}
+		var err error
+		if live, err = tx.InsertJob(store.Job{UserID: "u1", TriggerKind: "chat", Goal: "live"}); err != nil {
+			return err
+		}
+		if done, err = tx.InsertJob(store.Job{UserID: "u1", TriggerKind: "chat", Goal: "done"}); err != nil {
+			return err
+		}
+		return tx.CancelJob("u1", done.ID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// back to the schema before the migration, with an updated_at to copy
+	for _, q := range []string{
+		`ALTER TABLE jobs DROP COLUMN ended_at`,
+		`UPDATE jobs SET updated_at = 123456789`,
+		`PRAGMA user_version = ` + strconv.Itoa(version-1),
+	} {
+		if _, err := s.w.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_ = s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	for _, c := range []struct {
+		id   string
+		want int64
+	}{{live.ID, 0}, {done.ID, 123456789}} {
+		var got int64
+		if err := s.w.QueryRow(`SELECT ended_at FROM jobs WHERE id = ?`, c.id).Scan(&got); err != nil || got != c.want {
+			t.Errorf("%s: ended_at = %d (%v), want %d", c.id, got, err, c.want)
+		}
+	}
+}
