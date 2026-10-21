@@ -39,7 +39,7 @@ func (c *clock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// fakes implements Reaper, Settler, Reconciler and Auth. It counts calls per
+// fakes implements Queue, Settler, Reconciler and Auth. It counts calls per
 // task and can make a task fail (fail) or panic (panics).
 type fakes struct {
 	mu        sync.Mutex
@@ -57,6 +57,7 @@ type fakes struct {
 	hung      map[string]bool
 	sweepRes  auth.SweepResult
 	onCall    func(task string)
+	woken     int
 }
 
 func newFakes() *fakes {
@@ -109,6 +110,18 @@ func (f *fakes) Reap(_ context.Context, maxAttempts int) (store.ReapResult, erro
 		return store.ReapResult{}, err
 	}
 	return store.ReapResult{Requeued: 1, Failed: 1}, nil
+}
+
+func (f *fakes) Wake() {
+	f.mu.Lock()
+	f.woken++
+	f.mu.Unlock()
+}
+
+func (f *fakes) wakes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.woken
 }
 
 func (f *fakes) ExpireAndResume(context.Context) (int, error) {

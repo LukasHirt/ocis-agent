@@ -59,8 +59,8 @@ List routes refuse unknown, repeated or malformed query parameters with `400 inv
 
 ### Cooldowns and process limits
 
-- Enrol, renew, revoke and revoke-all share one 5 s cooldown per user (`429 rate_limited` with
-  `Retry-After`). Unenrol is only rate-limited.
+- Enrol, renew, revoke, revoke-all and a review on request (`POST /proactive/run`) share one 5 s
+  cooldown per user (`429 rate_limited` with `Retry-After`). Unenrol is only rate-limited.
 - Sending a chat message has a 1 s cooldown per user; a refused send uses it up too.
 - Audit verify: one at a time per user and two in the process. Audit export: one per user and
   eight in the process. Over it `429 rate_limited` with `Retry-After: 5`.
@@ -239,7 +239,7 @@ A partial update: the fields present replace the stored ones, at least one must 
 | `proactive_enabled` | `true` or `false` |
 | `watch` | array of at most 20 absolute paths of at most 1024 bytes, no `.`/`..` segments, no control or bidi characters, not inside `/.ocis-agent`; duplicates are dropped |
 | `sweep_interval` | Go duration from `5m` to `168h`, whole seconds |
-| `quiet_hours` | `""` or `HH:MM-HH:MM` (24 h, two different times) |
+| `quiet_hours` | `""` or `HH:MM-HH:MM` in UTC (24 h, two different times; the start is quiet, the end is not; may wrap midnight) |
 | `daily_tokens` | integer from 1000 to the operator's cap, or `null` to follow the operator's cap |
 | `models` | `{"chat": id or null, "proactive": id or null}`; an id must be in the catalog, `null` clears the preference |
 
@@ -263,8 +263,9 @@ Query: `state` (`queued`, `running`, `waiting_approval`, `succeeded`, `failed`, 
 }], "next_cursor": null}
 ```
 
-- `trigger_kind` is `chat` for chat jobs; `trigger_ref` is the conversation id of a chat job and
-  empty for every other job.
+- `trigger_kind` is `chat` for chat jobs, `schedule` for a scheduled review, `file_event` for a
+  change in a watch folder and `manual` for a review on request; `trigger_ref` is the conversation
+  id of a chat job and empty for every other job.
 - `goal` (untrusted, capped) is the user's text of a chat job or a server-made instruction.
 - `attempt` counts crashed runs, `runs` every claim.
 - `ended_at` is when the job reached a terminal state (null while live).
@@ -484,6 +485,27 @@ characters, `chat_message` is audited and the workers are woken.
 `202`. The message is accepted while the agent is paused or the kill switch is on; `agent` tells
 why nothing runs yet. Cooldown: 1 s per user (`429 rate_limited`).
 
+## Proactive reviews
+
+With `proactive_enabled`, the agent reviews the user's recent file changes and open tasks on its
+own, every `sweep_interval`, outside the quiet hours (UTC). The first scheduled review comes one
+interval after proactive work is switched on. A review only reads and proposes: every action
+other than a read or a memory write becomes an approval. Its goal is a fixed text, never a file
+name or other data. A review is not started while the kill switch is on or the agent is paused
+(any reason), while another review (of any kind) is queued, running or waiting for approval,
+after `AGENT_PROACTIVE_DAILY_JOBS` (24) reviews of the UTC day, or once 80% of the day's token
+budget is used. A scheduled review that is skipped for one of these reasons is retried a minute
+later and recorded as `proactive_skipped` with the reason (at most once per reason and hour);
+a started one as `proactive_started`.
+
+### POST /agent-api/v1/proactive/run
+
+Empty body or `{}`. Starts a review now (`trigger_kind` `manual`), regardless of quiet hours and
+the interval; it counts as the last scheduled one. `202` with the job (fields as in `GET /jobs`)
+and the workers are woken. `409` when it cannot start: `not_enrolled`, `proactive_disabled`,
+`kill_switch`, `paused`, `live_job`, `daily_cap` or `budget`. Cooldown: 5 s, also used up by a
+refused run.
+
 ## Audit log
 
 The audit log is append-only and hash-chained per user.
@@ -494,9 +516,9 @@ the user's own requests); `detail` is untrusted (capped at 2 KiB in the list). K
 `action_executed`, `agent_dormant`, `agent_paused`, `agent_resumed`, `approval_acknowledged`,
 `approval_decided`, `approval_expired`, `approval_requested`, `chat_message`,
 `conversation_deleted`, `job_cancelled`, `job_finished`, `memory_changed`, `memory_edited`,
-`policy_changed`, `policy_denied`, `tampered`, `token_anomaly`, `token_created`, `token_deleted`,
-`token_expired`, `token_invalid`, `token_label_closed`, `token_renewed`, `token_revoked_all`,
-`tool_call`, `unenrolled`. No event holds a token value, hash or label.
+`policy_changed`, `policy_denied`, `proactive_skipped`, `proactive_started`, `tampered`,
+`token_anomaly`, `token_created`, `token_deleted`, `token_expired`, `token_invalid`,
+`token_label_closed`, `token_renewed`, `token_revoked_all`, `tool_call`, `unenrolled`. No event holds a token value, hash or label.
 
 ### GET /agent-api/v1/audit
 
@@ -589,6 +611,12 @@ get `503 unavailable`.
 | `budget_exhausted` | 429 | Today's token budget is used up; it resets at midnight UTC. |
 | `too_many_pending` | 429 | Too many messages are still waiting for an answer; try again later. |
 | `credentials_invalid` | 409 | The agent has no valid credentials for you; enrol again. |
+| `proactive_disabled` | 409 | Proactive reviews are turned off in your settings. |
+| `kill_switch` | 409 | The operator has stopped the agent. |
+| `paused` | 409 | The agent is paused. |
+| `live_job` | 409 | A review is already queued or running. |
+| `daily_cap` | 409 | Today's limit of reviews is reached; it resets at midnight UTC. |
+| `budget` | 409 | Most of today's token budget is used; reviews resume at midnight UTC. |
 | `expired` | 410 | This has expired. |
 | `too_large` | 413 | The request body is too large. |
 | `unsupported_media_type` | 415 | The request body must be application/json. |

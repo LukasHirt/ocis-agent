@@ -272,6 +272,13 @@ type Tx interface {
 	// means 100; the maximum is 1000.
 	ListTokensDueForRenewal(now time.Time, limit int) ([]TokenDue, error)
 
+	// ListProactiveDue returns the ids of users with proactive work enabled
+	// whose sweep is due at now: never swept (no cursor or no last sweep) or
+	// last swept at or before now minus their sweep interval. Paused users
+	// are included (the caller records why it skips them). In user id order
+	// after afterID; limit <= 0 means 100, the maximum is 1000.
+	ListProactiveDue(now time.Time, afterID string, limit int) ([]string, error)
+
 	// GetCursor returns the user's cursor; an absent cursor is a zero cursor
 	// with an empty, non-nil MemoryETags map.
 	GetCursor(userID string) (Cursor, error)

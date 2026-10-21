@@ -1,6 +1,9 @@
 // Package scheduler runs the periodic maintenance of the sidecar: reaping
 // expired job leases, expiring and settling approvals, reconciling orphaned
-// calls, renewing and sweeping app tokens and pausing dormant users.
+// calls, renewing and sweeping app tokens and pausing dormant users. It also
+// starts the scheduled proactive sweeps (proactive.go), which, unlike the
+// maintenance, never start anything while the kill switch is on or a user
+// is paused.
 //
 // Every task has its own interval and runs from Tick when it is due. Tick is
 // synchronous and reads time only through Deps.Now, so tests drive it with a
@@ -33,6 +36,7 @@ const (
 	TaskExpire    = "expire"
 	TaskSettle    = "settle"
 	TaskDormant   = "dormant"
+	TaskProactive = "proactive"
 	TaskReconcile = "reconcile"
 	TaskRenew     = "renew"
 	TaskSweep     = "sweep"
@@ -46,9 +50,11 @@ const (
 	CategoryPanic        = "panic"
 )
 
-// Reaper requeues or fails jobs whose lease expired (*queue.Queue).
-type Reaper interface {
+// Queue requeues or fails jobs whose lease expired and wakes the workers
+// after the proactive task started jobs (*queue.Queue).
+type Queue interface {
 	Reap(ctx context.Context, maxAttempts int) (store.ReapResult, error)
+	Wake()
 }
 
 // Settler expires approvals (*approvals.Gate).
@@ -74,7 +80,7 @@ type Auth interface {
 // Deps are the scheduler's collaborators; all are required.
 type Deps struct {
 	Store    store.Store
-	Queue    Reaper
+	Queue    Queue
 	Gate     Settler
 	Executor Reconciler
 	Env      approvals.EnvFunc
@@ -92,6 +98,7 @@ type Intervals struct {
 	Renew     time.Duration // default 1m
 	Sweep     time.Duration // one page of users per run; default 10s
 	Dormant   time.Duration // default 1h
+	Proactive time.Duration // default 1m
 	Tick      time.Duration // how often Run calls Tick; default 1s
 }
 
@@ -106,19 +113,21 @@ type Config struct {
 	TaskTimeout   time.Duration // deadline of one run of reconcile, renew and sweep (default 2m)
 	Intervals     Intervals
 	Batch         int // items per task run (default 100, at most 1000)
+	Proactive     ProactiveConfig
 }
 
 const maxBatch = 1000
 
 func (c Config) withDefaults() (Config, error) {
-	if c.MaxAttempts < 0 || c.LeaseTTL < 0 || c.RetrySettle < 0 || c.CallTimeout < 0 || c.SweepInterval < 0 || c.TaskTimeout < 0 || c.Batch < 0 {
+	if c.MaxAttempts < 0 || c.LeaseTTL < 0 || c.RetrySettle < 0 || c.CallTimeout < 0 || c.SweepInterval < 0 || c.TaskTimeout < 0 || c.Batch < 0 ||
+		c.Proactive.PerTick < 0 || c.Proactive.Limits.DailyJobs < 0 || c.Proactive.Limits.DailyTokens < 0 {
 		return c, errors.New("scheduler: negative config value")
 	}
 	if c.Batch > maxBatch {
 		return c, fmt.Errorf("scheduler: batch above %d", maxBatch)
 	}
 	iv := &c.Intervals
-	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Tick} {
+	for _, d := range []time.Duration{iv.Reap, iv.Expire, iv.Settle, iv.Reconcile, iv.Renew, iv.Sweep, iv.Dormant, iv.Proactive, iv.Tick} {
 		if d < 0 {
 			return c, errors.New("scheduler: negative interval")
 		}
@@ -134,6 +143,12 @@ func (c Config) withDefaults() (Config, error) {
 	if c.Batch == 0 {
 		c.Batch = 100
 	}
+	if c.Proactive.PerTick == 0 {
+		c.Proactive.PerTick = 50
+	}
+	if c.Proactive.Limits.DailyJobs == 0 {
+		c.Proactive.Limits.DailyJobs = 24
+	}
 	def(&c.LeaseTTL, 2*time.Minute)
 	def(&c.RetrySettle, 2*time.Minute)
 	def(&c.CallTimeout, 5*time.Minute)
@@ -146,6 +161,7 @@ func (c Config) withDefaults() (Config, error) {
 	def(&iv.Renew, time.Minute)
 	def(&iv.Sweep, 10*time.Second)
 	def(&iv.Dormant, time.Hour)
+	def(&iv.Proactive, time.Minute)
 	def(&iv.Tick, time.Second)
 	return c, nil
 }
@@ -173,6 +189,7 @@ type Scheduler struct {
 	tasks []task
 	last  map[string]time.Time
 	sweep sweepState
+	pro   proactiveState
 }
 
 // New validates the dependencies and the configuration.
@@ -184,7 +201,7 @@ func New(d Deps, c Config) (*Scheduler, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState()}
+	s := &Scheduler{d: d, c: c, last: map[string]time.Time{}, sweep: newSweepState(), pro: newProactiveState()}
 	iv := c.Intervals
 	// The database-only tasks run first, so a slow or hung oCIS delays them
 	// by at most the three TaskTimeouts of the previous Tick.
@@ -193,6 +210,7 @@ func New(d Deps, c Config) (*Scheduler, error) {
 		{TaskExpire, iv.Expire, false, s.expire},
 		{TaskSettle, iv.Settle, false, s.settle},
 		{TaskDormant, iv.Dormant, false, s.dormant},
+		{TaskProactive, iv.Proactive, false, s.proactive},
 		{TaskReconcile, iv.Reconcile, true, s.reconcile},
 		{TaskRenew, iv.Renew, true, s.renew},
 		{TaskSweep, iv.Sweep, true, s.sweepRun},

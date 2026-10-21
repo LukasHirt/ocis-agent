@@ -214,6 +214,7 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 				AllowedOrigin: cfg.AllowedOrigin, KillSwitchEnv: cfg.Agent.KillSwitch,
 				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
 				StreamsPerUser: cfg.API.StreamsPerUser, StreamsTotal: cfg.API.StreamsTotal,
+				Proactive: proactiveLimits(cfg),
 			},
 			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPollForTest: opts.tune.eventsPoll,
 		}); err != nil {
@@ -272,10 +273,19 @@ func (a *App) buildWorkers(opts Options) error {
 	}, scheduler.Config{
 		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, RetrySettle: a.retrySettle,
 		SweepInterval: cfg.Process.SweepInterval,
+		Proactive:     scheduler.ProactiveConfig{Limits: proactiveLimits(cfg)},
 	}); err != nil {
 		return fmt.Errorf("app: scheduler: %w", err)
 	}
 	return nil
+}
+
+// proactiveLimits are the operator's caps of proactive work, the same for the
+// scheduled sweep and the manual run.
+func proactiveLimits(cfg config.Config) store.ProactiveLimits {
+	return store.ProactiveLimits{
+		DailyJobs: cfg.Agent.ProactiveDailyJobs, DailyTokens: cfg.API.UserDailyTokens, KillSwitchEnv: cfg.Agent.KillSwitch,
+	}
 }
 
 // workerPrefix is "<hostname>-<pid>" ("agent" without a usable host name):

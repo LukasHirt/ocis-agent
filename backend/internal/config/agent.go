@@ -16,6 +16,9 @@ type AgentConfig struct {
 	MaxTokens   int           // output limit per model call
 	LeaseTTL    time.Duration // job lease duration
 	KillSwitch  bool          // stop all agent work
+	// ProactiveDailyJobs caps the proactive jobs (scheduled, file event,
+	// manual) a user gets per UTC day
+	ProactiveDailyJobs int
 }
 
 func loadAgent(getenv func(string) string) (AgentConfig, error) {
@@ -32,6 +35,7 @@ func loadAgent(getenv func(string) string) (AgentConfig, error) {
 		{"AGENT_MAX_ATTEMPTS", 3, 1, 20, &a.MaxAttempts},
 		{"AGENT_MAX_RUNS", 20, 1, 1000, &a.MaxRuns},
 		{"AGENT_LLM_MAX_TOKENS", 4096, 64, 100000, &a.MaxTokens},
+		{"AGENT_PROACTIVE_DAILY_JOBS", 24, 1, 1000, &a.ProactiveDailyJobs},
 	}
 	for _, f := range ints {
 		*f.dst = f.def

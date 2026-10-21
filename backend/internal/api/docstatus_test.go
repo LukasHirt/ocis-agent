@@ -35,6 +35,9 @@ func TestAPIDocErrorStatuses(t *testing.T) {
 	} {
 		add(e.code, e.status)
 	}
+	for _, e := range proactiveRefusals {
+		add(e.code, e.status)
+	}
 	// the mapped sentinels
 	for _, err := range []error{
 		approvals.ErrJobEnded, approvals.ErrActionLimit, store.ErrLimit, store.ErrNotFound, store.ErrInvalid,

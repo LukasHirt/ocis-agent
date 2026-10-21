@@ -142,7 +142,7 @@ Every setting comes from the environment. Logs are JSON lines on stderr.
   catalog is empty.
 - `worker`: the job workers (`AGENT_WORKERS`) and the scheduler, which does all maintenance: token
   renewal and the token sweep, approval expiry, the dormancy pause, the lease reaper and the
-  settling of approvals of ended jobs. It needs the `AGENT_LLM_*` settings; start-up refuses
+  settling of approvals of ended jobs, and starts the scheduled proactive reviews. It needs the `AGENT_LLM_*` settings; start-up refuses
   otherwise.
 
 **Run exactly one process with the worker role per database.** An api-only process runs no
@@ -181,6 +181,7 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_API_BURST` | `40` | Burst of the per-user rate limit (1 to 5000). |
 | `AGENT_API_STREAMS_PER_USER` | `3` | Open event streams per user (1 to 10). |
 | `AGENT_API_STREAMS_TOTAL` | `200` | Open event streams in the process (1 to 5000). |
+| `AGENT_PROACTIVE_DAILY_JOBS` | `24` | Proactive reviews (scheduled, file change and on request) per user and UTC day (1 to 1000). |
 | `AGENT_USER_DAILY_TOKENS` | `200000` | The operator's cap and default of a user's daily model-token budget (1000 to 1000000000). |
 | `AGENT_LLM_BASE_URL` | none | The model endpoint, for example `https://api.openai.com/v1`. https, or http only for a loopback host. Required by the worker role and by the other `AGENT_LLM_*` variables of this table except `AGENT_LLM_MAX_TOKENS`. |
 | `AGENT_LLM_PROVIDER` | `openai` | The wire protocol; only `openai` (OpenAI-compatible chat completions). |
