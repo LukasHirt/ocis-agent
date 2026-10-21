@@ -2,7 +2,7 @@
 OCIS_DEV_PORT ?= 9200
 AGENT_DEV_PORT ?= 9300
 
-.PHONY: backend-test backend-vet frontend-build frontend-test license-check dev-up dev-down spike sidecar
+.PHONY: backend-test backend-vet frontend-build frontend-test license-check dev-up dev-down spike sidecar integration-test
 
 # needs the REUSE tool: uv tool install "reuse[charset-normalizer]"
 license-check:
@@ -36,6 +36,13 @@ dev-down:
 
 spike:
 	go run -C backend ./cmd/spike -base https://localhost:$(OCIS_DEV_PORT) $(ARGS)
+
+# the end-to-end test against the running dev stack; it starts its own sidecar (temporary data dir and key, free
+# ports, a fake model) and cleans up after itself. ARGS go to go test, e.g. ARGS='-run TestDevStack/memory -v'
+integration-test:
+	@curl -skf -o /dev/null --max-time 5 https://localhost:$(OCIS_DEV_PORT)/.well-known/openid-configuration || \
+		{ echo "the dev stack does not answer at https://localhost:$(OCIS_DEV_PORT): start it with 'make dev-up' (or 'docker compose up -d' after the first start)"; exit 1; }
+	OCIS_DEV_PORT=$(OCIS_DEV_PORT) go test -C backend -tags integration -count=1 -timeout 15m ./internal/integration/... $(ARGS)
 
 # the sidecar listens on :$(AGENT_DEV_PORT) (default 9300) and serves the REST API under /agent-api/v1 (nginx routes /agent-api/ to it;
 # state-changing requests must come from AGENT_ALLOWED_ORIGIN, default the oCIS URL). Local state and a stable dev master key

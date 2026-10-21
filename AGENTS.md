@@ -25,6 +25,7 @@ everything a contributor needs.
 - `make frontend-test frontend-build` Vitest and the production extension build; `pnpm build:w` (in `frontend/`) rebuilds `dist/` on change for the dev stack, which mounts it
 - `make license-check` REUSE lint (must pass before every commit)
 - `make dev-up dev-down` local oCIS stack (after the first `make dev-up`, `docker compose up -d` also works; a fresh clone first needs `dev/certs` and `frontend/dist`, which `make dev-up` creates, and creating them via a bare compose run leaves root-owned bind-mount directories on Linux); `make sidecar` runs the sidecar against the dev stack (dev master key and database persist in `backend/bin/data`; delete it to reset local state; never use that key outside local development); `make spike` runs a probe of app-token renewal, SSE events and WebDAV preconditions against the dev stack
+- `make integration-test` runs the end-to-end test (`backend/internal/integration`, build tag `integration`) against the running dev stack: it logs in as `einstein` through the oCIS IdP, starts its own sidecar (built binary, temporary data dir and master key, free loopback ports, a scripted fake model) and drives the REST API like the browser. It never touches `backend/bin/data` or a sidecar you run yourself, and cleans up after itself (unenrolment, its app tokens, its files and their trash entries; `/.ocis-agent` only if it was not there before). Without the stack `go test` skips the scenarios (with how to start it), and the make target says so and fails
 
 ## Conventions
 
