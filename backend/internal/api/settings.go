@@ -259,6 +259,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
+		if !pol.ProactiveEnabled && slices.Contains(changed, "proactive_enabled") {
+			// switched off: its live jobs (queued, requeued, running or
+			// waiting for approval) stop, so no proposal comes after "off"
+			if err := s.cancelProactiveJobs(tx, p.UserID); err != nil {
+				return err
+			}
+		}
 		if !pol.ProactiveEnabled || !slices.Contains(changed, "proactive_enabled") {
 			if slices.Contains(changed, "watch") {
 				// a pending change may be of a folder no longer watched;
@@ -283,6 +290,36 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, s.settingsView(out))
+	return nil
+}
+
+// cancelProactiveJobs cancels the user's live proactive jobs and audits each
+// like a cancel. A running one stops at its worker's next write (and the
+// runner cancels one that is claimed again while proactive work is off).
+func (s *Server) cancelProactiveJobs(tx store.Tx, userID string) error {
+	jobs, err := tx.ListJobs(userID, store.JobFilter{
+		States: []store.JobState{store.JobQueued, store.JobRunning, store.JobWaitingApproval}, Limit: 1000,
+	})
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		if !store.IsProactiveTrigger(j.TriggerKind) {
+			continue
+		}
+		switch err := tx.CancelJob(userID, j.ID); {
+		case errors.Is(err, store.ErrConflict): // ended meanwhile
+			continue
+		case err != nil:
+			return err
+		}
+		if _, err := tx.AppendAudit(audit.Event{
+			UserID: userID, TS: s.d.Now(), JobID: j.ID, Kind: audit.KindJobCancelled, Cred: "oidc",
+			Outcome: "cancelled", Detail: "proactive_disabled",
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

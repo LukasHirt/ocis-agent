@@ -180,7 +180,7 @@ func TestRenderResultTotalCap(t *testing.T) {
 func TestReasonsAreFixedPlainSentences(t *testing.T) {
 	for _, r := range []string{ReasonStepLimit, ReasonRunsLimit, ReasonLoop, ReasonBudget, ReasonKillSwitch,
 		ReasonCredentials, ReasonModelAuth, ReasonModelRejected, ReasonModelBad, ReasonCutOff,
-		ReasonTooLarge, ReasonInternal, ReasonRejectedByUser} {
+		ReasonTooLarge, ReasonInternal, ReasonRejectedByUser, ReasonProactiveOff} {
 		if r == "" || strings.Contains(r, "%") || !strings.HasSuffix(r, ".") {
 			t.Errorf("bad reason %q", r)
 		}

@@ -505,7 +505,9 @@ why nothing runs yet. Cooldown: 1 s per user (`429 rate_limited`).
 
 With `proactive_enabled`, the agent reviews the user's recent file changes and open tasks on its
 own, every `sweep_interval`, outside the quiet hours (UTC). The first scheduled review comes one
-interval after proactive work is switched on. A review only reads and proposes: every action
+interval after proactive work is switched on. Switching it off cancels every review that is still
+queued, running or waiting for approval (each audited as `job_cancelled` with detail
+`proactive_disabled`; a running one stops at its next step). A review only reads and proposes: every action
 other than a read or a memory write becomes an approval. Its goal is a fixed text, never a file
 name or other data. A review is not started while the kill switch is on or the agent is paused
 (any reason), while another review (of any kind) is queued, running or waiting for approval,

@@ -694,6 +694,7 @@ func TestTheModelComesFromTheCatalogAndThePolicy(t *testing.T) {
 	f.provider = p
 	f.setPolicy(func(p *store.Policy) {
 		p.Models = map[string]string{store.ModelTaskChat: modelChat, store.ModelTaskProactive: modelPro}
+		p.ProactiveEnabled = true
 	})
 	f.enqueue("chat")
 	f.runOnce()
@@ -788,7 +789,7 @@ func TestProactiveJobsStopAtEightyPercentOfTheBudget(t *testing.T) {
 			f := newFixture(t)
 			p := llmtest.New(llmtest.Say("x", 0, 0))
 			f.provider = p
-			f.setPolicy(func(p *store.Policy) { p.DailyTokens = 100 })
+			f.setPolicy(func(p *store.Policy) { p.DailyTokens, p.ProactiveEnabled = 100, true })
 			f.enqueueKind(c.kind, "g")
 			cl := f.claim()
 			if err := f.st.InTx(bg, func(tx store.Tx) error {

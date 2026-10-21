@@ -162,8 +162,9 @@ func (r *Runner) precheck(ctx context.Context, claim store.Claim, ph phase) (sto
 }
 
 // gateCheck runs before every model call and every tool call: the kill
-// switch (requeue at claim, cancel in a run), the pause (requeue) and the
-// credentials (fail when invalid), all read from the database. It returns the
+// switch (requeue at claim, cancel in a run), the pause (requeue), proactive
+// work switched off for a proactive job (cancel) and the credentials (fail
+// when invalid), all read from the database. It returns the
 // current credentials, so a token renewed during the claim is used at once.
 // stop means the job was released.
 func (r *Runner) gateCheck(ctx context.Context, claim store.Claim, ph phase) (store.Policy, ocisclient.Creds, bool, error) {
@@ -189,6 +190,10 @@ func (r *Runner) gateCheck(ctx context.Context, claim store.Claim, ph phase) (st
 	}
 	if pol.Paused {
 		return pol, none, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
+	}
+	if store.IsProactiveTrigger(claim.Job.TriggerKind) && !pol.ProactiveEnabled {
+		// the user switched proactive work off after the job was queued
+		return pol, none, true, r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonProactiveOff})
 	}
 	creds, err := r.d.Creds.AppCreds(ctx, userID)
 	if err != nil {

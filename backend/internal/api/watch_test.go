@@ -90,3 +90,68 @@ func TestChangingTheWatchListDropsThePendingChange(t *testing.T) {
 		t.Fatalf("after a list change: %+v", c)
 	}
 }
+
+// Switching proactive work off cancels its live jobs (queued, running and
+// waiting for approval), audited like a cancel, in the same transaction;
+// chat jobs and ended jobs stay as they are.
+func TestDisablingProactiveCancelsItsLiveJobs(t *testing.T) {
+	s := newStack(t)
+	s.enroll(t, "einstein")
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"proactive_enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("enable = %d", rec.Code)
+	}
+	var ids []string
+	if err := s.st.InTx(bg, func(tx store.Tx) error {
+		for _, kind := range []string{store.TriggerSchedule, store.TriggerFileEvent, store.TriggerManual, store.TriggerChat} {
+			j, err := tx.InsertJob(store.Job{UserID: einsteinID, TriggerKind: kind, Goal: "g"})
+			if err != nil {
+				return err
+			}
+			ids = append(ids, j.ID)
+		}
+		// the schedule job is running
+		if _, _, err := tx.ClaimNextJob("w", time.Minute); err != nil {
+			return err
+		}
+		ended, err := tx.InsertJob(store.Job{UserID: einsteinID, TriggerKind: store.TriggerManual, Goal: "g"})
+		if err != nil {
+			return err
+		}
+		ids = append(ids, ended.ID)
+		return tx.CancelJob(einsteinID, ended.ID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := s.as("einstein", http.MethodPut, "/agent-api/v1/settings", `{"proactive_enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("disable = %d %s", rec.Code, rec.Body.String())
+	}
+	var cancelled []string
+	if err := s.st.View(bg, func(tx store.Tx) error {
+		for i, id := range ids {
+			j, err := tx.GetJob(einsteinID, id)
+			if err != nil {
+				return err
+			}
+			if want := i < 3 || i == 4; (j.State == store.JobCancelled) != want {
+				t.Errorf("%s job: %s", j.TriggerKind, j.State)
+			}
+		}
+		recs, err := tx.ReadAudit(einsteinID, 0, 1000)
+		for _, r := range recs {
+			if r.Kind == "job_cancelled" {
+				cancelled = append(cancelled, r.JobID+" "+r.Detail)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cancelled) != 3 {
+		t.Fatalf("job_cancelled events = %v, want one per live proactive job", cancelled)
+	}
+	for _, c := range cancelled {
+		if c[len(c)-len("proactive_disabled"):] != "proactive_disabled" {
+			t.Errorf("event %q", c)
+		}
+	}
+}
