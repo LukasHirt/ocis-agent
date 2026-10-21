@@ -186,6 +186,10 @@ const (
 // which say why proactive work did not happen. A pause is audited when it
 // happens, quiet hours are the user's own setting, and the others mean
 // there is nothing to report.
+// SkipAudited reports whether AuditProactiveSkip can record a skip for
+// reason (live_job, daily_cap and budget); for the others it never writes.
+func SkipAudited(reason string) bool { return auditedSkip(reason) }
+
 func auditedSkip(reason string) bool {
 	return reason == SkipLiveJob || reason == SkipDailyCap || reason == SkipBudget
 }

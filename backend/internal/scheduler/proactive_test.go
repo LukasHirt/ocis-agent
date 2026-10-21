@@ -717,3 +717,42 @@ func TestProactiveConfigIsValidated(t *testing.T) {
 		t.Errorf("defaults = %+v, %v", s.c.Proactive, s.c.Intervals.Proactive)
 	}
 }
+
+// txCounter counts the write transactions.
+type txCounter struct {
+	store.Store
+	mu sync.Mutex
+	n  int
+}
+
+func (c *txCounter) InTx(ctx context.Context, fn func(store.Tx) error) error {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.Store.InTx(ctx, fn)
+}
+
+// A skip that is never audited (paused, quiet hours) costs no write
+// transaction.
+func TestProactiveUnauditedSkipsNeedNoWriteTransaction(t *testing.T) {
+	for name, mod := range map[string]func(*store.Policy){
+		"paused":      func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseDormant },
+		"quiet hours": func(p *store.Policy) { p.QuietHours = "00:00-23:59" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := newFixture(t)
+			u := fx.addUsers(1)[0]
+			fx.enableProactive(u, 2*time.Hour, mod)
+			c := &txCounter{Store: fx.st}
+			fx.deps.Store = c
+			s := fx.scheduler()
+			fx.runProactive(s)
+			if c.n != 0 {
+				t.Fatalf("%d write transactions for an unaudited skip", c.n)
+			}
+			if len(fx.jobsOf(u)) != 0 {
+				t.Fatal("a job started")
+			}
+		})
+	}
+}

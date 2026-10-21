@@ -181,6 +181,11 @@ func (s *Scheduler) proactiveUser(ctx context.Context, userID string, now time.T
 	if act == proNone {
 		return false, nil
 	}
+	if act == proSkip && !store.SkipAudited(reason) {
+		// nothing to record (paused, quiet hours): no write transaction
+		s.pro.notBefore[userID] = skipWait(reason, pol, now)
+		return false, nil
+	}
 	err := s.d.Store.InTx(ctx, func(tx store.Tx) error {
 		// decide again: the state may have changed since the read
 		var err error
