@@ -1,107 +1,116 @@
 <template>
   <section class="agent-approvals agent-page">
-    <h1 v-text="title" />
+    <header class="agent-page-head agent-page-head--sticky">
+      <div class="agent-page-titles">
+        <h1 class="agent-page-title" v-text="title" />
+      </div>
+    </header>
+    <div class="agent-page-body">
 
-    <section v-if="verify.length > 0" class="agent-verify" aria-labelledby="agent-verify-h">
-      <h2 id="agent-verify-h" v-text="$gettext('Outcome unknown — please verify')" />
-      <p
-        v-text="
-          $gettext(
-            'The agent may or may not have carried out these actions: the outcome was not recorded. Check your files to see whether each one happened. The agent never repeats them on its own.'
-          )
-        "
-      />
-      <ApprovalCard v-for="a in verify" :key="a.id" :approval="a" />
-    </section>
-
-    <section class="agent-pending" aria-labelledby="agent-pending-h">
-      <h2 id="agent-pending-h" v-text="$gettext('Waiting for your decision')" />
-      <p v-if="job" class="agent-approvals-filter">
-        <span v-text="$gettext('Showing the approvals of one task.')" />
-        <router-link :to="{ name: `${APPID}-approvals` }" v-text="$gettext('Show all approvals')" />
-      </p>
-      <ErrorState
-        v-if="store.errors.approvals && (!hasData || !store.serviceDown)"
-        class="agent-approvals-error"
-        :title="store.errors.approvals"
-        :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
-        :compact="hasData"
-        :busy="store.loading.approvals"
-        @retry="retryInbox"
-      />
-      <ErrorState
-        v-if="job && jobError && !(store.errors.approvals && !hasData) && (jobList === null || !store.serviceDown)"
-        class="agent-approvals-job-error"
-        :title="jobError"
-        :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
-        :compact="jobList !== null"
-        :busy="jobLoading"
-        @retry="retryJob"
-      />
-      <LoadingState v-if="!shownLoaded" variant="cards" :count="2" :label="$gettext('Loading the approvals')" />
-      <template v-else>
-        <EmptyState
-          v-if="groups.length === 0 && !store.errors.approvals && !(job && (jobError || !jobComplete))"
-          class="agent-approvals-empty"
-          icon="checkbox-circle"
-          :title="
-            job
-              ? $gettext('Nothing of this task needs your approval')
-              : verify.length > 0
-                ? $gettext('No other actions are waiting for your decision')
-                : $gettext('Nothing needs your approval')
+      <section v-if="verify.length > 0" class="agent-verify" aria-labelledby="agent-verify-h">
+        <h2 id="agent-verify-h" class="agent-section-title" v-text="$gettext('Outcome unknown — please verify')" />
+        <p
+          v-text="
+            $gettext(
+              'The agent may or may not have carried out these actions: the outcome was not recorded. Check your files to see whether each one happened. The agent never repeats them on its own.'
+            )
           "
         />
-        <JobGroup
-          v-for="g in groups"
-          :key="g.jobId"
-          :job-id="g.jobId"
-          :items="g.items"
-          :goal="goals[g.jobId]"
-          :trigger="triggers[g.jobId]"
-        />
-        <p
-          v-if="job ? !jobComplete : !store.approvals.complete"
-          class="agent-approvals-more"
-          v-text="$gettext('More approvals are waiting than are shown here. Decide these to see the rest.')"
-        />
-      </template>
-    </section>
+        <ApprovalCard v-for="a in verify" :key="a.id" :approval="a" />
+      </section>
 
-    <section class="agent-history" aria-labelledby="agent-history-toggle">
-      <h2 class="agent-history-head">
-        <oc-button
-          id="agent-history-toggle"
-          appearance="raw"
-          :aria-expanded="historyOpen ? 'true' : 'false'"
-          aria-controls="agent-history-body"
-          @click="toggleHistory"
-          v-text="$gettext('History')"
-        />
-      </h2>
-      <div v-if="historyOpen" id="agent-history-body">
-        <ApprovalCard v-for="a in history" :key="a.id" :approval="a" />
-        <p
-          v-if="historyDone && !historyCursor && history.length === 0"
-          v-text="$gettext('No decided approvals yet')"
+      <section class="agent-pending" aria-labelledby="agent-pending-h">
+        <h2 id="agent-pending-h" class="agent-section-title" v-text="$gettext('Waiting for your decision')" />
+        <p v-if="job" class="agent-approvals-filter agent-notice agent-notice--info">
+          <span v-text="$gettext('Showing the approvals of one task.')" />
+          <router-link :to="{ name: `${APPID}-approvals` }" v-text="$gettext('Show all approvals')" />
+        </p>
+        <ErrorState
+          v-if="store.errors.approvals && (!hasData || !store.serviceDown)"
+          class="agent-approvals-error"
+          :title="store.errors.approvals"
+          :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+          :compact="hasData"
+          :busy="store.loading.approvals"
+          @retry="retryInbox"
         />
         <ErrorState
-          v-if="historyError && (history.length === 0 || !store.serviceDown)"
-          class="agent-history-error"
-          :compact="history.length > 0"
-          :title="historyError"
-          :busy="historyLoading"
-          @retry="loadHistory"
+          v-if="job && jobError && !(store.errors.approvals && !hasData) && (jobList === null || !store.serviceDown)"
+          class="agent-approvals-job-error"
+          :title="jobError"
+          :icon="store.serviceDown ? 'wifi-off' : 'error-warning'"
+          :compact="jobList !== null"
+          :busy="jobLoading"
+          @retry="retryJob"
         />
-        <LoadingState v-if="historyLoading" variant="spinner" :label="$gettext('Loading the history')" />
-        <oc-button
-          v-else-if="historyCursor && !historyError"
-          appearance="outline"
-          @click="loadHistory"
-          v-text="$gettext('Load more')"
-        />
-      </div>
-    </section>
+        <LoadingState v-if="!shownLoaded" variant="cards" :count="2" :label="$gettext('Loading the approvals')" />
+        <template v-else>
+          <EmptyState
+            v-if="groups.length === 0 && !store.errors.approvals && !(job && (jobError || !jobComplete))"
+            class="agent-approvals-empty"
+            icon="checkbox-circle"
+            :title="
+              job
+                ? $gettext('Nothing of this task needs your approval')
+                : verify.length > 0
+                  ? $gettext('No other actions are waiting for your decision')
+                  : $gettext('Nothing needs your approval')
+            "
+          />
+          <JobGroup
+            v-for="g in groups"
+            :key="g.jobId"
+            :job-id="g.jobId"
+            :items="g.items"
+            :goal="goals[g.jobId]"
+            :trigger="triggers[g.jobId]"
+          />
+          <p
+            v-if="job ? !jobComplete : !store.approvals.complete"
+            class="agent-approvals-more agent-notice agent-notice--info"
+            v-text="$gettext('More approvals are waiting than are shown here. Decide these to see the rest.')"
+          />
+        </template>
+      </section>
+
+      <section class="agent-history" aria-labelledby="agent-history-toggle">
+        <h2 class="agent-history-head agent-section-title">
+          <oc-button
+            id="agent-history-toggle"
+            appearance="raw"
+            class="agent-history-toggle"
+            :aria-expanded="historyOpen ? 'true' : 'false'"
+            aria-controls="agent-history-body"
+            @click="toggleHistory"
+          >
+            <oc-icon :name="historyOpen ? 'arrow-down-s' : 'arrow-right-s'" size="small" />
+            <span v-text="$gettext('History')" />
+          </oc-button>
+        </h2>
+        <div v-if="historyOpen" id="agent-history-body">
+          <ApprovalCard v-for="a in history" :key="a.id" :approval="a" />
+          <p
+            v-if="historyDone && !historyCursor && history.length === 0"
+            v-text="$gettext('No decided approvals yet')"
+          />
+          <ErrorState
+            v-if="historyError && (history.length === 0 || !store.serviceDown)"
+            class="agent-history-error"
+            :compact="history.length > 0"
+            :title="historyError"
+            :busy="historyLoading"
+            @retry="loadHistory"
+          />
+          <LoadingState v-if="historyLoading" variant="spinner" :label="$gettext('Loading the history')" />
+          <oc-button
+            v-else-if="historyCursor && !historyError"
+            appearance="outline"
+            @click="loadHistory"
+            v-text="$gettext('Load more')"
+          />
+        </div>
+      </section>
+    </div>
   </section>
 </template>
 
@@ -332,21 +341,37 @@ const toggleHistory = () => {
 </script>
 
 <style>
-.agent-approvals {
-  max-width: 64rem;
+.agent-approvals .agent-page-body {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: var(--agent-space-5);
 }
 .agent-approvals .agent-verify {
-  border: 2px solid var(--oc-color-swatch-danger-default, #b00020);
-  border-radius: 6px;
-  padding: var(--oc-space-medium, 1rem);
+  border-color: var(--oc-color-swatch-danger-default);
+  border-width: 2px;
+  background: color-mix(in srgb, var(--oc-color-swatch-danger-default) 5%, var(--oc-color-background-default));
+}
+.agent-approvals .agent-verify > p {
+  margin: 0;
+}
+.agent-pending,
+.agent-history,
+#agent-history-body {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--agent-space-4);
 }
 .agent-history-head {
   margin: 0;
+}
+.agent-history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-1);
+  font: inherit;
+  font-weight: 600;
+}
+.agent-history-toggle .oc-icon svg {
+  fill: currentColor;
 }
 </style>

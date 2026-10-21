@@ -409,4 +409,71 @@ describe('ApprovalCard', () => {
     expect(w.find('.agent-outcome').text()).toContain('<img src=x onerror=1>')
     expect(w.find('.agent-outcome-diff .agent-ctl').text()).toBe('\\u{202E}')
   })
+
+  it('shows the quoted targets in a summary and escapes a hostile path', async () => {
+    const { w } = await setup(
+      approvalOf('a1', {
+        tool: 'files.move',
+        risk: 'write',
+        preview: { paths: ['/a\u202Etxt.exe', '/b.txt'] }
+      })
+    )
+    const summary = w.find('.agent-card-summary')
+    expect(summary.text()).toContain('Targets:')
+    const targets = summary.findAll('.agent-card-target').map((t) => t.text())
+    expect(targets).toEqual(['"/a\\u{202E}txt.exe"', '"/b.txt"'])
+    expect(w.find('.agent-card-summary').html()).not.toContain('\u202E')
+  })
+
+  it('renders no summary when there is no target', async () => {
+    const { w } = await setup(approvalOf('a1', { args: { content: 'x' }, preview: { action: 'x' } }))
+    expect(w.find('.agent-card-summary').exists()).toBe(false)
+  })
+
+  it('never folds the arguments of a pending approval', async () => {
+    const { w } = await setup(approvalOf('a1', { args: { path: '/Docs/a.txt' } }))
+    expect(w.find('details').exists()).toBe(false)
+    expect(w.find('.agent-card-args').element.closest('details')).toBeNull()
+    expect(w.find('.agent-card-args').text()).toContain('/Docs/a.txt')
+  })
+
+  it('never folds the arguments of an approval that needs verification', async () => {
+    const { w } = await setup(
+      approvalOf('a1', {
+        state: 'unknown',
+        needs_verification: true,
+        args: { path: '/Docs/report.txt' },
+        outcome: { state: 'unknown', summary: '', reason: 'x', diff: '' }
+      })
+    )
+    expect(w.find('.agent-card-args').element.closest('details')).toBeNull()
+    expect(w.find('.agent-card-args').text()).toContain('/Docs/report.txt')
+  })
+
+  it('folds the arguments and preview of a decided approval into a disclosure that stays in the DOM', async () => {
+    const { w } = await setup(
+      approvalOf('a1', {
+        state: 'executed',
+        args: { path: '/Docs/a.txt' },
+        outcome: { state: 'done', summary: '', reason: '', diff: '' }
+      })
+    )
+    const d = w.find('details.agent-card-disclosure')
+    expect(d.exists()).toBe(true)
+    expect(d.find('summary').text()).toBe('Exact arguments and preview')
+    expect(d.find('.agent-card-args').text()).toContain('/Docs/a.txt')
+    expect(d.find('.agent-card-preview').exists()).toBe(true)
+  })
+
+  it.each([
+    ['destructive', 'danger'],
+    ['outward', 'danger'],
+    ['mystery', 'danger'],
+    ['write', 'primary']
+  ])('shows a filled Approve button with variation for %s', async (risk, variation) => {
+    const { w } = await setup(approvalOf('a1', { risk }))
+    const b = button(w, 'Approve')
+    expect(b.attributes('data-appearance')).toBe('filled')
+    expect(b.attributes('data-variation')).toBe(variation)
+  })
 })

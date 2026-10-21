@@ -368,7 +368,7 @@ describe('Approvals', () => {
         ]
       })
     )
-    const sections = w.findAll('section > section')
+    const sections = w.findAll('.agent-page-body > section')
     expect(sections[0].classes()).toContain('agent-verify')
     const verify = w.find('.agent-verify')
     expect(verify.find('h2').text()).toBe('Outcome unknown — please verify')

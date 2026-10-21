@@ -1,54 +1,60 @@
 <template>
-  <section class="agent-group" :aria-labelledby="headingId">
+  <section class="agent-group agent-surface agent-surface--muted" :aria-labelledby="headingId">
     <header class="agent-group-head">
-      <h3 :id="headingId" class="agent-group-title">
-        <span v-if="goal" class="agent-group-goal">
-          <span class="agent-label" v-text="$gettext('Task')" />
-          <TextBlock :text="goal" :max-lines="4" />
-        </span>
-        <span v-else v-text="fallbackTitle" />
-      </h3>
-      <span v-if="trigger" class="agent-group-trigger">
-        <span v-if="triggerText" v-text="triggerText" />
-        <TextBlock v-else :text="trigger" class="agent-group-raw" />
-      </span>
-      <span class="agent-group-count" v-text="countText" />
+      <div class="agent-group-main">
+        <h3 :id="headingId" class="agent-group-title">
+          <span v-if="goal" class="agent-group-goal">
+            <span class="agent-label" v-text="$gettext('Task')" />
+            <TextBlock :text="goal" :max-lines="4" />
+          </span>
+          <span v-else v-text="fallbackTitle" />
+        </h3>
+        <p class="agent-group-chips">
+          <span v-if="trigger" class="agent-group-trigger agent-chip agent-chip--neutral">
+            <span v-if="triggerText" v-text="triggerText" />
+            <TextBlock v-else :text="trigger" class="agent-group-raw" />
+          </span>
+          <span class="agent-group-count agent-chip agent-chip--neutral" v-text="countText" />
+        </p>
+      </div>
+      <div v-if="live.length > 1" class="agent-group-bulk">
+        <oc-button
+          appearance="outline"
+          size="small"
+          :disabled="bulkDisabled"
+          :aria-label="bulkAria('approve')"
+          @click="decisions.decideAll(live, 'approve')"
+          v-text="bulkLabel($gettext('Approve all %{count}'))"
+        />
+        <oc-button
+          appearance="outline"
+          size="small"
+          :disabled="bulkDisabled"
+          :aria-label="bulkAria('reject')"
+          @click="decisions.decideAll(live, 'reject')"
+          v-text="bulkLabel($gettext('Reject all %{count}'))"
+        />
+        <span
+          v-if="tooMany"
+          class="agent-group-limit"
+          v-text="
+            interpolate(
+              $gettext('More than %{max} actions cannot be decided together; decide them one by one.'),
+              { max: MAX_BULK }
+            )
+          "
+        />
+      </div>
     </header>
     <p
       v-if="proactive"
-      class="agent-group-proposal"
+      class="agent-group-proposal agent-notice agent-notice--info"
       v-text="
         $gettext(
           'The agent proposes these actions on its own. Nothing has been done yet; each one runs only if you approve it.'
         )
       "
     />
-    <div v-if="live.length > 1" class="agent-group-bulk">
-      <oc-button
-        appearance="outline"
-        :disabled="bulkDisabled"
-        :aria-label="bulkAria('approve')"
-        @click="decisions.decideAll(live, 'approve')"
-        v-text="bulkLabel($gettext('Approve all %{count}'))"
-      />
-      <oc-button
-        appearance="outline"
-        :disabled="bulkDisabled"
-        :aria-label="bulkAria('reject')"
-        @click="decisions.decideAll(live, 'reject')"
-        v-text="bulkLabel($gettext('Reject all %{count}'))"
-      />
-      <span
-        v-if="tooMany"
-        class="agent-group-limit"
-        v-text="
-          interpolate(
-            $gettext('More than %{max} actions cannot be decided together; decide them one by one.'),
-            { max: MAX_BULK }
-          )
-        "
-      />
-    </div>
     <ApprovalCard v-for="a in items" :key="a.id" :approval="a" />
   </section>
 </template>
@@ -125,42 +131,49 @@ const countText = computed(() =>
 </script>
 
 <style>
-.agent-group {
+.agent-group-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--agent-space-2) var(--agent-space-4);
+  align-items: start;
+}
+.agent-group-main {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  margin-bottom: 1.5rem;
-}
-.agent-group-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
+  min-width: 0;
 }
 .agent-group-title {
   margin: 0;
-  font-size: 1.1em;
+  font-size: var(--agent-font-m);
+  font-weight: 600;
+  min-width: 0;
 }
-.agent-group-trigger {
-  font-size: 0.85em;
-  padding: 0 0.5rem;
-  border: 1px solid var(--oc-color-border, #ddd);
-  border-radius: 999px;
+.agent-group-chips {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--agent-space-2);
 }
 .agent-group-raw {
-  font-family: var(--oc-font-family-mono, monospace);
+  font-family: var(--agent-font-mono);
 }
 .agent-group-proposal {
   margin: 0;
-  color: var(--oc-color-text-muted, #666);
-}
-.agent-group-count {
-  color: var(--oc-color-text-muted, #666);
 }
 .agent-group-bulk {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: flex-end;
+  gap: var(--agent-space-2);
+}
+@container agent (max-width: 699px) {
+  .agent-group-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .agent-group-bulk {
+    justify-content: flex-start;
+  }
 }
 </style>
