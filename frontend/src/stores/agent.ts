@@ -40,6 +40,8 @@ export const VERIFY_HEAD_PAGES = 5
 
 // While the service cannot be reached the status is read again after these
 // delays (ms); after the last one it repeats.
+// Screen errors that look like an outage start a status read at most this often.
+export const PROBE_MIN_MS = 5_000
 export const SERVICE_RETRY_MS = [2000, 4000, 8000, 16000, 30000] as const
 
 export type Resource = 'status' | 'approvals' | 'settings'
@@ -169,6 +171,10 @@ export const useAgentStore = defineStore('ocis-agent', () => {
   let retryTimerOf: Session | null = null
   let retryAttempt = 0
   let retryInflight: Promise<void> | null = null
+  // recovering: the full refresh that follows the end of an outage (a
+  // stream `ready` meanwhile joins it instead of repeating it)
+  let recovering: Promise<void> | null = null
+  let lastProbe = -Infinity
   const listeners = new Set<StoreListener>()
 
   // subscribe registers a screen store for the session's events; it
@@ -294,21 +300,34 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     serviceDown.value = false
     reconnecting.value = false
     retryAttempt = 0
-    void refreshAll({ fresh: true })
-    void tell({ type: 'refresh', fresh: true })
+    const p = Promise.all([refreshAll({ fresh: true }), tell({ type: 'refresh', fresh: true })]).then(
+      () => undefined
+    )
+    recovering = p
+    void p.finally(() => {
+      if (recovering === p) recovering = null
+    })
   }
 
-  // reportError lets a screen store tell that one of its reads found the
-  // service unreachable.
+  // reportError lets a screen store tell that one of its reads could not
+  // reach the service. It only probes (at most once per PROBE_MIN_MS): the
+  // outage starts when the status read fails too, so an error the sidecar
+  // answered never shows the banner.
   const reportError = (e: unknown): void => {
-    if (session && isUnavailable(e)) markDown(session)
+    const s = session
+    if (!s || serviceDown.value || !isUnavailable(e)) return
+    const now = s.platform.now()
+    if (now - lastProbe < PROBE_MIN_MS) return
+    lastProbe = now
+    void refresh('status', true)
   }
 
-  // retryNow reads the status at once (a retry in flight is reused) and
-  // restarts the delays.
+  // retryNow reads the status at once (a retry in flight is reused); during
+  // an outage it also restarts the delays.
   const retryNow = async (): Promise<void> => {
     const s = session
-    if (!s || !serviceDown.value) return
+    if (!s) return
+    if (!serviceDown.value) return refresh('status', true)
     clearRetryTimer()
     retryAttempt = 0
     await retry(s)
@@ -463,6 +482,8 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     clearRetryTimer()
     retryAttempt = 0
     retryInflight = null
+    recovering = null
+    lastProbe = -Infinity
     serviceDown.value = false
     reconnecting.value = false
   }
@@ -482,6 +503,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
       platform: opts.platform,
       client,
       onReady: guard(() =>
+        recovering ??
         Promise.all([refreshAll({ fresh: true }), tell({ type: 'refresh', fresh: true })]).then(() => undefined)
       ),
       onPoll: guard(() =>

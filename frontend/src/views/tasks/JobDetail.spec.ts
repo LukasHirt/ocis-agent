@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import JobDetail from './JobDetail.vue'
 import { PLATFORM_KEY } from '../../platform'
-import { apiErr, approvalOf } from '../../test/fixtures'
+import { apiErr, gatewayErr, approvalOf } from '../../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../../test/server'
 import { jobOf, jobsHandler, jobsState, stepOf, type JobsState } from '../../test/jobs'
 import { useJobsStore } from '../../stores/jobs'
@@ -183,7 +183,7 @@ describe('JobDetail', () => {
   it('shows a load error with a retry', async () => {
     let fail = true
     const st = jobsState({ jobs: [jobOf('j1')] })
-    const { w } = await setup(st, 'j1', (c) => (fail && c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined))
+    const { w } = await setup(st, 'j1', (c) => (fail && (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined))
     expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     fail = false
     await button(w, 'Try again')!.trigger('click')
@@ -224,7 +224,7 @@ describe('JobDetail during an outage', () => {
   it('keeps the task and shows no inline error while the service is down', async () => {
     let fail = false
     const { w, jobs, store } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
-      fail && c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined
+      fail && (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined
     )
     fail = true
     await jobs.refreshDetail()
@@ -236,7 +236,7 @@ describe('JobDetail during an outage', () => {
 
   it('shows exactly one error card with no data', async () => {
     const { w } = await setup(jobsState({ jobs: [jobOf('j1')] }), 'j1', (c) =>
-      c.path === '/jobs/j1' ? apiErr(503, 'unavailable') : undefined
+      (c.path === '/jobs/j1' || c.path === '/status') ? gatewayErr() : undefined
     )
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')

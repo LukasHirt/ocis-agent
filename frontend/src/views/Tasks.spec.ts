@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Tasks from './Tasks.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, json, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { jobOf, jobsHandler, jobsState, type JobsState } from '../test/jobs'
 import { useJobsStore } from '../stores/jobs'
@@ -241,7 +241,7 @@ describe('Tasks during an outage', () => {
   it('keeps the list and shows no inline error while the service is down', async () => {
     let down = false
     const { w, store } = await setup(jobsState({ jobs: [jobOf('j1')] }), {}, (c) =>
-      down && c.path === '/jobs' ? apiErr(503, 'unavailable') : undefined
+      down && (c.path === '/jobs' || c.path === '/status') ? gatewayErr() : undefined
     )
     down = true
     await useJobsStore().refresh()
@@ -266,7 +266,7 @@ describe('Tasks during an outage', () => {
   })
 
   it('shows exactly one error card with no data, with the wifi icon when unreachable', async () => {
-    const { w, store } = await setup(jobsState(), {}, (c) => (c.path === '/jobs' ? apiErr(503, 'unavailable') : undefined))
+    const { w, store } = await setup(jobsState(), {}, (c) => ((c.path === '/jobs' || c.path === '/status') ? gatewayErr() : undefined))
     expect(store.serviceDown).toBe(true)
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')

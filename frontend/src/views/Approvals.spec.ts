@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Approvals from './Approvals.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, approvalOf, json } from '../test/fixtures'
+import { apiErr, gatewayErr, approvalOf, json } from '../test/fixtures'
 import { fakeServer, startStore, type Call, type Handler } from '../test/server'
 import type { Approval } from '../api/types'
 
@@ -677,7 +677,7 @@ describe('Approvals during an outage', () => {
     let fail = false
     const { w, store } = await setup(
       serve({ pending: [approvalOf('a1')] }, {}, (c) =>
-        fail && c.path === '/approvals' ? apiErr(503, 'unavailable') : undefined
+        fail && (c.path === '/approvals' || c.path === '/status') ? gatewayErr() : undefined
       )
     )
     fail = true
@@ -690,7 +690,7 @@ describe('Approvals during an outage', () => {
 
   it('shows exactly one error card with no data', async () => {
     const { w } = await setup(
-      serve({ pending: [approvalOf('a1')] }, {}, (c) => (c.path === '/approvals' ? apiErr(503, 'unavailable') : undefined))
+      serve({ pending: [approvalOf('a1')] }, {}, (c) => ((c.path === '/approvals' || c.path === '/status') ? gatewayErr() : undefined))
     )
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')

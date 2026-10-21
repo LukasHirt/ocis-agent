@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Settings from './Settings.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, json, settingsOf, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Call, type Handler } from '../test/server'
 import type { ProactiveState, Settings as SettingsT, Status } from '../api/types'
 
@@ -124,9 +124,11 @@ describe('Settings', () => {
   describe('layout', () => {
     it('has a section nav whose buttons scroll to and focus the section heading', async () => {
       const scrolled: string[] = []
+      const behaviors: unknown[] = []
       const orig = Element.prototype.scrollIntoView
-      Element.prototype.scrollIntoView = function (this: Element) {
+      Element.prototype.scrollIntoView = function (this: Element, arg?: boolean | ScrollIntoViewOptions) {
         scrolled.push(this.id)
+        behaviors.push(typeof arg === 'object' ? arg.behavior : undefined)
       }
       try {
         const server = fakeServer(settingsServer().handler)
@@ -146,11 +148,37 @@ describe('Settings', () => {
         ])
         await attached.find('nav.agent-settings-nav').findAll('button')[4]!.trigger('click')
         expect(scrolled).toEqual(['agent-settings-tokens-h'])
+        expect(behaviors).toEqual(['smooth'])
         expect(document.activeElement?.id).toBe('agent-settings-tokens-h')
         attached.unmount()
         host.remove()
       } finally {
         Element.prototype.scrollIntoView = orig
+      }
+    })
+
+    it('scrolls without animation when the user prefers reduced motion', async () => {
+      const behaviors: unknown[] = []
+      const orig = Element.prototype.scrollIntoView
+      const origMatch = window.matchMedia
+      Element.prototype.scrollIntoView = function (_arg?: boolean | ScrollIntoViewOptions) {
+        behaviors.push(typeof _arg === 'object' ? _arg.behavior : undefined)
+      }
+      window.matchMedia = ((q: string) => ({ matches: q.includes('reduce'), media: q })) as typeof window.matchMedia
+      try {
+        const server = fakeServer(settingsServer().handler)
+        const { platform } = await startStore(server)
+        const host = document.createElement('div')
+        document.body.appendChild(host)
+        const attached = mount(Settings, { attachTo: host, global: { provide: { [PLATFORM_KEY as symbol]: platform } } })
+        await flushPromises()
+        await attached.find('nav.agent-settings-nav').findAll('button')[2]!.trigger('click')
+        expect(behaviors).toEqual(['auto'])
+        attached.unmount()
+        host.remove()
+      } finally {
+        Element.prototype.scrollIntoView = orig
+        window.matchMedia = origMatch
       }
     })
 
@@ -634,7 +662,7 @@ describe('Settings during an outage', () => {
   it('shows no inline error while the service is down and the form is loaded', async () => {
     let fail = false
     const s = settingsServer()
-    const { w, store } = await setup((c) => (c.path === '/settings' && fail ? apiErr(503, 'unavailable') : s.handler(c)))
+    const { w, store } = await setup((c) => ((c.path === '/settings' || c.path === '/status') && fail ? gatewayErr() : s.handler(c)))
     fail = true
     await store.refreshSettings()
     await flushPromises()
@@ -645,7 +673,7 @@ describe('Settings during an outage', () => {
 
   it('shows exactly one error card with no data', async () => {
     const s = settingsServer()
-    const { w } = await setup((c) => (c.path === '/settings' ? apiErr(503, 'unavailable') : s.handler(c)))
+    const { w } = await setup((c) => ((c.path === '/settings' || c.path === '/status') ? gatewayErr() : s.handler(c)))
     expect(w.findAll('[role="alert"]')).toHaveLength(1)
     expect(w.find('[role="alert"] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
   })

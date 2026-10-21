@@ -169,7 +169,8 @@ const navItems = computed(() => [
 // The host's router owns the URL, so the nav scrolls and moves focus
 // instead of linking to a fragment.
 const go = (id: string) => {
-  document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' })
   ;(document.getElementById(id) as HTMLElement | null)?.focus({ preventScroll: true })
 }
 

@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Memory from './Memory.vue'
 import { PLATFORM_KEY } from '../platform'
-import { fakeServer, startStore } from '../test/server'
-import { apiErr } from '../test/fixtures'
+import { fakeServer, startStore, type Handler } from '../test/server'
+import { apiErr, gatewayErr } from '../test/fixtures'
 import { memoryHandler, memoryState, setFile, type MemoryState } from '../test/memory'
 import { useMemoryStore } from '../stores/memory'
 
@@ -13,8 +13,8 @@ afterEach(() => {
   wrapper = undefined
 })
 
-const setup = async (st: MemoryState, props: { name?: string } = {}) => {
-  const server = fakeServer(memoryHandler(st))
+const setup = async (st: MemoryState, props: { name?: string } = {}, extra?: Handler) => {
+  const server = fakeServer((c) => extra?.(c) ?? memoryHandler(st)(c))
   const agent = await startStore(server)
   const push = vi.fn()
   wrapper = mount(Memory, {
@@ -95,6 +95,18 @@ describe('Memory', () => {
     expect(push).toHaveBeenCalledWith({ name: 'agent-memory-file', params: { name: ['notes', 'trip.md'] } })
   })
 
+  it('leaves the new-note form when a file is opened from the list', async () => {
+    const st = memoryState({ 'notes/a.md': 'A' })
+    const { w } = await setup(st)
+    await button(w, 'New note')!.trigger('click')
+    expect(w.find('.agent-memory-new').exists()).toBe(true)
+    await w.setProps({ name: 'notes/a.md' })
+    await flushPromises()
+    await w.setProps({ name: undefined })
+    await flushPromises()
+    expect(w.find('.agent-memory-new').exists()).toBe(false)
+  })
+
   it('updates the open file when the agent changed it', async () => {
     const st = memoryState({ 'notes/a.md': 'old' })
     const { w, events, platform } = await setup(st, { name: 'notes/a.md' })
@@ -128,8 +140,9 @@ describe('Memory without a session', () => {
 describe('Memory during an outage', () => {
   it('keeps the files and shows no inline error while the service is down', async () => {
     const st = memoryState({ 'notes/a.md': 'a' })
-    const { w, store } = await setup(st)
-    st.list = apiErr(503, 'unavailable')
+    let down = false
+    const { w, store } = await setup(st, {}, (c) => (down && (c.path === '/memory' || c.path === '/status') ? gatewayErr() : undefined))
+    down = true
     await useMemoryStore().refreshList()
     await flushPromises()
     expect(store.serviceDown).toBe(true)
@@ -139,9 +152,7 @@ describe('Memory during an outage', () => {
   })
 
   it('shows exactly one error card with no data', async () => {
-    const st = memoryState()
-    st.list = apiErr(503, 'unavailable')
-    const { w } = await setup(st)
+    const { w } = await setup(memoryState(), {}, (c) => (c.path === '/memory' || c.path === '/status' ? gatewayErr() : undefined))
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
   })

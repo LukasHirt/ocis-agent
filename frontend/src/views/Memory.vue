@@ -110,6 +110,7 @@ watch(
     // file's etag with it
     void mem.refreshList()
     if (name) {
+      creating.value = false
       if (name !== mem.openName) void mem.open(name)
     } else {
       mem.close()

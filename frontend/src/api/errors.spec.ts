@@ -111,14 +111,14 @@ describe('isAbortError', () => {
 
 describe('isUnavailable', () => {
   it.each([
-    [new ApiError(0, 'unavailable'), true],
-    [new ApiError(503, 'unavailable'), true],
-    [new ApiError(0, 'anything'), true],
-    [new ApiError(502, 'internal'), true],
-    [new ApiError(504, 'internal'), true],
-    [new ApiError(500, 'internal'), false],
-    [new ApiError(404, 'not_found'), false],
-    [new ApiError(429, 'rate_limited'), false],
+    [new ApiError(0, 'unavailable', undefined, true), true],
+    [new ApiError(502, 'unavailable', undefined, true), true],
+    [new ApiError(0, 'unavailable'), false],
+    [new ApiError(0, 'invalid_request'), false],
+    [new ApiError(502, 'internal'), false],
+    [new ApiError(502, 'upstream_unavailable'), false],
+    [new ApiError(503, 'unavailable'), false],
+    [new ApiError(504, 'internal'), false],
     [new Error('unavailable'), false],
     [undefined, false]
   ])('%#', (e, want) => {

@@ -56,5 +56,9 @@ export const approvalOf = (id: string, over: Partial<Approval> = {}): Approval =
 export const json = (v: unknown, status = 200): Response =>
   new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
 
+// gatewayErr is what a gateway answers when the sidecar behind it is down: a
+// 502 without the sidecar's JSON error body.
+export const gatewayErr = (status = 502): Response => new Response('<html>Bad Gateway</html>', { status })
+
 export const apiErr = (status: number, code: string): Response =>
   json({ error: { code, message: 'server text' } }, status)

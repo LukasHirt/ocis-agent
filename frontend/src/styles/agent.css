@@ -20,6 +20,8 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* a focused field stays clear of the sticky save bar */
+  scroll-padding-bottom: 5rem;
 }
 .agent-main > * {
   flex: 1 0 auto;

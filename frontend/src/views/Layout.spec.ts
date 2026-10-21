@@ -4,7 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Layout from './Layout.vue'
 import { PLATFORM_KEY } from '../platform'
 import { makePlatform } from '../test/platform'
-import { apiErr, json, settingsOf, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { useAgentStore } from '../stores/agent'
 import type { Status } from '../api/types'
 
@@ -122,7 +122,7 @@ describe('Layout after the first load', () => {
 
   it('shows an unreachable service once, as the unreachable banner, and keeps the page', async () => {
     let fail = false
-    const w = mountLayout(serve(() => (fail ? apiErr(503, 'unavailable') : json(statusOf()))))
+    const w = mountLayout(serve(() => (fail ? gatewayErr() : json(statusOf()))))
     await flushPromises()
     fail = true
     await useAgentStore().refreshStatus()
@@ -163,7 +163,7 @@ describe('Layout after the first load', () => {
 
 describe('Layout before the first status', () => {
   it('shows one error card and no banner when the service is down on the first load', async () => {
-    const w = mountLayout(serve(() => apiErr(503, 'unavailable')))
+    const w = mountLayout(serve(() => gatewayErr()))
     await flushPromises()
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('.agent-layout-loading [role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')

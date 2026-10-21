@@ -42,8 +42,7 @@ const platform = usePlatform()
 const { $gettext } = useGettext()
 
 const retry = () => {
-  void store.refreshStatus()
-  if (store.serviceDown) void store.retryNow()
+  void store.retryNow() // one status read, with the delays restarted during an outage
 }
 
 onMounted(() => store.start({ platform, gettext: $gettext }))

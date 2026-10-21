@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/errors'
 import type { EventClient, EventClientOptions, Timers } from '../api/events'
-import { apiErr, approvalOf, json, settingsOf, statusOf } from '../test/fixtures'
+import { apiErr, approvalOf, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { makePlatform, type FakePlatform } from '../test/platform'
-import { FULL_REFRESH_MIN_MS, SERVICE_RETRY_MS, VERIFY_HEAD_PAGES, useAgentStore } from './agent'
+import { FULL_REFRESH_MIN_MS, PROBE_MIN_MS, SERVICE_RETRY_MS, VERIFY_HEAD_PAGES, useAgentStore } from './agent'
 
 const gettext = (s: string) => s
 
@@ -939,7 +939,7 @@ describe('useAgentStore: service state', () => {
     const rt = recordingTimers()
     const server = fakeServer(
       defaultHandlers({
-        'GET /status': () => (state.fail ? apiErr(503, 'unavailable') : json(statusOf())),
+        'GET /status': () => (state.fail ? gatewayErr() : json(statusOf())),
         ...over
       })
     )
@@ -993,7 +993,7 @@ describe('useAgentStore: service state', () => {
     const c = (ctx = down({
       'GET /status': async () => {
         if (hold) await hold
-        return apiErr(503, 'unavailable')
+        return gatewayErr()
       }
     }))
     await flush()
@@ -1088,21 +1088,104 @@ describe('useAgentStore: service state', () => {
     expect(c.rt.retries()).toHaveLength(0)
   })
 
-  it('reportError from a screen store marks the service down, once', async () => {
+  it('reportError of a transport failure only probes the status; the banner needs the status read to fail too', async () => {
     const c = (ctx = down({ 'GET /status': () => json(statusOf()) }))
     await flush()
+    const reads = c.server.count('GET /status')
+    c.store.reportError(new ApiError(0, 'unavailable', undefined, true))
+    await flush()
+    expect(c.server.count('GET /status')).toBe(reads + 1)
     expect(c.store.serviceDown).toBe(false)
-    c.store.reportError(new ApiError(0, 'unavailable'))
-    c.store.reportError(new ApiError(503, 'unavailable'))
-    expect(c.store.serviceDown).toBe(true)
-    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([2000])
-    c.store.reportError(new ApiError(500, 'internal'))
-    expect(c.rt.retries()).toHaveLength(1)
+    expect(c.rt.retries()).toHaveLength(0)
   })
 
-  it('ignores reportError of an unavailable error without a session', () => {
+  it('reportError probes at most once per PROBE_MIN_MS', async () => {
+    const c = (ctx = down({ 'GET /status': () => json(statusOf()) }))
+    await flush()
+    const reads = c.server.count('GET /status')
+    const e = new ApiError(0, 'unavailable', undefined, true)
+    c.store.reportError(e)
+    await flush()
+    c.store.reportError(e)
+    c.store.reportError(e)
+    await flush()
+    expect(c.server.count('GET /status')).toBe(reads + 1)
+    c.advance(PROBE_MIN_MS)
+    c.store.reportError(e)
+    await flush()
+    expect(c.server.count('GET /status')).toBe(reads + 2)
+  })
+
+  it('reportError starts the outage when the probe fails too, with one banner round and then the backoff', async () => {
+    const st = { fail: false }
+    const c = (ctx = down({ 'GET /status': () => (st.fail ? gatewayErr() : json(statusOf())) }))
+    await flush()
+    expect(c.store.serviceDown).toBe(false)
+    st.fail = true
+    c.store.reportError(new ApiError(0, 'unavailable', undefined, true))
+    await flush()
+    expect(c.store.serviceDown).toBe(true)
+    expect(c.rt.retries().map(([, t]) => t.ms)).toEqual([2000])
+  })
+
+  it.each([
+    ['a sidecar 502', new ApiError(502, 'upstream_unavailable')],
+    ['a sidecar 503', new ApiError(503, 'unavailable')],
+    ['a client validation error', new ApiError(0, 'invalid_request')],
+    ['a malformed page', new ApiError(502, 'internal')]
+  ])('reportError ignores %s', async (_n, e) => {
+    const c = (ctx = down({ 'GET /status': () => json(statusOf()) }))
+    await flush()
+    const reads = c.server.count('GET /status')
+    c.store.reportError(e)
+    await flush()
+    expect(c.server.count('GET /status')).toBe(reads)
+    expect(c.store.serviceDown).toBe(false)
+  })
+
+  it('a malformed approvals page is an error of the approvals only: no banner, no retry loop', async () => {
+    const c = (ctx = down({
+      'GET /status': () => json(statusOf()),
+      'GET /approvals': () => json({ nope: true })
+    }))
+    await flush()
+    expect(c.store.errors.approvals).not.toBeNull()
+    expect(c.store.serviceDown).toBe(false)
+    expect(c.rt.retries()).toHaveLength(0)
+  })
+
+  it('a stream ready right after the recovery joins the recovery refresh', async () => {
+    const c = (ctx = down())
+    await flush()
+    c.state.fail = false
+    const seen: string[] = []
+    c.store.subscribe((e) => {
+      seen.push(e.type)
+    })
+    c.rt.fireRetry()
+    await flush()
+    const ready = c.events.made.opts!.onReady()
+    c.advance(60_000)
+    for (const [h, t] of [...c.rt.all.entries()]) {
+      c.rt.all.delete(h)
+      t.fn()
+    }
+    await flush()
+    await ready
+    expect(seen).toEqual(['refresh'])
+  })
+
+  it('retryNow without an outage makes exactly one status read', async () => {
+    const c = (ctx = down({ 'GET /status': () => json(statusOf()) }))
+    await flush()
+    const reads = c.server.count('GET /status')
+    await c.store.retryNow()
+    expect(c.server.count('GET /status')).toBe(reads + 1)
+  })
+
+  it('ignores reportError without a session', () => {
     const store = useAgentStore()
-    store.reportError(new ApiError(0, 'unavailable'))
+    store.reportError(new ApiError(0, 'unavailable', undefined, true))
     expect(store.serviceDown).toBe(false)
   })
 })

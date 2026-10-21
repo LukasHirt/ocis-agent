@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { apiErr, approvalOf, json, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, approvalOf, json, statusOf } from '../test/fixtures'
 import { useAgentStore } from './agent'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import {
@@ -87,10 +87,24 @@ describe('useChatStore', () => {
     expect(chat.conversationsError).toBeNull()
   })
 
-  it('reports an unreachable service to the agent store when loading fails', async () => {
-    const { chat } = await setup(chatState(), (c) => (c.path === '/conversations' ? apiErr(0, 'unavailable') : undefined))
+  it('shows the outage banner state only when the status cannot be read either', async () => {
+    let down = false
+    const { chat } = await setup(chatState(), (c) => (down && ('/conversations' === c.path || c.path === '/status') ? gatewayErr() : undefined))
+    down = true
     await chat.loadConversations()
+    await flushPromises()
     expect(useAgentStore().serviceDown).toBe(true)
+  })
+
+  it('keeps the error to the screen when the sidecar itself answers 502 and the status works', async () => {
+    let down = false
+    const { chat, server } = await setup(chatState(), (c) => (down && '/conversations' === c.path ? apiErr(502, 'upstream_unavailable') : undefined))
+    down = true
+    const reads = server.count('GET', '/status')
+    await chat.loadConversations()
+    await flushPromises()
+    expect(useAgentStore().serviceDown).toBe(false)
+    expect(server.count('GET', '/status')).toBe(reads)
   })
 
   it('does not report other errors as an outage', async () => {

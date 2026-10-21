@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Activity from './Activity.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr } from '../test/fixtures'
+import { apiErr, gatewayErr } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { auditHandler, auditState, eventOf, eventsUpTo, type AuditState } from '../test/audit'
 import { AUDIT_PAGE, useAuditStore } from '../stores/audit'
@@ -195,7 +195,7 @@ describe('Activity during an outage', () => {
   it('keeps the events and shows no inline error while the service is down', async () => {
     let down = false
     const { w, store } = await setup(auditState({ events: eventsUpTo(1) }), (c) =>
-      down && c.path === '/audit' ? apiErr(503, 'unavailable') : undefined
+      down && (c.path === '/audit' || c.path === '/status') ? gatewayErr() : undefined
     )
     down = true
     await useAuditStore().refresh()
@@ -207,7 +207,7 @@ describe('Activity during an outage', () => {
   })
 
   it('shows exactly one error card with no data', async () => {
-    const { w } = await setup(auditState(), (c) => (c.path === '/audit' ? apiErr(503, 'unavailable') : undefined))
+    const { w } = await setup(auditState(), (c) => ((c.path === '/audit' || c.path === '/status') ? gatewayErr() : undefined))
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('[role=alert] .agent-state-title').text()).toBe('The agent service is not reachable right now. Try again later.')
     expect(w.find('[role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')

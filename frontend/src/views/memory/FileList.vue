@@ -32,7 +32,7 @@
             <span class="agent-memory-file-missing-name" v-text="name" />
             <span class="agent-memory-file-meta agent-meta" v-text="$gettext('Not created yet')" />
           </div>
-          <oc-button class="agent-row-aside" size="small" appearance="outline" :disabled="mem.creating" @click="createCore(name)">
+          <oc-button class="agent-row-aside" size="small" appearance="outline" :disabled="mem.creating || mem.dirty" :title="mem.dirty ? $gettext('Save or discard your changes first.') : undefined" @click="createCore(name)">
             <oc-icon name="add" size="small" />
             <span v-text="$gettext('Create')" />
           </oc-button>

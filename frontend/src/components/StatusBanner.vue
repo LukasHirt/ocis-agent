@@ -1,9 +1,9 @@
 <template>
-  <div class="agent-banners">
+  <div class="agent-banners" role="status" aria-live="polite">
     <div
       v-if="view"
       :class="['agent-banner', `agent-banner-${view.severity}`, `agent-banner-${kind}`]"
-      role="status"
+      :role="kind === 'status_error' ? 'alert' : undefined"
     >
       <oc-icon :name="view.icon" :fill-type="view.fillType ?? 'fill'" />
       <div class="agent-banner-text">
@@ -56,7 +56,6 @@
     <span
       v-if="chip"
       class="agent-connection agent-chip agent-chip--neutral"
-      role="status"
       :title="chip === 'polling' ? $gettext('Live updates are unavailable; refreshing regularly.') : undefined"
     >
       <oc-icon

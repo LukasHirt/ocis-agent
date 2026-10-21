@@ -58,10 +58,16 @@ describe('topBannerOf', () => {
     expect(topBannerOf({ serviceDown: true, statusError: 'x', status })).toBe('unreachable')
     expect(topBannerOf({ serviceDown: true, statusError: null, status: null })).toBe('unreachable')
   })
-  it('shows a status error only together with a status, over the status banners', () => {
+  it('shows a status error only together with a status, and never over a known agent state', () => {
     expect(topBannerOf({ ...none, statusError: 'x' })).toBeNull()
     expect(topBannerOf({ ...none, statusError: 'x', status: statusOf() })).toBe('status_error')
-    expect(topBannerOf({ ...none, statusError: 'x', status: statusOf({ kill_switch: killed }) })).toBe('status_error')
+    expect(topBannerOf({ ...none, statusError: 'x', status: statusOf({ kill_switch: killed }) })).toBe('killswitch')
+    expect(
+      topBannerOf({ ...none, statusError: 'x', status: statusOf({ paused: true, pause_reason: 'token_anomaly' }) })
+    ).toBe('token_anomaly')
+    expect(
+      topBannerOf({ ...none, statusError: 'x', status: statusOf({ paused: true, pause_reason: 'credential_revoked' }) })
+    ).toBe('reconnect')
   })
   it('falls back to the status banner', () => {
     expect(topBannerOf({ ...none, status: statusOf({ kill_switch: killed }) })).toBe('killswitch')

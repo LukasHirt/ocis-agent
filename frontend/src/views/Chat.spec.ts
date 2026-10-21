@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Chat from './Chat.vue'
 import { PLATFORM_KEY } from '../platform'
-import { apiErr, json, statusOf } from '../test/fixtures'
+import { apiErr, gatewayErr, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import {
   answer,
@@ -294,7 +294,7 @@ describe('Chat during an outage', () => {
   it('keeps the list and the thread and shows no inline error while the service is down', async () => {
     let down = false
     const { w, chat, store } = await setup(withThread(), { id: 'c1' }, (c) =>
-      down && (c.path === '/conversations' || c.path.endsWith('/messages')) ? apiErr(503, 'unavailable') : undefined
+      down && ((c.path === '/conversations' || c.path === '/status') || c.path.endsWith('/messages')) ? gatewayErr() : undefined
     )
     down = true
     await chat.loadConversations()
@@ -308,7 +308,7 @@ describe('Chat during an outage', () => {
 
   it('shows one error, in the thread pane, when the list and the messages fail', async () => {
     const { w } = await setup(withThread(), { id: 'c1' }, (c) =>
-      c.path === '/conversations' || c.path.endsWith('/messages') ? apiErr(503, 'unavailable') : undefined
+      (c.path === '/conversations' || c.path === '/status') || c.path.endsWith('/messages') ? gatewayErr() : undefined
     )
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('.agent-chat-main [role=alert]').exists()).toBe(true)
@@ -316,7 +316,7 @@ describe('Chat during an outage', () => {
   })
 
   it('shows the list error when no conversation is open', async () => {
-    const { w } = await setup(chatState(), {}, (c) => (c.path === '/conversations' ? apiErr(503, 'unavailable') : undefined))
+    const { w } = await setup(chatState(), {}, (c) => ((c.path === '/conversations' || c.path === '/status') ? gatewayErr() : undefined))
     expect(w.findAll('[role=alert]')).toHaveLength(1)
     expect(w.find('.agent-convs [role=alert]').exists()).toBe(true)
   })
