@@ -42,9 +42,10 @@
           <div v-if="partial.text" class="agent-job-detail-partial" aria-live="off">
             <MarkdownBlock :text="partial.text" partial />
           </div>
-          <p class="agent-job-detail-partial-state agent-chip agent-chip--info">
-            <oc-icon name="loader-4" size="small" />
-            <span v-text="partial.state === 'thinking' ? $gettext('Thinking…') : $gettext('Writing…')" />
+          <p v-if="partial.state === 'thinking' || !partial.text" class="agent-msg-busy">
+            <span class="agent-msg-state" aria-hidden="true" v-text="$gettext('Thinking')" />
+            <span class="agent-dots" aria-hidden="true"><i /><i /><i /></span>
+            <span class="agent-sr-only" v-text="$gettext('The agent is thinking.')" />
           </p>
         </section>
 
@@ -244,10 +245,6 @@ const tokensText = (i: number, o: number) =>
 }
 .agent-job-detail-partial-section {
   border-style: dashed;
-}
-.agent-job-detail-partial-state {
-  margin: 0;
-  align-self: flex-start;
 }
 .agent-job-detail-facts {
   display: grid;

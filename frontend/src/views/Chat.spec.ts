@@ -93,6 +93,7 @@ describe('Chat', () => {
     await flushPromises()
     expect(w.find('.agent-msg-partial').exists()).toBe(false)
     expect(w.text()).not.toContain('Half an answer')
+    expect(w.findAll('.agent-msg-reply--error')).toHaveLength(1)
     expect(w.find('.agent-msg-error').text()).toBe('The agent stopped because the usage budget is used up.')
   })
 
@@ -139,8 +140,9 @@ describe('Chat', () => {
     await flushPromises()
     expect(server.calls.find((c) => c.method === 'POST')!.body).toEqual({ content: 'What changed?' })
     expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('')
-    expect(w.findAll('.agent-msg-content').map((m) => m.text())).toEqual(['What changed?'])
-    expect(w.find('.agent-msg-status').text()).toContain('Waiting')
+    expect(w.findAll('.agent-msg-content').map((m) => m.text())[0]).toBe('What changed?')
+    expect(w.find('.agent-msg-reply--waiting .agent-msg-state').text()).toBe('Waiting')
+    expect(w.find('.agent-chip').exists()).toBe(false)
     expect(w.find('.agent-chat-back').exists()).toBe(true)
     expect(w.find('.agent-chat').classes()).toContain('agent-chat--open')
     expect(document.activeElement).toBe(w.find('textarea').element)
@@ -163,8 +165,8 @@ describe('Chat', () => {
       await w.find('textarea').setValue('next question')
       await w.find('button.agent-composer-send').trigger('click')
       await flushPromises()
-      expect(w.findAll('.agent-msg')).toHaveLength(3)
-      expect(el.scrollTop).toBe(600)
+      expect(w.findAll('.agent-msg')).toHaveLength(4) // the new question and its waiting reply
+      expect(el.scrollTop).toBe(800)
     } finally {
       if (saved) Object.defineProperty(proto, 'scrollHeight', saved)
       else delete (proto as unknown as Record<string, unknown>).scrollHeight

@@ -13,12 +13,20 @@
     </div>
     <div class="agent-thread" role="log" aria-live="polite" :aria-label="$gettext('Messages')">
       <template v-for="m in messages" :key="m.id">
-        <MessageBubble
-          :message="m"
+        <ReplyState
+          v-if="m.role === 'system' && m.job_id"
+          :reply="replyForSystem(m, stateByJob)"
+          :announce="announced(m.id)"
+        />
+        <MessageBubble v-else :message="m" />
+        <PartialBubble v-if="partials[m.id]" :partial="partials[m.id]" />
+        <ReplyState
+          v-else-if="questionReply(m)"
+          :reply="questionReply(m)!"
           :notice="notices[m.id]"
           :approvals="m.job ? jobApprovals[m.job.id] : undefined"
+          :announce="announced(m.id)"
         />
-        <PartialBubble v-if="partials[m.id]" :partial="partials[m.id]" />
       </template>
     </div>
     <EmptyState
@@ -31,11 +39,13 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import MessageBubble from './MessageBubble.vue'
 import EmptyState from '../../components/state/EmptyState.vue'
 import PartialBubble from './PartialBubble.vue'
+import ReplyState from './ReplyState.vue'
+import { replyForQuestion, replyForSystem } from './replyState'
 import type { Message } from '../../api/types'
 import type { AgentNotice, JobApprovals, PartialAnswer } from '../../stores/chat'
 
@@ -55,6 +65,31 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'load-older': [] }>()
 useGettext()
+
+// the jobs that have a reply (any message that is not a question) and the job
+// states by id, once per change of the messages
+const replied = computed(
+  () => new Set(props.messages.filter((m) => m.role !== 'user' && m.job_id).map((m) => m.job_id))
+)
+const stateByJob = computed(() => {
+  const out = new Map<string, string>()
+  for (const m of props.messages) if (m.role === 'user' && m.job) out.set(m.job.id, m.job.state)
+  return out
+})
+const questionReply = (m: Message) =>
+  m.role === 'user' ? replyForQuestion(m, replied.value, Boolean(props.partials[m.id])) : null
+
+// Errors that were already there when the conversation was opened are not
+// announced; only those that appear afterwards are.
+const initial = new Set<string>()
+let initialDone = false
+const markInitial = (ms: Message[]) => {
+  if (initialDone || ms.length === 0) return
+  initialDone = true
+  for (const m of ms) initial.add(m.id)
+}
+markInitial(props.messages)
+const announced = (id: string) => !initial.has(id)
 
 // within this many pixels of the end counts as at the bottom
 const BOTTOM_SLACK = 24

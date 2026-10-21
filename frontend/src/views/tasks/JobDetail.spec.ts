@@ -222,7 +222,10 @@ describe('JobDetail', () => {
   it('says the model of a running job is still thinking', async () => {
     const job = jobOf('j1', { state: 'running', partial: '', partial_state: 'thinking' })
     const { w } = await setup(jobsState({ jobs: [job] }))
-    expect(w.find('.agent-job-detail-partial-section').text()).toContain('Thinking…')
+    const section = w.find('.agent-job-detail-partial-section')
+    expect(section.find('.agent-msg-busy').text()).toContain('Thinking')
+    expect(section.find('.agent-dots').exists()).toBe(true)
+    expect(section.find('.agent-chip').exists()).toBe(false)
   })
 
   it.each(['waiting_approval', 'failed', 'succeeded', 'cancelled', 'queued'])(
