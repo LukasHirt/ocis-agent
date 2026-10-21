@@ -170,7 +170,7 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 			// execute, try again later
 			return true, r.backoff(ctx, claim)
 		}
-		var afterWrite func(context.Context)
+		var afterWrite func(context.Context, bool)
 		if a.State == store.ApprovalApproved || a.State == store.ApprovalExecuting {
 			// about to execute or reconcile
 			if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
@@ -182,13 +182,16 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 				// its checks take a while: look at the kill switch, the
 				// pause and the credentials again right before the write
 				if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
+					if afterWrite != nil {
+						afterWrite(ctx, false)
+					}
 					return true, err
 				}
 			}
 		}
 		out, err := r.d.Executor.Run(ctx, claim, env, a.ID)
-		if afterWrite != nil && err == nil && out.State == approvals.OutcomeDone {
-			afterWrite(ctx)
+		if afterWrite != nil {
+			afterWrite(ctx, err == nil && out.State == approvals.OutcomeDone)
 		}
 		if err == nil && a.State == store.ApprovalExpired && a.DecidedBy == "" {
 			// expired while pending (ExpireAndResume writes no step); an

@@ -19,10 +19,11 @@ import (
 // changes to the watch-folder poll (*scheduler.OwnWrites). The runner calls
 // BeforeWrite right before it executes a freshly approved call, with the
 // paths the call names (tools.TargetPaths), and the function it returns
-// (nil: nothing to do) only once that call is done. Both are best effort and
-// run outside the executor's transactions.
+// (nil: nothing to do) exactly once afterwards, with done true only if the
+// call was done (it also ends the marks of the folders being written). Both
+// are best effort and run outside the executor's transactions.
 type OwnWrites interface {
-	BeforeWrite(ctx context.Context, env tools.Env, paths []string) func(context.Context)
+	BeforeWrite(ctx context.Context, env tools.Env, paths []string) func(ctx context.Context, done bool)
 }
 
 // Deps are the runner's collaborators; every one is required except

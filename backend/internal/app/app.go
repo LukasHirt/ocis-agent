@@ -250,7 +250,7 @@ func (a *App) buildWorkers(opts Options) error {
 		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
 		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
-	own, err := scheduler.NewOwnWrites(a.st, scheduler.OwnWritesConfig{})
+	own, err := scheduler.NewOwnWrites(a.st, a.auth.HandleUnauthorized, scheduler.OwnWritesConfig{})
 	if err != nil {
 		return fmt.Errorf("app: own writes: %w", err)
 	}
@@ -272,7 +272,7 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	if a.scheduler, err = scheduler.New(scheduler.Deps{
 		Store: a.st, Queue: a.queue, Gate: a.gate, Executor: a.executor, Env: a.env.EnvFunc(),
-		Auth: a.auth, Log: a.log, Now: a.now,
+		Auth: a.auth, Log: a.log, Now: a.now, OwnWrites: own,
 	}, scheduler.Config{
 		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, RetrySettle: a.retrySettle,
 		SweepInterval: cfg.Process.SweepInterval,

@@ -16,13 +16,14 @@ type fakeOwnWrites struct {
 	mu      sync.Mutex
 	before  [][]string
 	users   []string
-	after   int
+	after   int         // hook calls for a done write
+	ended   int         // every hook call
 	exists  func() bool // reports whether the target exists; called in BeforeWrite
 	existed []bool
 	during  func() // runs inside BeforeWrite
 }
 
-func (o *fakeOwnWrites) BeforeWrite(_ context.Context, env tools.Env, paths []string) func(context.Context) {
+func (o *fakeOwnWrites) BeforeWrite(_ context.Context, env tools.Env, paths []string) func(context.Context, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.before = append(o.before, paths)
@@ -33,10 +34,13 @@ func (o *fakeOwnWrites) BeforeWrite(_ context.Context, env tools.Env, paths []st
 	if o.during != nil {
 		o.during()
 	}
-	return func(context.Context) {
+	return func(_ context.Context, done bool) {
 		o.mu.Lock()
 		defer o.mu.Unlock()
-		o.after++
+		o.ended++
+		if done {
+			o.after++
+		}
 	}
 }
 
@@ -230,5 +234,36 @@ func TestAPauseDuringBeforeWriteStopsTheApprovedWrite(t *testing.T) {
 	}
 	if _, after := o.counts(); after != 0 {
 		t.Errorf("after called %d times", after)
+	}
+}
+
+// Every BeforeWrite is followed by exactly one hook call, so the folders it
+// marked are released at once (done only for a write that was done).
+func TestEveryBeforeWriteIsEnded(t *testing.T) {
+	cases := map[string]struct {
+		before func(f *fixture, o *fakeOwnWrites)
+		done   int
+	}{
+		"done":   {nil, 1},
+		"failed": {func(f *fixture, _ *fakeOwnWrites) { f.fake.PutFile(drive, "/a.txt", []byte("user")) }, 0},
+		"paused during the checks": {func(f *fixture, o *fakeOwnWrites) {
+			o.during = func() { f.setPolicy(func(p *store.Policy) { p.Paused, p.PauseReason = true, store.PauseUser }) }
+		}, 0},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			o := &fakeOwnWrites{}
+			var before func()
+			if c.before != nil {
+				before = func() { c.before(f, o) }
+			}
+			approvedRun(t, f, o, store.ApprovalApproved, before)
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if len(o.before) != 1 || o.ended != 1 || o.after != c.done {
+				t.Fatalf("before %d, ended %d, done %d; want 1, 1, %d", len(o.before), o.ended, o.after, c.done)
+			}
+		})
 	}
 }

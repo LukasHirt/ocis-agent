@@ -71,8 +71,9 @@ var fileEvents = map[string]bool{
 // sooner, with its usual debounce and gating, so a stream never starts a
 // job and a missed event costs nothing but time (the poll is the backstop).
 // The agent acts as the user, so its own writes send the same events (oCIS
-// gives no way to tell them apart): they bring a poll forward that finds the
-// baseline OwnWrites already moved.
+// gives no way to tell them apart): such a poll usually lands while
+// OwnWrites still settles the write, and then leaves the folder alone
+// (OwnWrites.Writing); a later one finds the baseline OwnWrites moved.
 type sseHub struct {
 	mu     sync.Mutex
 	subs   map[string]*sseSub

@@ -594,3 +594,30 @@ func TestSSEIdleStreamsReconnectAfterAModestDelay(t *testing.T) {
 		}
 	}
 }
+
+// The notification of the agent's own upload pokes a poll that runs while
+// the rebaseline still waits: the folder is left alone and no review starts.
+func TestSSEEventPokedPollDuringTheRebaseline(t *testing.T) {
+	w := newSSEFixture(t)
+	u := w.sseUsers(1)[0]
+	s := w.sseScheduler()
+	w.poll(s)
+	w.subscribe(s)
+	eventually(t, "the stream opens", func() bool { return w.streams(u) == 1 })
+	w.agentWrite(u, []string{"/Documents/up.md"}, func() {
+		w.upload(u, "/Documents/up.md")
+		w.fake.Publish("name-"+u, "1", "postprocessing-finished", `{}`)
+		eventually(t, "the event is received", func() bool { return s.sse.received.Load() == 1 })
+		w.clk.Advance(10 * time.Second)
+		if n, _ := w.poll(s); n != 1 {
+			t.Fatalf("polled %d, want the poll the event brought forward", n)
+		}
+	})
+	if c := w.cursor(u); c.WatchDirtySince != nil {
+		t.Fatalf("the agent's own upload was recorded as a change: %+v", c)
+	}
+	w.settle(s)
+	if jobs := w.fileJobs(u); len(jobs) != 0 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+}

@@ -10,13 +10,25 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
+// ownWrites returns the fixture's one OwnWrites (built on first use with
+// ownCfg), which its schedulers share like the app's.
 func (w *watchFixture) ownWrites() *OwnWrites {
 	w.t.Helper()
-	o, err := NewOwnWrites(w.st, w.ownCfg)
-	if err != nil {
-		w.t.Fatal(err)
+	if w.own == nil {
+		o, err := NewOwnWrites(w.st, w.f.HandleUnauthorized, w.ownCfg)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		w.own = o
 	}
-	return o
+	return w.own
+}
+
+// scheduler builds a scheduler that knows the fixture's OwnWrites.
+func (w *watchFixture) scheduler() *Scheduler {
+	w.t.Helper()
+	w.deps.OwnWrites = w.ownWrites()
+	return w.fixture.scheduler()
 }
 
 func (w *watchFixture) userEnv(u string) tools.Env {
@@ -35,7 +47,7 @@ func (w *watchFixture) agentWrite(u string, paths []string, write func()) {
 	after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), paths)
 	write()
 	if after != nil {
-		after(bg)
+		after(bg, true)
 	}
 }
 
@@ -173,8 +185,8 @@ func TestOwnWriteWithAPollInsideTheWriteWindow(t *testing.T) {
 		}
 	})
 	t.Run("after the write", func(t *testing.T) {
-		// the poll saw the write first: the change is recorded and the
-		// rebaseline leaves it (an accepted follow-up review)
+		// the poll sees the write before the rebaseline: the folder is
+		// being written by the agent, so the poll leaves it alone
 		w := newWatchFixture(t)
 		u := w.watchUsers(1)[0]
 		s := w.scheduler()
@@ -185,12 +197,28 @@ func TestOwnWriteWithAPollInsideTheWriteWindow(t *testing.T) {
 			w.poll(s)
 		})
 		c := w.cursor(u)
-		if c.WatchDirtySince == nil {
-			t.Fatalf("the rebaseline cleared a recorded change: %+v", c)
+		if got, want := c.WatchETags["/Documents"], w.folderETag(u, "/Documents"); c.WatchDirtySince != nil || got != want {
+			t.Fatalf("cursor = %+v, want the rebaselined %q and no change", c, want)
 		}
 		w.settle(s)
+		if jobs := w.fileJobs(u); len(jobs) != 0 {
+			t.Fatalf("jobs = %+v", jobs)
+		}
+	})
+	t.Run("a user change before the write", func(t *testing.T) {
+		w := newWatchFixture(t)
+		u := w.watchUsers(1)[0]
+		s := w.scheduler()
+		w.poll(s)
+		w.put(u, "/Documents/user.md")
+		w.agentWrite(u, []string{"/Documents/a.md"}, func() {
+			w.put(u, "/Documents/a.md")
+			w.clk.Advance(5 * time.Minute)
+			w.poll(s)
+		})
+		w.settle(s)
 		if n := len(w.fileJobs(u)); n != 1 {
-			t.Fatalf("%d file jobs, want 1", n)
+			t.Fatalf("%d file jobs, want 1 for the user's change", n)
 		}
 	})
 }
@@ -215,7 +243,7 @@ func TestOwnWriteLeavesAMovedBaselineAlone(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	after(bg)
+	after(bg, true)
 	if got := w.cursor(u).WatchETags["/Documents"]; got != `"other"` {
 		t.Fatalf("baseline = %q, want it untouched", got)
 	}
@@ -241,7 +269,7 @@ func TestOwnWriteSkipsOnAStatError(t *testing.T) {
 				fail()
 			}
 			if after != nil {
-				after(bg)
+				after(bg, true)
 			}
 			if got := w.cursor(u).WatchETags["/Documents"]; got != base {
 				t.Fatalf("baseline moved to %q despite the failed stat", got)
@@ -265,7 +293,7 @@ func TestOwnWriteFinishesUnderACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
 	start := time.Now()
-	after(ctx)
+	after(ctx, true)
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("the rebaseline waited under a cancelled context")
 	}
@@ -405,5 +433,75 @@ func TestOwnWriteSurvivesAPollRecordedAfterIt(t *testing.T) {
 	w.settle(s)
 	if n := len(w.fileJobs(u)); n != 1 {
 		t.Fatalf("%d file jobs after a user change, want 1", n)
+	}
+}
+
+// A write that did not happen clears the mark at once: the poll sees the
+// folder again (here a user change).
+func TestOwnWriteThatFailedClearsTheMark(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), []string{"/Documents/a.md"})
+	w.put(u, "/Documents/user.md")
+	w.clk.Advance(5 * time.Minute)
+	w.poll(s)
+	if c := w.cursor(u); c.WatchDirtySince != nil {
+		t.Fatal("a folder being written was recorded")
+	}
+	after(bg, false)
+	w.settle(s)
+	if n := len(w.fileJobs(u)); n != 1 {
+		t.Fatalf("%d file jobs, want 1", n)
+	}
+}
+
+// A mark that is never cleared (a lost hook) expires.
+func TestOwnWriteMarksExpire(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	w.ownWrites().markTTL = 50 * time.Millisecond
+	if after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), []string{"/Documents/a.md"}); after == nil {
+		t.Fatal("no function")
+	}
+	w.put(u, "/Documents/user.md")
+	time.Sleep(100 * time.Millisecond)
+	w.settle(s)
+	if n := len(w.fileJobs(u)); n != 1 {
+		t.Fatalf("%d file jobs, want 1 once the mark expired", n)
+	}
+}
+
+// Once the job's context has ended, the hook takes at most a few seconds,
+// even against an oCIS that does not answer.
+func TestOwnWriteIsShortAfterTheJobEnded(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	w.poll(w.scheduler())
+	after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), []string{"/Documents/a.md"})
+	w.put(u, "/Documents/a.md")
+	w.fake.Hang("PROPFIND", "/remote.php/dav/spaces/drive-"+u)
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	start := time.Now()
+	after(ctx, true)
+	if d := time.Since(start); d > 4*time.Second {
+		t.Fatalf("the hook took %v after the job ended", d)
+	}
+}
+
+func TestOwnWriteReportsA401(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	w.poll(w.scheduler())
+	after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), []string{"/Documents/a.md"})
+	w.upload(u, "/Documents/a.md")
+	w.fake.Fail("GET", "/remote.php/dav/spaces/drive-"+u+"/Documents/a.md", http.StatusUnauthorized, -1)
+	after(bg, true)
+	if got := w.f.unauthorizedUsers(); len(got) != 1 || got[0] != u {
+		t.Fatalf("HandleUnauthorized calls = %v, want one for %s", got, u)
 	}
 }

@@ -476,6 +476,9 @@ func (s *Scheduler) applyWatch(ctx context.Context, p watchPoll, now time.Time) 
 			if !slices.Contains(pol.Watch, f) {
 				continue
 			}
+			if s.d.OwnWrites != nil && s.d.OwnWrites.Writing(p.user, f) {
+				continue // the agent is writing there: its rebaseline decides
+			}
 			was, hadWas := p.base[f]
 			if cur, had := c.WatchETags[f]; had != hadWas || cur != was {
 				continue // moved since the poll started (a rebaseline): the result is stale

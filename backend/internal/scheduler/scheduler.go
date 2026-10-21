@@ -84,7 +84,8 @@ type Auth interface {
 	HandleUnauthorized(ctx context.Context, userID string) error
 }
 
-// Deps are the scheduler's collaborators; all are required.
+// Deps are the scheduler's collaborators; all are required except
+// OwnWrites.
 type Deps struct {
 	Store    store.Store
 	Queue    Queue
@@ -94,6 +95,9 @@ type Deps struct {
 	Auth     Auth
 	Log      *slog.Logger
 	Now      func() time.Time
+	// OwnWrites is optional: with it, the watch poll leaves alone the
+	// folders the agent is writing into right now.
+	OwnWrites *OwnWrites
 }
 
 // Intervals are the cadences of the tasks. Zero means the default.

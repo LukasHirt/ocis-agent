@@ -34,6 +34,7 @@ type watchFixture struct {
 	maxIn    atomic.Int32
 	envDelay time.Duration
 	ownCfg   OwnWritesConfig
+	own      *OwnWrites
 }
 
 func newWatchFixture(t *testing.T) *watchFixture {
