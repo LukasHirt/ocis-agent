@@ -3,6 +3,7 @@
 //	ocis-agent                          run the roles named by AGENT_ROLES
 //	ocis-agent migrate                  apply the database migrations and exit
 //	ocis-agent killswitch on|off|status set or show the kill switch
+//	ocis-agent backup <dest-file>       write a verified snapshot of the database
 //
 // Every setting comes from the environment (see internal/config).
 package main
@@ -38,12 +39,17 @@ const (
 	cmdRun        = "run"
 	cmdMigrate    = "migrate"
 	cmdKillSwitch = "killswitch"
+	cmdBackup     = "backup"
 )
 
 func run(args []string) error {
 	cmd, arg, err := parseArgs(args)
 	if err != nil {
 		return err
+	}
+	if cmd == cmdBackup {
+		// reads only the database location: no master key, no oCIS URL
+		return backup(config.DatabasePath(os.Getenv), arg)
 	}
 
 	cfg, err := config.Load(os.Getenv)
@@ -98,6 +104,21 @@ func run(args []string) error {
 	return a.Run(ctx)
 }
 
+// backup writes a snapshot of the database at src to dest. It never creates
+// or migrates the database and never opens the secrets: the snapshot holds
+// them sealed, and restoring it needs the same AGENT_MASTER_KEY.
+func backup(src, dest string) error {
+	info, err := sqlite.Backup(context.Background(), src, dest)
+	if errors.Is(err, sqlite.ErrNoDatabase) {
+		return fmt.Errorf("no database at %s: check AGENT_DATA_DIR / AGENT_SQLITE_PATH", src)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "backup written to %s (schema version %d)\n", dest, info.SchemaVersion)
+	return err
+}
+
 // parseArgs returns the command and its argument.
 func parseArgs(args []string) (cmd, arg string, err error) {
 	switch {
@@ -113,8 +134,13 @@ func parseArgs(args []string) (cmd, arg string, err error) {
 			return "", "", errors.New("killswitch takes one argument: on, off or status")
 		}
 		return cmdKillSwitch, args[1], nil
+	case args[0] == cmdBackup:
+		if len(args) != 2 || args[1] == "" {
+			return "", "", errors.New("backup takes one argument: the file to write (it must not exist)")
+		}
+		return cmdBackup, args[1], nil
 	}
-	return "", "", fmt.Errorf("unknown command %q (known commands: migrate, killswitch; settings come from the environment)", strings.Join(args, " "))
+	return "", "", fmt.Errorf("unknown command %q (known commands: migrate, killswitch, backup; settings come from the environment)", strings.Join(args, " "))
 }
 
 // newLogger logs JSON lines at level (debug, info, warn or error; validated
