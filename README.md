@@ -11,6 +11,12 @@ extension (`frontend/`).
 - `Dockerfile` + `deploy/docker-compose.example.yml` container image of the sidecar and an example
   deployment next to an existing oCIS
 
+## Documentation
+
+- [docs/deployment.md](docs/deployment.md) deployment, configuration (every `AGENT_*` variable),
+  operations and security checklist
+- [docs/api.md](docs/api.md) the REST API under `/agent-api/`
+
 ## Container image
 
     docker build -t ocis-agent:dev .
