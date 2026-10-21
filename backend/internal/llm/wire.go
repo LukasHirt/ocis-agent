@@ -12,6 +12,8 @@ type wireRequest struct {
 	Messages  []wireMessage `json:"messages"`
 	Tools     []wireTool    `json:"tools,omitempty"`
 	MaxTokens int           `json:"max_tokens,omitempty"`
+	// ReasoningEffort is omitted unless the operator configured it.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type wireMessage struct {
@@ -70,7 +72,7 @@ func (o *OpenAI) encode(r CompletionRequest) wireRequest {
 	if r.Model != "" {
 		model = r.Model
 	}
-	w := wireRequest{Model: model, MaxTokens: r.MaxTokens}
+	w := wireRequest{Model: model, MaxTokens: r.MaxTokens, ReasoningEffort: o.effort}
 	for _, m := range r.Messages {
 		wm := wireMessage{Role: string(m.Role), ToolCallID: m.ToolCallID}
 		if !(m.Role == RoleAssistant && len(m.ToolCalls) > 0 && m.Content == "") {

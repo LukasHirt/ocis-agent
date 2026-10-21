@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
@@ -22,6 +23,11 @@ type LLMConfig struct {
 	Catalog      llm.Catalog // the default model and the models users may choose
 	AllowedHosts []string    // empty: the host of BaseURL
 	AllowHTTP    bool        // true only for an http:// loopback endpoint
+	// Timeout bounds one model call (AGENT_LLM_TIMEOUT, default 120s).
+	Timeout time.Duration
+	// ReasoningEffort is sent as reasoning_effort when not empty
+	// (AGENT_LLM_REASONING_EFFORT).
+	ReasoningEffort string
 }
 
 // Enabled reports whether a model endpoint is configured.
@@ -35,9 +41,11 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	model := strings.TrimSpace(getenv("AGENT_LLM_MODEL"))
 	modelsRaw := getenv("AGENT_LLM_MODELS")
 	hostsRaw := getenv("AGENT_LLM_ALLOWED_HOSTS")
+	timeoutRaw := strings.TrimSpace(getenv("AGENT_LLM_TIMEOUT"))
+	effort := strings.TrimSpace(getenv("AGENT_LLM_REASONING_EFFORT"))
 
 	if baseRaw == "" {
-		if provider != "" || keyRaw != "" || keyFile != "" || model != "" || modelsRaw != "" || hostsRaw != "" {
+		if provider != "" || keyRaw != "" || keyFile != "" || model != "" || modelsRaw != "" || hostsRaw != "" || timeoutRaw != "" || effort != "" {
 			return LLMConfig{}, errors.New("AGENT_LLM_BASE_URL is required when other AGENT_LLM_ variables are set")
 		}
 		return LLMConfig{}, nil
@@ -113,5 +121,16 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 	if !llm.HostAllowed(u.Host, l.AllowedHosts) {
 		return LLMConfig{}, errors.New("AGENT_LLM_ALLOWED_HOSTS must contain the host of AGENT_LLM_BASE_URL")
 	}
+
+	l.Timeout = 120 * time.Second
+	if timeoutRaw != "" {
+		if l.Timeout, err = time.ParseDuration(timeoutRaw); err != nil || l.Timeout < 10*time.Second || l.Timeout > 30*time.Minute {
+			return LLMConfig{}, errors.New("AGENT_LLM_TIMEOUT must be a duration from 10s to 30m")
+		}
+	}
+	if effort != "" && !llm.ValidReasoningEffort(effort) {
+		return LLMConfig{}, errors.New("AGENT_LLM_REASONING_EFFORT must be none, low, medium or high")
+	}
+	l.ReasoningEffort = effort
 	return l, nil
 }
