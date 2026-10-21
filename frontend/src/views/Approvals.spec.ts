@@ -502,6 +502,29 @@ describe('Approvals', () => {
     expect(w.find('.agent-group-goal').text()).toContain('later goal')
   })
 
+  it('updates a card in the history once the user confirmed they checked it', async () => {
+    const u1 = approvalOf('u1', { state: 'unknown', needs_verification: true, args: { path: '/Docs/x.txt' } })
+    const lists = { verify: [u1] }
+    const { w } = await setup(
+      serve(lists, {}, (c) => {
+        if (c.path === '/approvals' && c.query.get('state') === 'all') return json({ approvals: [u1], next_cursor: null })
+        if (c.method !== 'POST' || c.path !== '/approvals/u1/acknowledge') return undefined
+        lists.verify = []
+        return json({ ...u1, needs_verification: false, acknowledged_at: '2026-01-01T12:00:00Z' })
+      })
+    )
+    await button(w, 'History')!.trigger('click')
+    await flushPromises()
+    const hist = () => w.find('.agent-history')
+    expect(hist().find('.agent-card-verify').exists()).toBe(true)
+    await w.find('.agent-verify').findAll('button').find((b) => b.text() === 'I checked')!.trigger('click')
+    await flushPromises()
+    expect(w.find('.agent-verify').exists()).toBe(false)
+    expect(hist().findAll('.agent-card')).toHaveLength(1)
+    expect(hist().find('.agent-card-verify').exists()).toBe(false)
+    expect(hist().findAll('button').some((b) => b.text() === 'I checked')).toBe(false)
+  })
+
   it('lists every action the server says needs verification, without scanning the history', async () => {
     const odd = approvalOf('x1', {
       state: 'executed',

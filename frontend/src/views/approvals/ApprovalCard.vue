@@ -5,13 +5,13 @@
       <strong v-text="warning" />
     </p>
     <header class="agent-card-head">
-      <code class="agent-card-tool"><TextBlock :text="approval.tool" /></code>
-      <RiskBadge :risk="approval.risk" />
+      <code class="agent-card-tool"><TextBlock :text="shown.tool" /></code>
+      <RiskBadge :risk="shown.risk" />
       <span v-if="expiry" class="agent-card-expiry" v-text="expiry" />
       <span v-if="decidedAt" class="agent-card-decided" v-text="decidedAt" />
     </header>
     <p v-if="stateLabel" class="agent-card-state" v-text="stateLabel" />
-    <div v-if="approval.needs_verification" class="agent-card-verify">
+    <div v-if="shown.needs_verification" class="agent-card-verify">
       <p
         v-text="
           $gettext(
@@ -22,15 +22,15 @@
       <oc-button
         appearance="outline"
         size="small"
-        :disabled="decisions.busy(approval.id)"
+        :disabled="decisions.busy(shown.id)"
         :aria-label="ariaLabel($gettext('I checked the outcome of %{tool}'))"
-        @click="decisions.acknowledge(approval)"
+        @click="decisions.acknowledge(shown)"
         v-text="$gettext('I checked')"
       />
     </div>
     <div class="agent-card-args">
       <span class="agent-label" v-text="$gettext('Exact arguments')" />
-      <JsonBlock :value="approval.args" />
+      <JsonBlock :value="shown.args" />
       <p
         v-if="lossy"
         class="agent-card-lossy"
@@ -43,13 +43,13 @@
     </div>
     <div class="agent-card-preview">
       <span class="agent-label" v-text="pending ? $gettext('What will happen') : $gettext('What was requested')" />
-      <JsonBlock :value="approval.preview" />
+      <JsonBlock :value="shown.preview" />
     </div>
-    <div v-if="approval.rationale" class="agent-card-rationale">
+    <div v-if="shown.rationale" class="agent-card-rationale">
       <span class="agent-label" v-text="$gettext('Agent\'s explanation (unverified)')" />
-      <TextBlock :text="approval.rationale" />
+      <TextBlock :text="shown.rationale" />
     </div>
-    <OutcomeBlock v-if="approval.outcome" :outcome="approval.outcome" />
+    <OutcomeBlock v-if="shown.outcome" :outcome="shown.outcome" />
     <template v-if="pending">
       <p
         v-if="ended"
@@ -62,14 +62,14 @@
           :variation="danger ? 'danger' : 'primary'"
           :disabled="disabled"
           :aria-label="ariaLabel($gettext('Approve %{tool}'))"
-          @click="decisions.decide(approval, 'approve')"
+          @click="decisions.decide(shown, 'approve')"
           v-text="$gettext('Approve')"
         />
         <oc-button
           appearance="outline"
           :disabled="disabled"
           :aria-label="ariaLabel($gettext('Reject %{tool}'))"
-          @click="decisions.decide(approval, 'reject')"
+          @click="decisions.decide(shown, 'reject')"
           v-text="$gettext('Reject')"
         />
       </div>
@@ -85,6 +85,7 @@ import JsonBlock from '../../components/JsonBlock.vue'
 import RiskBadge from '../../components/RiskBadge.vue'
 import OutcomeBlock from './OutcomeBlock.vue'
 import { usePlatform } from '../../platform'
+import { useAgentStore } from '../../stores/agent'
 import { formatDuration, formatTime } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
 import { needsConfirm, useDecisions } from './decisions'
@@ -94,17 +95,20 @@ import type { Approval, ApprovalState, Risk } from '../../api/types'
 // arguments, always in full), the server's preview, and the model's
 // explanation clearly marked as unverified. Every API string is text.
 const props = defineProps<{ approval: Approval }>()
+const store = useAgentStore()
+// shown is the approval as an acknowledgement returned it, if there was one
+const shown = computed(() => store.viewOf(props.approval))
 const { $gettext, interpolate } = useGettext()
 const platform = usePlatform()
 const decisions = useDecisions()
 
-const pending = computed(() => props.approval.state === ('pending' satisfies ApprovalState))
-const ended = computed(() => props.approval.job_ended)
-const danger = computed(() => needsConfirm(props.approval.risk))
-const disabled = computed(() => ended.value || decisions.busy(props.approval.id))
+const pending = computed(() => shown.value.state === ('pending' satisfies ApprovalState))
+const ended = computed(() => shown.value.job_ended)
+const danger = computed(() => needsConfirm(shown.value.risk))
+const disabled = computed(() => ended.value || decisions.busy(shown.value.id))
 
 const warning = computed(() => {
-  switch (props.approval.risk) {
+  switch (shown.value.risk) {
     case 'write' satisfies Risk:
     case 'read' satisfies Risk:
       return ''
@@ -116,15 +120,15 @@ const warning = computed(() => {
   return $gettext('The risk of this action is unknown')
 })
 
-const ariaLabel = (msgid: string) => interpolate(msgid, { tool: visibleText(props.approval.tool).text }, true)
+const ariaLabel = (msgid: string) => interpolate(msgid, { tool: visibleText(shown.value.tool).text }, true)
 
 const now = ref(platform.now())
 const tick = setInterval(() => (now.value = platform.now()), 30_000)
 onBeforeUnmount(() => clearInterval(tick))
 
 const expiry = computed(() => {
-  if (!pending.value || ended.value || !props.approval.expires_at) return ''
-  const t = Date.parse(props.approval.expires_at)
+  if (!pending.value || ended.value || !shown.value.expires_at) return ''
+  const t = Date.parse(shown.value.expires_at)
   if (Number.isNaN(t)) return ''
   const left = t - now.value
   if (left <= 0) return $gettext('expired')
@@ -134,7 +138,7 @@ const expiry = computed(() => {
 // stateLabel names the state of a decided approval that has no outcome
 // yet (approved, executing).
 const stateLabel = computed(() => {
-  const a = props.approval
+  const a = shown.value
   if (pending.value || a.outcome) return ''
   switch (a.state) {
     case 'approved' satisfies ApprovalState:
@@ -154,10 +158,10 @@ const hasUnsafeNumber = (v: unknown, depth = 0): boolean => {
   if (v !== null && typeof v === 'object') return Object.values(v).some((x) => hasUnsafeNumber(x, depth + 1))
   return false
 }
-const lossy = computed(() => hasUnsafeNumber(props.approval.args))
+const lossy = computed(() => hasUnsafeNumber(shown.value.args))
 
 const decidedAt = computed(() => {
-  const at = props.approval.executed_at ?? props.approval.decided_at
+  const at = shown.value.executed_at ?? shown.value.decided_at
   if (pending.value || !at) return ''
   return interpolate($gettext('decided %{time}'), { time: formatTime(at) }, true)
 })
