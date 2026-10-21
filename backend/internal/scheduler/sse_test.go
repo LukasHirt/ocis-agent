@@ -311,10 +311,10 @@ func (f *failingSSE) attempts() []time.Time {
 }
 
 // withServer makes the users' environments talk to srv.
-func (w *watchFixture) withServer(t *testing.T, h http.Handler) {
+func (w *watchFixture) withServer(t *testing.T, h http.Handler, opts ...ocisclient.Option) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := ocisclient.New(srv.URL)
+	c, err := ocisclient.New(srv.URL, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,5 +497,100 @@ func TestSSEOwnWritesDoNotLoop(t *testing.T) {
 	}
 	if n := len(w.fileJobs(u)); n != 2 {
 		t.Fatalf("%d file jobs after the follow-up's own write, want 2", n)
+	}
+}
+
+// polledUsers returns the users whose folders the fake was asked about.
+func (w *watchFixture) polledUsers() map[string]bool {
+	out := map[string]bool{}
+	for _, r := range w.fake.Requests() {
+		if r.Method != "PROPFIND" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(r.Path, "/remote.php/dav/spaces/drive-"); ok {
+			id, _, _ := strings.Cut(rest, "/")
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// Poked users get at most half of a run's polls, so the rotation (users
+// beyond the cap, users whose stream is down) always gets the rest.
+func TestSSEPokedPollsLeaveRoomForTheRotation(t *testing.T) {
+	w := newSSEFixture(t)
+	w.cfg.Watch.PerTick = 4
+	ids := w.sseUsers(8)
+	s := w.sseScheduler()
+	for range 3 {
+		w.poll(s) // baselines, four per run, then the rotation wraps
+	}
+	w.clk.Advance(time.Hour) // everyone is due by the interval
+	for _, id := range ids[4:] {
+		s.sse.poke(id)
+	}
+	w.fake.ResetRequests()
+	if n, _ := w.poll(s); n != 4 {
+		t.Fatalf("polled %d, want PerTick", n)
+	}
+	got := w.polledUsers()
+	poked, rotation := 0, 0
+	for id := range got {
+		if slices.Contains(ids[4:], id) {
+			poked++
+		} else {
+			rotation++
+		}
+	}
+	if poked != 2 || rotation != 2 {
+		t.Fatalf("polled %d poked and %d rotation users, want 2 and 2", poked, rotation)
+	}
+	// the poked users left over come next
+	w.fake.ResetRequests()
+	w.clk.Advance(10 * time.Second)
+	w.poll(s)
+	got = w.polledUsers()
+	left := 0
+	for _, id := range ids[4:] {
+		if got[id] {
+			left++
+		}
+	}
+	if left != 2 {
+		t.Fatalf("%d of the remaining poked users polled next, want 2 (%v)", left, got)
+	}
+}
+
+// quietSSE accepts every stream and then sends nothing, like oCIS without
+// SSE_KEEPALIVE_INTERVAL.
+type quietSSE struct{ failingSSE }
+
+func (q *quietSSE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	q.mu.Lock()
+	q.at = append(q.at, time.Now())
+	q.mu.Unlock()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	w.(http.Flusher).Flush()
+	<-r.Context().Done()
+}
+
+// A stream that only went quiet (the idle timeout) reconnects after a
+// modest delay with jitter, not at once, so quiet streams do not churn.
+func TestSSEIdleStreamsReconnectAfterAModestDelay(t *testing.T) {
+	w := newSSEFixture(t)
+	w.cfg.SSE.MinBackoff, w.cfg.SSE.StableAfter, w.cfg.SSE.IdleReconnect = time.Millisecond, time.Millisecond, 80*time.Millisecond
+	srv := &quietSSE{}
+	w.withServer(t, srv, ocisclient.WithSSEIdleTimeout(20*time.Millisecond))
+	w.sseUsers(1)
+	s := w.sseScheduler()
+	w.subscribe(s)
+	eventually(t, "several connections", func() bool { return len(srv.attempts()) >= 4 })
+	at := srv.attempts()
+	for i := 1; i < len(at); i++ {
+		// 20ms idle plus at least half of the 80ms delay
+		if gap := at[i].Sub(at[i-1]); gap < 60*time.Millisecond {
+			t.Errorf("reconnect %d came %v after the previous connection, want at least 60ms", i, gap)
+		}
 	}
 }

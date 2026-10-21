@@ -218,6 +218,8 @@ type Scheduler struct {
 	pro   proactiveState
 	watch watchState
 	sse   *sseHub // the notification streams; their events bring watch polls forward
+	// beforeApply, if set, runs before each user's poll is recorded (tests)
+	beforeApply func(user string)
 }
 
 // New validates the dependencies and the configuration.

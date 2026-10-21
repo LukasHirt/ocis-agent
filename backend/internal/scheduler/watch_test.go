@@ -33,6 +33,7 @@ type watchFixture struct {
 	inFlight atomic.Int32
 	maxIn    atomic.Int32
 	envDelay time.Duration
+	ownCfg   OwnWritesConfig
 }
 
 func newWatchFixture(t *testing.T) *watchFixture {
@@ -43,7 +44,8 @@ func newWatchFixture(t *testing.T) *watchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &watchFixture{fixture: fx, fake: fake, client: client, noCred: map[string]bool{}}
+	w := &watchFixture{fixture: fx, fake: fake, client: client, noCred: map[string]bool{},
+		ownCfg: OwnWritesConfig{Settle: time.Millisecond, Poll: time.Millisecond}}
 	fx.deps.Env = w.env
 	fx.cfg.Watch = WatchConfig{PollInterval: 5 * time.Minute, Debounce: time.Minute, MaxWait: 10 * time.Minute}
 	return w

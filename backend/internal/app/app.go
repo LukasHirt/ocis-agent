@@ -250,7 +250,7 @@ func (a *App) buildWorkers(opts Options) error {
 		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
 		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
-	own, err := scheduler.NewOwnWrites(a.st)
+	own, err := scheduler.NewOwnWrites(a.st, scheduler.OwnWritesConfig{})
 	if err != nil {
 		return fmt.Errorf("app: own writes: %w", err)
 	}

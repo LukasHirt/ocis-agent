@@ -96,11 +96,15 @@ type folderResult struct {
 type watchPoll struct {
 	user    string
 	folders map[string]folderResult
-	noCred  bool  // no usable credentials: nothing was polled
-	envErr  error // building the environment failed: nothing was polled
-	unauth  bool  // oCIS answered 401: the poll is discarded
-	cut     bool  // the run's deadline ended the poll: it is discarded and retried
-	errs    []error
+	// base is the stored baseline when the poll started: a folder whose
+	// baseline moved meanwhile (the agent's own write was rebaselined) is
+	// not recorded, so a stale poll cannot undo it
+	base   map[string]string
+	noCred bool  // no usable credentials: nothing was polled
+	envErr error // building the environment failed: nothing was polled
+	unauth bool  // oCIS answered 401: the poll is discarded
+	cut    bool  // the run's deadline ended the poll: it is discarded and retried
+	errs   []error
 }
 
 // watchRun polls the watch folders of the users that are due: enrolled,
@@ -200,6 +204,9 @@ dispatch:
 		if p.unauth {
 			continue
 		}
+		if s.beforeApply != nil {
+			s.beforeApply(p.user)
+		}
 		// the store work is short and must not be lost to the poll deadline
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), watchApplyTimeout)
 		next, ok, err := s.applyWatch(actx, p, now)
@@ -239,8 +246,9 @@ dispatch:
 
 // pokedDue returns the users a notification event marked who are still
 // watched (ListWatchUsers' conditions) and whose last poll is at least
-// SSE.PokeGap ago, at most PerTick; the others that are still watched stay
-// marked for a later run.
+// SSE.PokeGap ago, at most half of PerTick (so the rotation, which serves
+// the users without a stream, always gets the rest); the others that are
+// still watched stay marked for a later run.
 func (s *Scheduler) pokedDue(ctx context.Context, now time.Time) (map[string]bool, error) {
 	ids := s.sse.takePokes()
 	due := map[string]bool{}
@@ -263,7 +271,7 @@ func (s *Scheduler) pokedDue(ctx context.Context, now time.Time) (map[string]boo
 			if !pol.ProactiveEnabled || pol.Paused || len(pol.Watch) == 0 {
 				continue
 			}
-			if at, ok := s.watch.polled[id]; (ok && now.Before(at.Add(s.c.SSE.PokeGap))) || len(due) >= s.c.Watch.PerTick {
+			if at, ok := s.watch.polled[id]; (ok && now.Before(at.Add(s.c.SSE.PokeGap))) || len(due) >= max(1, s.c.Watch.PerTick/2) {
 				later = append(later, id)
 				continue
 			}
@@ -347,6 +355,14 @@ func (s *Scheduler) pollUser(ctx context.Context, userID string) (p watchPoll) {
 			p = watchPoll{user: userID, cut: true}
 		}
 	}()
+	if err := s.d.Store.View(ctx, func(tx store.Tx) error {
+		c, err := tx.GetCursor(userID)
+		p.base = c.WatchETags
+		return err
+	}); err != nil {
+		p.envErr = fmt.Errorf("scheduler: read watch baseline: %w", err)
+		return p
+	}
 	env, err := s.d.Env(ctx, userID)
 	switch {
 	case errors.Is(err, auth.ErrCredentialInvalid):
@@ -428,7 +444,9 @@ func listDigest(ctx context.Context, env tools.Env, folder string) (folderResult
 // applyWatch records one user's poll in one transaction: folders seen for
 // the first time get a baseline, a moved ETag marks a pending change (first
 // and latest time), a vanished folder loses its baseline, a failed one
-// keeps it, and folders no longer on the policy's list are forgotten
+// keeps it, one whose stored baseline moved since the poll started (the
+// agent's own write was rebaselined) is left alone, and folders no longer
+// on the policy's list are forgotten
 // together with a pending change (it may be of such a folder; so is one
 // left without any baseline). A
 // pending change whose folders stayed unchanged for Debounce (or that waits
@@ -457,6 +475,10 @@ func (s *Scheduler) applyWatch(ctx context.Context, p watchPoll, now time.Time) 
 		for f, r := range p.folders {
 			if !slices.Contains(pol.Watch, f) {
 				continue
+			}
+			was, hadWas := p.base[f]
+			if cur, had := c.WatchETags[f]; had != hadWas || cur != was {
+				continue // moved since the poll started (a rebaseline): the result is stale
 			}
 			switch r.state {
 			case watchFolderVanished:

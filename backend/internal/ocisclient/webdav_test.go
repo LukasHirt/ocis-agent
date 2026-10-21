@@ -555,3 +555,42 @@ func TestTooEarlyRetriesReuseTheConnection(t *testing.T) {
 		t.Fatalf("%d connections for %d requests, want 1", conns, gets)
 	}
 }
+
+func TestProcessingReportsAFreshUploadOnce(t *testing.T) {
+	f := newFixture(t)
+	f.s.SetPostprocessing(2)
+	if _, err := f.c.Put(bg, f.cr, testDrive, "/a.md", []byte("fresh"), ""); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{true, true, false, false} {
+		got, err := f.c.Processing(bg, f.cr, testDrive, "/a.md")
+		if err != nil || got != want {
+			t.Fatalf("check %d = %v, %v; want %v", i, got, err, want)
+		}
+	}
+	// gone or a folder: nothing is being processed
+	for _, p := range []string{"/missing.md", "/"} {
+		if got, err := f.c.Processing(bg, f.cr, testDrive, p); err != nil || got {
+			t.Errorf("%s = %v, %v", p, got, err)
+		}
+	}
+	// a 401 is an error
+	f.s.Fail("GET", "/remote.php/dav/spaces/"+testDrive+"/a.md", http.StatusUnauthorized, 1)
+	if _, err := f.c.Processing(bg, f.cr, testDrive, "/a.md"); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("401 = %v", err)
+	}
+}
+
+func TestProcessingAsksForOneByte(t *testing.T) {
+	var rng string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rng = r.Header.Get("Range")
+		w.Header().Set("Content-Length", "100000000")
+		w.WriteHeader(http.StatusOK) // a server that ignores Range
+	}))
+	t.Cleanup(srv.Close)
+	got, err := mustClient(t, srv.URL).Processing(bg, AppToken("u", "t"), "dr", "/a.md")
+	if err != nil || got || rng != "bytes=0-0" {
+		t.Fatalf("= %v, %v, range %q", got, err, rng)
+	}
+}

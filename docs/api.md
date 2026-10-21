@@ -512,8 +512,8 @@ changing `watch` drops a pending change, so earlier changes never start a review
 count, and neither do the agent's own approved writes: right before such a write the agent
 checks the watch folders that contain its paths and right after it records their new state,
 but only if the recorded state is still the one from before the write, so a change the user
-made earlier still starts a review (a change landing during the write itself is taken for the
-agent's). If a check fails, the write counts as a change. When the user's oCIS notification stream reports a file event, the next check comes sooner (it never starts a review itself). A folder that is missing or unreadable is skipped. Paused users are not checked: changes
+made earlier still starts a review (a change landing during the write itself, or in the up to 10 seconds the agent waits afterwards
+for oCIS to finish processing an upload and for the folder to settle, is taken for the agent's). If a check fails, the write counts as a change. When the user's oCIS notification stream reports a file event, the next check comes sooner (it never starts a review itself). A folder that is missing or unreadable is skipped. Paused users are not checked: changes
 made while paused start one review after the resume.
 
 ### POST /agent-api/v1/proactive/run

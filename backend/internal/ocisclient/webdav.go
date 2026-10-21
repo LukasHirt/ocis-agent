@@ -271,6 +271,30 @@ func (c *Client) Get(ctx context.Context, cr Creds, drive, p string, maxBytes in
 	return resp.body, etag, nil
 }
 
+// Processing reports whether oCIS still postprocesses the file at p (a
+// one-byte GET answers 425). Any other client error (a missing item, a
+// folder) or success means it is not; 401, 403 and 5xx are errors.
+func (c *Client) Processing(ctx context.Context, cr Creds, drive, p string) (bool, error) {
+	tg, err := davTarget(drive, p)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.do(ctx, cr, http.MethodGet, tg.esc, nil, map[string]string{"Range": "bytes=0-0"}, nil, 1<<10)
+	switch {
+	case errors.Is(err, ErrTooLarge):
+		return false, nil // the server ignored the range: the content is there
+	case err != nil:
+		return false, err
+	}
+	switch s := resp.status; {
+	case s == http.StatusTooEarly:
+		return true, nil
+	case s/100 == 2, s/100 == 4 && s != http.StatusUnauthorized && s != http.StatusForbidden:
+		return false, nil
+	}
+	return false, statusError(http.MethodGet, tg.log, resp.status, nil)
+}
+
 // Put uploads data to p and returns the new ETag. With a non-empty ifMatch the
 // upload only replaces the file if it still has that ETag; otherwise it fails
 // with ErrPrecondition (oCIS answers 409 for this, 412 is accepted too). It

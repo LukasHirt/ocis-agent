@@ -12,7 +12,7 @@ import (
 
 func (w *watchFixture) ownWrites() *OwnWrites {
 	w.t.Helper()
-	o, err := NewOwnWrites(w.st)
+	o, err := NewOwnWrites(w.st, w.ownCfg)
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -255,17 +255,155 @@ func TestOwnWriteSkipsOnAStatError(t *testing.T) {
 	}
 }
 
-func TestOwnWriteStopsWithTheContext(t *testing.T) {
+func TestOwnWriteFinishesUnderACancelledContext(t *testing.T) {
 	w := newWatchFixture(t)
+	w.ownCfg.Settle = time.Hour // a cancelled job must not wait for it
 	u := w.watchUsers(1)[0]
 	w.poll(w.scheduler())
-	base := w.cursor(u).WatchETags["/Documents"]
 	after := w.ownWrites().BeforeWrite(bg, w.userEnv(u), []string{"/Documents/a.md"})
 	w.put(u, "/Documents/a.md")
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
+	start := time.Now()
 	after(ctx)
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("the rebaseline waited under a cancelled context")
+	}
+	if got, want := w.cursor(u).WatchETags["/Documents"], w.folderETag(u, "/Documents"); got != want {
+		t.Fatalf("baseline %q, want the folder's new ETag %q", got, want)
+	}
+}
+
+func (w *watchFixture) folderETag(u, p string) string {
+	w.t.Helper()
+	e, err := w.client.Stat(bg, w.userEnv(u).Creds, "drive-"+u, p)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return e.ETag
+}
+
+// upload writes p with a real PUT, which oCIS postprocesses.
+func (w *watchFixture) upload(u, p string) {
+	w.t.Helper()
+	if _, err := w.client.Put(bg, w.userEnv(u).Creds, "drive-"+u, p, []byte("upload"), ""); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// oCIS moves the folder's ETag a second time when the upload's
+// postprocessing finishes: the rebaseline waits for that.
+func TestOwnWriteWaitsForPostprocessing(t *testing.T) {
+	for name, set := range map[string]func(w *watchFixture){
+		"425 window": func(w *watchFixture) {
+			w.fake.SetPostprocessing(3)
+			w.fake.SetPostprocessingPropagation(true, 20*time.Millisecond)
+		},
+		"late propagation": func(w *watchFixture) {
+			w.fake.SetPostprocessingPropagation(true, 30*time.Millisecond)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWatchFixture(t)
+			w.ownCfg = OwnWritesConfig{Settle: 100 * time.Millisecond, MaxWait: 5 * time.Second, Poll: 5 * time.Millisecond}
+			u := w.watchUsers(1)[0]
+			s := w.scheduler()
+			w.poll(s)
+			set(w)
+			w.agentWrite(u, []string{"/Documents/up.md"}, func() { w.upload(u, "/Documents/up.md") })
+			// postprocessing ends at the latest now (the fake ends its 425
+			// window by GETs)
+			for range 5 {
+				_, _, _ = w.client.Get(bg, w.userEnv(u).Creds, "drive-"+u, "/Documents/up.md", 1<<10)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got, want := w.cursor(u).WatchETags["/Documents"], w.folderETag(u, "/Documents"); got != want {
+				t.Fatalf("baseline %q, the folder is now %q", got, want)
+			}
+			w.settle(s)
+			if jobs := w.fileJobs(u); len(jobs) != 0 {
+				t.Fatalf("the agent's own upload started a review: %+v", jobs)
+			}
+		})
+	}
+}
+
+func TestOwnWriteGivesUpOnEndlessPostprocessing(t *testing.T) {
+	w := newWatchFixture(t)
+	w.ownCfg = OwnWritesConfig{Settle: 5 * time.Millisecond, MaxWait: 100 * time.Millisecond, Poll: 5 * time.Millisecond}
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	base := w.cursor(u).WatchETags["/Documents"]
+	w.fake.SetPostprocessing(1 << 20)
+	start := time.Now()
+	w.agentWrite(u, []string{"/Documents/up.md"}, func() { w.upload(u, "/Documents/up.md") })
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("waited %v", d)
+	}
 	if got := w.cursor(u).WatchETags["/Documents"]; got != base {
-		t.Fatalf("baseline moved to %q under a cancelled context", got)
+		t.Fatalf("baseline moved to %q while the upload was still processed", got)
+	}
+	w.settle(s)
+	if n := len(w.fileJobs(u)); n != 1 {
+		t.Fatalf("%d file jobs, want today's follow-up", n)
+	}
+}
+
+func TestOwnWriteWaitsForAFolderToSettle(t *testing.T) {
+	w := newWatchFixture(t)
+	w.ownCfg = OwnWritesConfig{Settle: 50 * time.Millisecond, MaxWait: 5 * time.Second, Poll: 5 * time.Millisecond}
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	// something keeps moving the folder for a while after the write
+	done := make(chan struct{})
+	w.agentWrite(u, []string{"/Documents/a.md"}, func() {
+		w.put(u, "/Documents/a.md")
+		go func() {
+			defer close(done)
+			for i := range 3 {
+				time.Sleep(10 * time.Millisecond)
+				w.put(u, "/Documents/a.md"+string(rune('0'+i)))
+			}
+		}()
+	})
+	<-done
+	if got, want := w.cursor(u).WatchETags["/Documents"], w.folderETag(u, "/Documents"); got != want {
+		t.Fatalf("baseline %q, the folder is now %q", got, want)
+	}
+}
+
+// A poll that checked the folder before the agent's write but is recorded
+// after the rebaseline must not undo it.
+func TestOwnWriteSurvivesAPollRecordedAfterIt(t *testing.T) {
+	w := newWatchFixture(t)
+	u := w.watchUsers(1)[0]
+	s := w.scheduler()
+	w.poll(s)
+	w.clk.Advance(5 * time.Minute)
+	once := false
+	s.beforeApply = func(string) {
+		if once {
+			return
+		}
+		once = true
+		// the poll has checked the folder; now the agent writes
+		w.agentWrite(u, []string{"/Documents/a.md"}, func() { w.put(u, "/Documents/a.md") })
+	}
+	w.poll(s)
+	c := w.cursor(u)
+	if got, want := c.WatchETags["/Documents"], w.folderETag(u, "/Documents"); got != want || c.WatchDirtySince != nil {
+		t.Fatalf("baseline %q (dirty %v), want the rebaselined %q", got, c.WatchDirtySince, want)
+	}
+	w.settle(s)
+	if jobs := w.fileJobs(u); len(jobs) != 0 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	// a user change is still seen by the next poll
+	w.put(u, "/Documents/user.md")
+	w.settle(s)
+	if n := len(w.fileJobs(u)); n != 1 {
+		t.Fatalf("%d file jobs after a user change, want 1", n)
 	}
 }

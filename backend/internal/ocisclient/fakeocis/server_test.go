@@ -570,3 +570,59 @@ func TestGetIsTooEarlyWhilePostprocessing(t *testing.T) {
 		t.Fatalf("get of a PutFile file = %d", st)
 	}
 }
+
+func TestPostprocessingMovesTheParentETagAgain(t *testing.T) {
+	folder := func(s *Server) string {
+		_, _, body := call(t, s, "PROPFIND", dav+"/docs", einstein, map[string]string{"Depth": "0"}, "")
+		return etagOf(t, body)
+	}
+	t.Run("after the 425 window", func(t *testing.T) {
+		s := newFake(t)
+		s.PutFile(drv, "/docs/seed.md", []byte("x"))
+		s.SetPostprocessing(1)
+		s.SetPostprocessingPropagation(true, 0)
+		call(t, s, http.MethodPut, dav+"/docs/a.md", einstein, nil, "one")
+		e1 := folder(s)
+		if st, _, _ := call(t, s, http.MethodGet, dav+"/docs/a.md", einstein, nil, ""); st != http.StatusTooEarly {
+			t.Fatalf("get = %d", st)
+		}
+		// the end of postprocessing propagates once more, like oCIS
+		deadline := time.Now().Add(2 * time.Second)
+		for folder(s) == e1 {
+			if time.Now().After(deadline) {
+				t.Fatal("the folder ETag did not move after postprocessing")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		e2 := folder(s)
+		time.Sleep(20 * time.Millisecond)
+		if folder(s) != e2 {
+			t.Fatal("the folder ETag moved more than once more")
+		}
+	})
+	t.Run("delayed, without a 425 window", func(t *testing.T) {
+		s := newFake(t)
+		s.PutFile(drv, "/docs/seed.md", []byte("x"))
+		s.SetPostprocessingPropagation(true, 50*time.Millisecond)
+		call(t, s, http.MethodPut, dav+"/docs/a.md", einstein, nil, "one")
+		e1 := folder(s)
+		time.Sleep(10 * time.Millisecond)
+		if folder(s) != e1 {
+			t.Fatal("moved before the delay")
+		}
+		time.Sleep(100 * time.Millisecond)
+		if folder(s) == e1 {
+			t.Fatal("did not move after the delay")
+		}
+	})
+	t.Run("off by default", func(t *testing.T) {
+		s := newFake(t)
+		s.PutFile(drv, "/docs/seed.md", []byte("x"))
+		call(t, s, http.MethodPut, dav+"/docs/a.md", einstein, nil, "one")
+		e1 := folder(s)
+		time.Sleep(20 * time.Millisecond)
+		if folder(s) != e1 {
+			t.Fatal("moved without the quirk")
+		}
+	})
+}

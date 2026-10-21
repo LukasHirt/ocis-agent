@@ -22,10 +22,15 @@ type SSEConfig struct {
 	MaxBackoff       time.Duration // longest wait, and the wait after a 401 (default 5m)
 	StableAfter      time.Duration // a stream that lasted this long resets the backoff (default 1m)
 	PokeGap          time.Duration // the shortest time between two polls an event brings forward (default 30s)
+	// IdleReconnect is the wait (cut by jitter of up to half) before
+	// reopening a stream that only went quiet: oCIS sends no keepalives
+	// unless SSE_KEEPALIVE_INTERVAL is set, so quiet streams hit the
+	// client's idle timeout (default 10s)
+	IdleReconnect time.Duration
 }
 
 func (c SSEConfig) withDefaults() (SSEConfig, error) {
-	if c.MaxSubscriptions < 0 || c.MinBackoff < 0 || c.MaxBackoff < 0 || c.StableAfter < 0 || c.PokeGap < 0 {
+	if c.MaxSubscriptions < 0 || c.MinBackoff < 0 || c.MaxBackoff < 0 || c.StableAfter < 0 || c.PokeGap < 0 || c.IdleReconnect < 0 {
 		return c, errors.New("scheduler: negative event stream config value")
 	}
 	if c.MaxSubscriptions == 0 {
@@ -42,6 +47,9 @@ func (c SSEConfig) withDefaults() (SSEConfig, error) {
 	}
 	if c.PokeGap == 0 {
 		c.PokeGap = 30 * time.Second
+	}
+	if c.IdleReconnect == 0 {
+		c.IdleReconnect = 10 * time.Second
 	}
 	if c.MinBackoff > c.MaxBackoff {
 		return c, errors.New("scheduler: event stream min backoff above the max backoff")
@@ -226,8 +234,9 @@ func (s *Scheduler) sseRun(ctx context.Context, _ time.Time) (int, int, error) {
 // stream keeps the user's stream open until ctx ends: it builds the
 // environment (fresh credentials) for every connection, pokes the user for
 // every file event and reconnects after a failure or a close with an
-// exponential backoff and jitter. A 401 is reported to
-// Auth.HandleUnauthorized and waits the longest. Nothing about the events,
+// exponential backoff and jitter. A stream that ended by the idle timeout
+// (no keepalives) reopens after IdleReconnect with jitter. A 401 is reported
+// to Auth.HandleUnauthorized and waits the longest. Nothing about the events,
 // the credentials or the errors is logged.
 func (s *Scheduler) stream(ctx context.Context, user string) {
 	c, h := s.c.SSE, s.sse
@@ -248,12 +257,19 @@ func (s *Scheduler) stream(ctx context.Context, user string) {
 			if ctx.Err() != nil {
 				return
 			}
-			if time.Since(start) >= c.StableAfter {
-				backoff, wait = c.MinBackoff, c.MinBackoff
-			}
-			if errors.Is(err, ocisclient.ErrUnauthorized) {
+			switch {
+			case errors.Is(err, ocisclient.ErrIdleTimeout):
+				// the stream worked but stayed quiet: a normal reconnect
+				// after a modest, spread-out delay; the backoff stays
+				if !sleep(ctx, jitter(c.IdleReconnect)) {
+					return
+				}
+				continue
+			case errors.Is(err, ocisclient.ErrUnauthorized):
 				_ = s.d.Auth.HandleUnauthorized(ctx, user)
 				wait = c.MaxBackoff
+			case time.Since(start) >= c.StableAfter:
+				backoff, wait = c.MinBackoff, c.MinBackoff
 			}
 		}
 		if !sleep(ctx, jitter(wait)) {
