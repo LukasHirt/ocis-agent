@@ -9,10 +9,13 @@ import (
 // Sentinels. Test for them with errors.Is; the concrete error is usually a
 // *StatusError that also carries the method, path and status.
 var (
-	ErrUnauthorized    = errors.New("ocisclient: unauthorized")
-	ErrForbidden       = errors.New("ocisclient: forbidden")
-	ErrNotFound        = errors.New("ocisclient: not found")
-	ErrPrecondition    = errors.New("ocisclient: precondition failed")
+	ErrUnauthorized = errors.New("ocisclient: unauthorized")
+	ErrForbidden    = errors.New("ocisclient: forbidden")
+	ErrNotFound     = errors.New("ocisclient: not found")
+	ErrPrecondition = errors.New("ocisclient: precondition failed")
+	// ErrTooEarly: oCIS still postprocesses a fresh upload (425 to a GET)
+	// after the client waited a few seconds for it.
+	ErrTooEarly        = errors.New("ocisclient: file still being processed")
 	ErrExists          = errors.New("ocisclient: already exists")
 	ErrNotDir          = errors.New("ocisclient: not a directory")
 	ErrTooLarge        = errors.New("ocisclient: response too large")

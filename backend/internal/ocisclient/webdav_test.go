@@ -3,6 +3,7 @@ package ocisclient
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -486,5 +487,71 @@ func TestGetFailsClosedWhenNoETagHeader(t *testing.T) {
 	data, etag, err := mustClient(t, srv.URL).Get(bg, AppToken("u", "t"), "dr", "/a.md", 10)
 	if err == nil || data != nil || etag != "" || propfinds != 0 {
 		t.Fatalf("%q %q %v %d", data, etag, err, propfinds)
+	}
+}
+
+func TestGetWaitsOutPostprocessing(t *testing.T) {
+	f := newFixture(t)
+	f.c.tooEarlyWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	f.s.SetPostprocessing(3)
+	etag, err := f.c.Put(bg, f.cr, testDrive, "/a.md", []byte("fresh"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, got, err := f.c.Get(bg, f.cr, testDrive, "/a.md", 10)
+	if err != nil || string(data) != "fresh" || got != etag {
+		t.Fatalf("get right after an upload = %q %q %v", data, got, err)
+	}
+
+	f.s.SetPostprocessing(4) // one more 425 than the client waits out
+	if _, err := f.c.Put(bg, f.cr, testDrive, "/b.md", []byte("slow"), ""); err != nil {
+		t.Fatal(err)
+	}
+	var se *StatusError
+	if _, _, err := f.c.Get(bg, f.cr, testDrive, "/b.md", 10); !errors.Is(err, ErrTooEarly) || !errors.As(err, &se) || se.Status != http.StatusTooEarly {
+		t.Fatalf("get of a file still postprocessing = %v, want ErrTooEarly", err)
+	}
+
+	f.s.SetPostprocessing(100)
+	if _, err := f.c.Put(bg, f.cr, testDrive, "/c.md", []byte("x"), ""); err != nil {
+		t.Fatal(err)
+	}
+	f.c.tooEarlyWaits = []time.Duration{time.Hour}
+	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, _, err := f.c.Get(ctx, f.cr, testDrive, "/c.md", 10); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
+		t.Fatalf("the wait does not end with the context: %v after %v", err, time.Since(start))
+	}
+}
+
+// The 425 bodies are drained, so the retries reuse the connection instead of
+// opening a new TLS connection each time.
+func TestTooEarlyRetriesReuseTheConnection(t *testing.T) {
+	var gets, conns int
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		if gets <= 3 {
+			w.WriteHeader(http.StatusTooEarly)
+			_, _ = w.Write([]byte(strings.Repeat("x", 8<<10)))
+			return
+		}
+		w.Header().Set("ETag", `"1"`)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			conns++
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	c := mustClient(t, srv.URL)
+	c.tooEarlyWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	if data, _, err := c.Get(bg, AppToken("u", "t"), "dr", "/a.md", 10); err != nil || string(data) != "ok" {
+		t.Fatalf("get = %q %v", data, err)
+	}
+	if conns != 1 {
+		t.Fatalf("%d connections for %d requests, want 1", conns, gets)
 	}
 }

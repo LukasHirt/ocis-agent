@@ -28,6 +28,17 @@ type Config struct {
 	API           APIConfig
 }
 
+// DatabasePath returns the database file named by AGENT_SQLITE_PATH, or
+// agent.db in AGENT_DATA_DIR. It reads nothing else, so commands that only
+// copy the database (backup) need neither the oCIS URL nor the master key.
+func DatabasePath(getenv func(string) string) string {
+	return valueOr(getenv("AGENT_SQLITE_PATH"), filepath.Join(dataDir(getenv), "agent.db"))
+}
+
+func dataDir(getenv func(string) string) string {
+	return valueOr(getenv("AGENT_DATA_DIR"), "/var/lib/ocis-agent")
+}
+
 // Load reads and validates the configuration. getenv is os.Getenv in
 // production and a map lookup in tests. Errors name the variable but never
 // include the master key.
@@ -54,8 +65,8 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	cfg.HTTPAddr = valueOr(getenv("AGENT_HTTP_ADDR"), ":9300")
-	cfg.DataDir = valueOr(getenv("AGENT_DATA_DIR"), "/var/lib/ocis-agent")
-	cfg.SQLitePath = valueOr(getenv("AGENT_SQLITE_PATH"), filepath.Join(cfg.DataDir, "agent.db"))
+	cfg.DataDir = dataDir(getenv)
+	cfg.SQLitePath = DatabasePath(getenv)
 
 	if raw := getenv("AGENT_INSECURE"); raw != "" {
 		b, err := strconv.ParseBool(raw)

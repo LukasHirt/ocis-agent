@@ -32,3 +32,16 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: make frontend-test
       - run: make frontend-build
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # build only, never pushed: no registry credentials are needed
+      - run: docker build -t ocis-agent:ci .
+      - name: smoke test (non-root, migrate on a read-only root filesystem)
+        run: |
+          test "$(docker run --rm --entrypoint id ocis-agent:ci -u)" != 0
+          docker run --rm --read-only --tmpfs /data:uid=10001,gid=10001,mode=0700 \
+            -e AGENT_MASTER_KEY="$(openssl rand -base64 32)" -e AGENT_OCIS_URL=https://ocis.example.test \
+            ocis-agent:ci migrate

@@ -218,7 +218,8 @@ func etagFrom(h http.Header) string {
 // Get downloads a file of at most maxBytes and returns its content and ETag.
 // A larger file fails with ErrTooLarge without being read to the end. It fails
 // closed when the response carries no ETag (a Stat could return a newer one
-// than the content).
+// than the content). While oCIS postprocesses a fresh upload it answers 425;
+// Get retries for about three seconds and then fails with ErrTooEarly.
 func (c *Client) Get(ctx context.Context, cr Creds, drive, p string, maxBytes int64) ([]byte, string, error) {
 	tg, err := davTarget(drive, p)
 	if err != nil {
@@ -228,8 +229,23 @@ func (c *Client) Get(ctx context.Context, cr Creds, drive, p string, maxBytes in
 		return nil, "", errors.New("ocisclient: negative size limit")
 	}
 	resp, err := c.do(ctx, cr, http.MethodGet, tg.esc, nil, nil, nil, maxBytes)
+	// oCIS answers 425 while it postprocesses a fresh upload (a GET right
+	// after a PUT, also our own): wait it out for a few seconds
+	for i := 0; err == nil && resp.status == http.StatusTooEarly && i < len(c.tooEarlyWaits); i++ {
+		t := time.NewTimer(c.tooEarlyWaits[i])
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, "", fmt.Errorf("ocisclient: GET %s: %w", tg.log, ctx.Err())
+		case <-t.C:
+		}
+		resp, err = c.do(ctx, cr, http.MethodGet, tg.esc, nil, nil, nil, maxBytes)
+	}
 	if err != nil {
 		return nil, "", err
+	}
+	if resp.status == http.StatusTooEarly {
+		return nil, "", statusError(http.MethodGet, tg.log, resp.status, ErrTooEarly)
 	}
 	if resp.status != http.StatusOK {
 		return nil, "", statusError(http.MethodGet, tg.log, resp.status, nil)

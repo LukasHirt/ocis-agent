@@ -19,6 +19,9 @@ const (
 	requestTimeout = 30 * time.Second
 	// maxBody caps buffered JSON and PROPFIND responses.
 	maxBody = 4 << 20
+	// drainLimit caps how much of an error body is read (and discarded) to
+	// keep the connection reusable
+	drainLimit = 64 << 10
 )
 
 // Client talks to one oCIS instance.
@@ -26,6 +29,14 @@ type Client struct {
 	base    string
 	hc      *http.Client
 	sseIdle time.Duration
+	// tooEarlyWaits are the pauses before each retry of a GET that oCIS
+	// answered 425 (a fresh upload still in postprocessing); a field for tests
+	tooEarlyWaits []time.Duration
+}
+
+// defaultTooEarlyWaits wait out about three seconds of postprocessing.
+var defaultTooEarlyWaits = []time.Duration{
+	100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond,
 }
 
 // Option configures New.
@@ -58,7 +69,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("ocisclient: base URL must be an http(s) origin without credentials, path or query")
 	}
-	c := &Client{base: u.Scheme + "://" + u.Host, hc: NewHTTPClient(false), sseIdle: 2 * time.Minute}
+	c := &Client{base: u.Scheme + "://" + u.Host, hc: NewHTTPClient(false), sseIdle: 2 * time.Minute, tooEarlyWaits: defaultTooEarlyWaits}
 	for _, o := range opts {
 		o(c)
 	}
@@ -138,6 +149,9 @@ func (c *Client) do(ctx context.Context, cr Creds, method, escPath string, query
 	defer resp.Body.Close()
 	out := response{status: resp.StatusCode, header: resp.Header}
 	if resp.StatusCode/100 != 2 {
+		// drained (a little), so the connection can be reused, e.g. by the
+		// retries of a 425
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, drainLimit))
 		return out, nil
 	}
 	if resp.ContentLength > limit {

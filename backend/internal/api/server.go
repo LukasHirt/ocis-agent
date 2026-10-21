@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,6 +148,8 @@ type Server struct {
 	// baseTimeout is the read and write deadline of every request before a
 	// route sets its own (unmatched paths, 405, healthz); a field for tests
 	baseTimeout time.Duration
+	// patterns are the registered routes, in registration order (Routes)
+	patterns []string
 }
 
 // NewServer checks the dependencies and registers the routes.
@@ -202,6 +205,7 @@ func NewServer(d Deps) (*Server, error) {
 	s.eventTimers = s.defaultEventTimers
 	// healthz skips steps 4-9 of the pipeline (no rate limit, Origin or auth)
 	s.mux.HandleFunc("GET /agent-api/healthz", healthz)
+	s.patterns = append(s.patterns, "GET /agent-api/healthz")
 	s.routes()
 	return s, nil
 }
@@ -307,4 +311,13 @@ func (s *Server) handle(pattern string, h handlerFunc, opts ...routeOption) {
 		o(&rc)
 	}
 	s.mux.Handle(pattern, s.chain(pattern, rc, h))
+	s.patterns = append(s.patterns, pattern)
+}
+
+// Routes returns the registered route patterns ("METHOD /agent-api/..."),
+// sorted: the API reference is checked against it.
+func (s *Server) Routes() []string {
+	out := slices.Clone(s.patterns)
+	slices.Sort(out)
+	return out
 }

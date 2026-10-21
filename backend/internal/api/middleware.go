@@ -223,6 +223,10 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		writeCode(w, r, http.StatusNotFound, "not_found")
 		return
 	}
+	// the log label of every matched route, also of healthz, which has no chain
+	if ri := infoFrom(r.Context()); ri != nil {
+		ri.route = pattern
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -393,8 +397,15 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		}
 		return
 	}
+	if errors.Is(err, ocisclient.ErrTooEarly) && w.Header().Get("Retry-After") == "" {
+		w.Header().Set("Retry-After", strconv.Itoa(tooEarlyRetryAfter))
+	}
 	writeError(w, r, status, code, msg)
 }
+
+// tooEarlyRetryAfter is the Retry-After (seconds) of a file oCIS still
+// postprocesses after the client already waited about three seconds.
+const tooEarlyRetryAfter = 5
 
 func validatorError(err error) (int, string) {
 	switch {
