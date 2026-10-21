@@ -115,7 +115,7 @@ describe('Thread', () => {
     }
   })
 
-  it('shows the partial answer under its question, not announced, with what the agent does', async () => {
+  it('shows the partial answer under its question, not announced, without a badge', async () => {
     const w = mountThread([userMessage('m1', running()), userMessage('m2', null, 'later')], {
       partials: writing('Hel')
     })
@@ -124,23 +124,100 @@ describe('Thread', () => {
     expect(bubbles[1].classes()).toContain('agent-msg-partial')
     const partial = w.find('.agent-msg-partial')
     expect(partial.attributes('aria-live')).toBe('off')
-    expect(partial.find('.agent-msg-content').text()).toBe('Hel')
-    expect(partial.find('.agent-msg-partial-state').text()).toBe('Writing…')
-    expect(partial.find('.agent-msg-partial-state [data-icon]').exists()).toBe(true)
+    expect(partial.find('.agent-md').text()).toBe('Hel')
+    expect(partial.find('.agent-md-caret').exists()).toBe(true)
+    expect(partial.find('.agent-msg-partial-state').exists()).toBe(false)
+    expect(partial.find('.agent-chip').exists()).toBe(false)
+    expect(w.find('.agent-msg-reply--working').exists()).toBe(false)
     await w.setProps({ partials: { m1: { text: '', state: 'thinking' } } })
-    expect(w.find('.agent-msg-partial .agent-msg-content').exists()).toBe(false)
-    expect(w.find('.agent-msg-partial-state').text()).toBe('Thinking…')
+    const busy = w.find('.agent-msg-partial .agent-msg-busy')
+    expect(busy.text()).toContain('Thinking')
+    expect(busy.find('.agent-dots').exists()).toBe(true)
+    expect(w.find('.agent-msg-partial .agent-md').exists()).toBe(false)
     w.unmount()
   })
 
-  it('renders a hostile partial answer as plain text with visible control characters', () => {
+  it('renders a hostile partial answer as literal text with visible control characters', () => {
     const hostile = '<img src=x onerror=alert(1)><b>bold</b>\u202eevil\u200b{{ 1 + 1 }}'
     const w = mountThread([userMessage('m1', running())], { partials: writing(hostile) })
     const content = w.find('.agent-msg-partial .agent-msg-content')
     expect(content.find('img').exists()).toBe(false)
     expect(content.find('b').exists()).toBe(false)
-    expect(content.text()).toBe('<img src=x onerror=alert(1)><b>bold</b>\\u{202E}evil\\u{200B}{{ 1 + 1 }}')
+    expect(content.find('.agent-md').text()).toBe('<img src=x onerror=alert(1)><b>bold</b>\\u{202E}evil\\u{200B}{{ 1 + 1 }}')
     expect(content.findAll('.agent-ctl')).toHaveLength(2)
+    w.unmount()
+  })
+
+  it('shows no badge for an answered question', () => {
+    const answered = userMessage('m1', { ...running(), state: 'succeeded' })
+    const w = mountThread([answered, { ...answer('m2', 'Done'), job_id: 'j1' }])
+    expect(w.text()).not.toContain('Answered')
+    expect(w.find('.agent-chip').exists()).toBe(false)
+    expect(w.find('.agent-msg-reply').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('shows a running question without a partial as a working reply', () => {
+    const w = mountThread([userMessage('m1', running())])
+    expect(w.find('.agent-msg-reply--working').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('shows a failed question once, as the runner message', () => {
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Reason text' })
+    const sys = messageOf('s1', { role: 'system', content: 'Reason text', job_id: 'j1' })
+    const w = mountThread([failed, sys])
+    expect(w.findAll('.agent-msg-reply--error')).toHaveLength(1)
+    expect(w.text().split('Reason text')).toHaveLength(2)
+    w.unmount()
+  })
+
+  it('shows a failed question without a runner message from its job error', () => {
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Reason text' })
+    const w = mountThread([failed])
+    expect(w.findAll('.agent-msg-reply--error')).toHaveLength(1)
+    expect(w.text()).toContain('Reason text')
+    w.unmount()
+  })
+
+  it('announces only errors that appear after the conversation was shown', async () => {
+    const old = userMessage('m1', { ...running(), id: 'j0', state: 'failed', error: 'Old' })
+    const w = mountThread([old])
+    expect(w.find('.agent-msg-reply--error').attributes('role')).toBeUndefined()
+    const fresh = userMessage('m2', { ...running(), id: 'j2', state: 'failed', error: 'New' })
+    await w.setProps({ messages: [old, fresh] })
+    const errors = w.findAll('.agent-msg-reply--error')
+    expect(errors).toHaveLength(2)
+    expect(errors[0].attributes('role')).toBeUndefined()
+    expect(errors[1].attributes('role')).toBe('alert')
+    w.unmount()
+  })
+
+  it('alerts for a question that was listed while running and fails afterwards, once', async () => {
+    const q = userMessage('m1', running())
+    const w = mountThread([q])
+    expect(w.find('.agent-msg-reply--working').exists()).toBe(true)
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Late' })
+    await w.setProps({ messages: [failed] })
+    const errors = w.findAll('.agent-msg-reply--error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].attributes('role')).toBe('alert')
+    // the runner's message that replaces the reply does not alert a second time
+    const sys = messageOf('s1', { role: 'system', content: 'Late', job_id: 'j1' })
+    await w.setProps({ messages: [failed, sys] })
+    expect(w.findAll('.agent-msg-reply--error')).toHaveLength(1)
+    expect(w.findAll('[role="alert"]')).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('alerts for the runner message of a job that ran while the conversation was open', async () => {
+    const w = mountThread([userMessage('m1', running())])
+    const failed = userMessage('m1', { ...running(), state: 'failed', error: 'Late' })
+    const sys = messageOf('s1', { role: 'system', content: 'Late', job_id: 'j1' })
+    await w.setProps({ messages: [failed, sys] })
+    const errors = w.findAll('.agent-msg-reply--error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].attributes('role')).toBe('alert')
     w.unmount()
   })
 
@@ -161,7 +238,7 @@ describe('Thread', () => {
       configurable: true,
       get: () =>
         el.querySelectorAll('.agent-msg').length * 200 +
-        (el.querySelector('.agent-msg-partial .agent-msg-content')?.textContent?.length ?? 0)
+        (el.querySelector('.agent-msg-partial .agent-md')?.textContent?.length ?? 0)
     })
     Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => 100 })
     scrollTo(el, 301) // at the bottom (401 - 100)

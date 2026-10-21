@@ -64,4 +64,24 @@ describe('TextBlock', () => {
     expect(style.overflowY).toBe('auto')
     expect(w.element.textContent).toBe('a\nb\nc')
   })
+
+  it.each([
+    [undefined, 'pre-wrap'],
+    ['pre', 'pre-wrap'],
+    ['normal', 'normal'],
+    ['nowrap', 'nowrap'],
+    ['bogus', 'pre-wrap']
+  ])('wrap %s gives white-space %s', (wrap, expected) => {
+    const w = mount(TextBlock, { props: { text: 'x', wrap: wrap as never } })
+    const style = w.attributes('style') ?? ''
+    expect(style).toContain(`white-space: ${expected}`)
+    if (wrap === 'nowrap') expect(style).not.toContain('overflow-wrap')
+    else expect(style).toContain('overflow-wrap: anywhere')
+  })
+
+  it('renders mono with nowrap as a pre without wrapping', () => {
+    const w = mount(TextBlock, { props: { text: 'x', mono: true, wrap: 'nowrap' } })
+    expect(w.element.tagName).toBe('PRE')
+    expect(w.attributes('style')).toContain('white-space: nowrap')
+  })
 })

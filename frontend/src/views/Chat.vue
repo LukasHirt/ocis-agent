@@ -1,5 +1,5 @@
 <template>
-  <section :class="['agent-chat', 'agent-page', 'agent-page--fill', { 'agent-chat--open': !!id }]">
+  <section :class="['agent-chat', 'agent-page', 'agent-page--fill', { 'agent-chat--open': !!id, 'agent-chat--solo': solo }]">
     <aside class="agent-chat-side">
       <div class="agent-chat-side-head">
         <h1 class="agent-page-title" v-text="$gettext('Chat')" />
@@ -17,11 +17,17 @@
         <oc-button appearance="filled" variation="primary" size="small" :disabled="enrolling" @click="enable" v-text="$gettext('Enable agent')" />
       </div>
 
-      <EmptyState
+      <Landing
         v-if="!id"
-        class="agent-chat-pick"
-        icon="chat-3"
-        :title="$gettext('Choose a conversation or start a new one.')"
+        ref="landing"
+        :name="agent.status?.user?.name ?? ''"
+        :model-value="chat.landingDraft"
+        :sending="chat.starting"
+        :disabled="notEnrolled"
+        :hint="notEnrolled ? $gettext('Set up the agent to ask it questions.') : ''"
+        :error="chat.landingError"
+        @update:model-value="onLandingInput"
+        @send="startFromLanding"
       />
       <template v-else-if="chat.missing">
         <EmptyState
@@ -38,7 +44,7 @@
             <span v-text="$gettext('All conversations')" />
           </router-link>
           <h2 class="agent-chat-title agent-section-title">
-            <TextBlock v-if="title" :text="title" />
+            <TextBlock v-if="title" :text="title" wrap="nowrap" />
             <span v-else v-text="$gettext('New conversation')" />
           </h2>
         </div>
@@ -70,6 +76,7 @@
           :older-error="chat.olderError"
           :loaded="chat.messagesLoaded"
           @load-older="chat.loadOlder()"
+          @approvals-settled="chat.reloadJobApprovals()"
         />
         <Composer
           ref="composer"
@@ -96,6 +103,7 @@ import LoadingState from '../components/state/LoadingState.vue'
 import ConversationList from './chat/ConversationList.vue'
 import Thread from './chat/Thread.vue'
 import Composer from './chat/Composer.vue'
+import Landing from './chat/Landing.vue'
 import { APPID } from '../appid'
 import { useAgentStore } from '../stores/agent'
 import { useChatStore } from '../stores/chat'
@@ -153,6 +161,36 @@ const draft = computed({
 })
 
 const composer = ref<{ focus: () => void } | null>(null)
+const landing = ref<{ focus: () => void } | null>(null)
+
+// with no conversation at all the landing is the whole screen
+const solo = computed(
+  () => chat.conversationsLoaded && chat.conversations.length === 0 && !chat.conversationsError
+)
+
+const onLandingInput = (v: string) => {
+  chat.landingDraft = v
+  chat.landingError = null
+}
+
+// startFromLanding creates the conversation, opens it and sends the text
+// there; the conversation's box takes the focus afterwards (the landing's
+// box when the landing is still shown).
+const startFromLanding = async () => {
+  const sent = await chat.startConversation(chat.landingDraft, (cid) =>
+    navigate({ name: `${APPID}-chat-conversation`, params: { id: cid } })
+  )
+  await nextTick()
+  if (sent) threadView.value?.toBottom()
+  if (props.id) {
+    composer.value?.focus()
+    return
+  }
+  // the route never landed or the create failed: the landing is still the
+  // screen, so it shows a refused send and keeps the focus
+  await nextTick()
+  landing.value?.focus()
+}
 const threadView = ref<{ toBottom: () => void } | null>(null)
 
 const send = async () => {
@@ -218,9 +256,29 @@ const enable = async () => {
   .agent-chat--open .agent-chat-side {
     display: none;
   }
-  .agent-chat:not(.agent-chat--open) .agent-chat-main {
-    display: none;
+  .agent-chat:not(.agent-chat--open) {
+    grid-template-rows: auto minmax(0, 1fr);
   }
+  .agent-chat:not(.agent-chat--open) .agent-chat-main {
+    order: -1;
+    border-bottom: var(--agent-line);
+  }
+  .agent-chat:not(.agent-chat--open) .agent-landing {
+    padding: var(--agent-space-5) var(--agent-space-4);
+    justify-content: flex-start;
+  }
+}
+.agent-chat--solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+.agent-chat--solo .agent-chat-side {
+  display: none;
+}
+.agent-chat.agent-chat--solo:not(.agent-chat--open) {
+  grid-template-rows: minmax(0, 1fr);
+}
+.agent-chat.agent-chat--solo:not(.agent-chat--open) .agent-chat-main {
+  border-bottom: 0;
 }
 .agent-chat-side {
   display: flex;
@@ -228,7 +286,7 @@ const enable = async () => {
   min-width: 0;
   min-height: 0;
   border-right: var(--agent-line);
-  background: var(--oc-color-background-muted);
+  background: var(--oc-color-background-default);
 }
 .agent-chat-side-head {
   flex: none;
@@ -277,9 +335,6 @@ const enable = async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.agent-chat-title .agent-text {
-  white-space: nowrap !important;
-}
 .agent-chat-enrol,
 .agent-chat-error {
   flex: none;
@@ -289,7 +344,6 @@ const enable = async () => {
   gap: var(--agent-space-2);
   margin: var(--agent-space-3) var(--agent-space-5) 0;
 }
-.agent-chat-pick,
 .agent-chat-missing {
   margin: auto;
 }

@@ -476,4 +476,83 @@ describe('ApprovalCard', () => {
     expect(b.attributes('data-appearance')).toBe('filled')
     expect(b.attributes('data-variation')).toBe(variation)
   })
+
+  describe('compact', () => {
+    const setupCompact = async (a: Approval, handler?: Handler) => {
+      const server = fakeServer(handler)
+      const { store, platform } = await startStore(server)
+      wrapper = mount(ApprovalCard, {
+        props: { approval: a, compact: true },
+        global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+      })
+      return { w: wrapper, server, platform, store }
+    }
+    const buttons = (w: VueWrapper) =>
+      w.findAll('button').filter((b) => ['Approve', 'Reject'].includes(b.text())).map((b) => b.text())
+
+    it('shows the exact arguments without a click and folds only the preview', async () => {
+      const { w } = await setupCompact(
+        approvalOf('a1', {
+          args: { path: '/Docs/a.txt' },
+          preview: { action: 'create file' },
+          rationale: 'line'
+        })
+      )
+      expect(w.classes()).toContain('agent-card--compact')
+      const args = w.find('.agent-card-args')
+      expect(args.text()).toContain('"/Docs/a.txt"')
+      expect(args.element.closest('details')).toBeNull()
+      expect((args.find('pre').element as HTMLElement).style.maxHeight).toBe('12rem')
+      const d = w.find('details.agent-card-preview-disclosure')
+      expect(d.find('summary').text()).toBe('What will happen')
+      expect(d.text()).toContain('"create file"')
+      expect(w.findAll('details')).toHaveLength(1)
+      expect(w.find('.agent-card-rationale').text()).toContain('line')
+    })
+
+    it.each([
+      ['write', ['Approve', 'Reject']],
+      ['read', ['Approve', 'Reject']],
+      ['destructive', ['Reject', 'Approve']],
+      ['outward', ['Reject', 'Approve']],
+      ['weird', ['Reject', 'Approve']]
+    ])('orders the buttons of a %s action', async (risk, order) => {
+      const { w } = await setupCompact(approvalOf('a1', { risk }))
+      expect(buttons(w)).toEqual(order)
+      expect(w.html()).not.toContain('autofocus')
+      expect(w.find('[autofocus]').exists()).toBe(false)
+    })
+
+    it('emits decided only when the decision was accepted', async () => {
+      const a = approvalOf('a1')
+      const { w } = await setupCompact(a, (c) =>
+        c.path === '/approvals/a1/decision' ? json({ ...a, state: 'approved' }) : undefined
+      )
+      await button(w, 'Approve').trigger('click')
+      await flushPromises()
+      expect(w.emitted('decided')).toEqual([['approve']])
+      expect(w.emitted('attempted')).toHaveLength(1)
+    })
+
+    it('emits no decided for a failed or cancelled decision, but attempted', async () => {
+      const { w, platform } = await setupCompact(approvalOf('a1', { risk: 'destructive' }), (c) =>
+        c.path === '/approvals/a1/decision' ? apiErr(409, 'stale_arguments') : undefined
+      )
+      platform.confirm.mockResolvedValueOnce(false)
+      await button(w, 'Approve').trigger('click')
+      await flushPromises()
+      await button(w, 'Approve').trigger('click')
+      await flushPromises()
+      expect(w.emitted('decided')).toBeUndefined()
+      expect(w.emitted('attempted')).toHaveLength(2)
+    })
+
+    it('renders an approval that needs verification in full layout', async () => {
+      const { w } = await setupCompact(
+        approvalOf('a1', { state: 'unknown', needs_verification: true, outcome: { state: 'unknown', summary: '', reason: '', diff: '' } })
+      )
+      expect(w.classes()).not.toContain('agent-card--compact')
+      expect(w.find('.agent-card-preview-disclosure').exists()).toBe(false)
+    })
+  })
 })

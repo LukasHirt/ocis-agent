@@ -16,42 +16,10 @@
       </header>
       <div class="agent-msg-content">
         <span v-if="systemText" v-text="systemText" />
+        <MarkdownBlock v-else-if="kind === 'assistant'" :text="String(message.content ?? '')" />
         <TextBlock v-else :text="message.content" />
       </div>
 
-      <div
-        v-if="kind === 'user' && message.job"
-        :class="['agent-msg-status', 'agent-chip', `agent-chip--${state.tone}`, { 'agent-chip--dashed': !state.known }]"
-      >
-        <oc-icon :name="state.icon" size="small" :class="{ 'agent-spin': state.spin }" />
-        <span class="agent-msg-state" v-text="state.label" />
-        <TextBlock v-if="!state.known" :text="message.job.state" class="agent-msg-raw-state" />
-        <router-link
-          v-if="waiting"
-          :to="{ name: `${APPID}-approvals`, query: { job: message.job.id } }"
-          v-text="$gettext('Open the approvals inbox')"
-        />
-      </div>
-      <p v-if="failed && message.job?.error" class="agent-msg-error agent-notice agent-notice--danger">
-        <span v-if="jobErrorText" v-text="jobErrorText" />
-        <TextBlock v-else :text="message.job.error" />
-      </p>
-      <p v-if="noticeText" class="agent-msg-notice agent-notice agent-notice--warning" v-text="noticeText" />
-
-      <div v-if="waiting && approvals" class="agent-msg-approvals agent-surface">
-        <p v-if="approvals.error" role="alert" v-text="approvals.error" />
-        <ul v-if="approvals.items.length > 0">
-          <li v-for="a in approvals.items" :key="a.id">
-            <TextBlock :text="a.tool" class="agent-msg-tool" />
-            <RiskBadge :risk="a.risk" />
-            <router-link
-              :to="{ name: `${APPID}-approvals`, query: { job: a.job_id } }"
-              v-text="$gettext('Review')"
-            />
-          </li>
-        </ul>
-        <p v-if="approvals.more" v-text="$gettext('More actions are waiting; see them all in the inbox.')" />
-      </div>
     </div>
   </article>
 </template>
@@ -60,21 +28,15 @@
 import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
-import RiskBadge from '../../components/RiskBadge.vue'
-import { APPID } from '../../appid'
+import MarkdownBlock from '../../components/MarkdownBlock.vue'
 import { formatTime } from '../../util/format'
 import { errorText } from '../../util/reasons'
-import type { AgentNotice, JobApprovals } from '../../stores/chat'
-import type { JobState, Message } from '../../api/types'
+import type { Message } from '../../api/types'
 
-// MessageBubble shows one message as plain text (no markup, no links): a
-// question with the state of the job that answers it, an answer, or a
-// system notice. Every state has a text label and an icon.
-const props = defineProps<{
-  message: Message
-  notice?: AgentNotice
-  approvals?: JobApprovals
-}>()
+// MessageBubble shows one message: a question, an answer or a system notice.
+// Answers render a safe Markdown subset as text-only elements; everything
+// else is plain text. The state of a question's job is shown by ReplyState.
+const props = defineProps<{ message: Message }>()
 const { $gettext } = useGettext()
 
 const kind = computed(() => {
@@ -105,48 +67,11 @@ const roleIcon = computed(() => {
   return 'information'
 })
 
-const STATES: Record<string, { icon: string; tone: string; label: () => string }> = {
-  ['queued' satisfies JobState]: { tone: 'neutral', icon: 'time', label: () => $gettext('Waiting') },
-  ['running' satisfies JobState]: { tone: 'info', icon: 'loader-4', label: () => $gettext('Working') },
-  ['waiting_approval' satisfies JobState]: { tone: 'warning', icon: 'hourglass', label: () => $gettext('Needs your approval') },
-  ['succeeded' satisfies JobState]: { tone: 'success', icon: 'checkbox-circle', label: () => $gettext('Answered') },
-  ['failed' satisfies JobState]: { tone: 'danger', icon: 'error-warning', label: () => $gettext('Could not answer') },
-  ['cancelled' satisfies JobState]: { tone: 'neutral', icon: 'close-circle', label: () => $gettext('Cancelled') }
-}
-
-const state = computed(() => {
-  const s = props.message.job?.state ?? ''
-  const known = Object.hasOwn(STATES, s)
-  return known
-    ? { known, tone: STATES[s].tone, spin: s === ('running' satisfies JobState), icon: STATES[s].icon, label: STATES[s].label() }
-    : { known, tone: 'danger', spin: false, icon: 'question', label: $gettext('Unknown state:') }
-})
-
 // the runner's fixed texts are translated (as on the tasks screen); any
 // other text is shown as it is, as untrusted text
 const systemText = computed(() =>
   kind.value === 'system' ? errorText(String(props.message.content ?? ''), $gettext) : null
 )
-const jobErrorText = computed(() => errorText(String(props.message.job?.error ?? ''), $gettext))
-
-const waiting = computed(() => props.message.job?.state === ('waiting_approval' satisfies JobState))
-const failed = computed(() => props.message.job?.state === ('failed' satisfies JobState))
-
-// the 202's reason why nothing runs, while the question is still waiting
-const noticeText = computed(() => {
-  if (!props.notice || kind.value !== 'user') return ''
-  const st = props.message.job?.state
-  if (st !== undefined && st !== ('queued' satisfies JobState)) return ''
-  switch (props.notice) {
-    case 'paused':
-      return $gettext('The agent is paused; it will answer when resumed.')
-    case 'killed':
-      return $gettext('The agent is switched off by the operator; it will answer when it is switched on again.')
-    case 'credentials':
-      return $gettext('The agent has lost access to your files; reconnect it in Settings to get an answer.')
-  }
-  return ''
-})
 </script>
 
 <style>
@@ -223,36 +148,6 @@ const noticeText = computed(() => {
   color: var(--oc-color-text-muted);
   font-style: italic;
 }
-.agent-msg-status,
-.agent-msg-notice,
-.agent-msg-error {
-  margin: 0;
-}
-.agent-msg-status {
-  flex-wrap: wrap;
-}
-.agent-msg-approvals {
-  padding: var(--agent-space-3);
-}
-.agent-msg-approvals p {
-  margin: 0;
-}
-.agent-msg-approvals ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--agent-space-1);
-}
-.agent-msg-approvals li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--agent-space-2);
-}
-.agent-msg-tool,
-.agent-msg-raw-state,
 .agent-msg-raw-role {
   font-family: var(--agent-font-mono);
 }

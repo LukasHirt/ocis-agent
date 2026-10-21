@@ -5,13 +5,15 @@
       <header class="agent-msg-head">
         <span class="agent-msg-role" v-text="$gettext('Agent')" />
       </header>
-      <div v-if="partial.text" class="agent-msg-content">
-        <TextBlock :text="partial.text" />
+      <div class="agent-msg-content">
+        <MarkdownBlock v-if="showText" :text="partial.text" partial caret />
+        <p v-else class="agent-msg-busy">
+          <span class="agent-msg-state" aria-hidden="true" v-text="$gettext('Thinking')" />
+          <span class="agent-dots" aria-hidden="true"><i /><i /><i /></span>
+          <span class="agent-sr-only" v-text="$gettext('The agent is thinking.')" />
+        </p>
       </div>
-      <p class="agent-msg-status agent-msg-partial-state agent-chip agent-chip--info">
-        <oc-icon name="loader-4" size="small" class="agent-spin" />
-        <span v-text="label" />
-      </p>
+      <span v-if="showText" class="agent-sr-only" v-text="$gettext('The agent is writing an answer.')" />
     </div>
   </article>
 </template>
@@ -19,23 +21,15 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
-import TextBlock from '../../components/TextBlock.vue'
+import MarkdownBlock from '../../components/MarkdownBlock.vue'
 import type { PartialAnswer } from '../../stores/chat'
 
-// PartialBubble shows the unfinished answer of a running question as plain
-// text, with what the model is doing. It is not announced (aria-live off):
-// the thread announces only the final answer, not every update.
+// PartialBubble shows the unfinished answer of a running question like a
+// final answer (safe Markdown), or three dots while the model is thinking.
+// It is not announced (aria-live off): the thread announces only the final
+// answer, not every update.
 const props = defineProps<{ partial: PartialAnswer }>()
-const { $gettext } = useGettext()
+useGettext()
 
-const label = computed(() => (props.partial.state === 'thinking' ? $gettext('Thinking…') : $gettext('Writing…')))
+const showText = computed(() => props.partial.state !== 'thinking' && props.partial.text !== '')
 </script>
-
-<style>
-.agent-msg-partial .agent-msg-content {
-  border: 1px dashed var(--oc-color-border);
-}
-.agent-msg-partial-state {
-  align-self: flex-start;
-}
-</style>

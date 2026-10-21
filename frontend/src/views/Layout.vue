@@ -24,11 +24,14 @@
 
 <script setup lang="ts">
 import '../styles/agent.css'
-import { onBeforeUnmount, onMounted } from 'vue'
+import { computed, getCurrentInstance, onBeforeUnmount, onMounted } from 'vue'
+import { useDocumentTitle } from '@ownclouders/web-pkg'
 import { useGettext } from 'vue3-gettext'
 import { useAgentStore } from '../stores/agent'
 import { usePlatform } from '../platform'
 import StatusBanner from '../components/StatusBanner.vue'
+import { documentTitleSegments } from '../util/documentTitle'
+import { useChatStore } from '../stores/chat'
 import Enrol from './Enrol.vue'
 import ErrorState from '../components/state/ErrorState.vue'
 import LoadingState from '../components/state/LoadingState.vue'
@@ -40,6 +43,30 @@ import LoadingState from '../components/state/LoadingState.vue'
 const store = useAgentStore()
 const platform = usePlatform()
 const { $gettext } = useGettext()
+const chat = useChatStore()
+
+// The host applies a route's meta.title only once at start, so the layout
+// publishes the page title itself. The route is read reactively from the
+// host's router through the instance (vue-router is never imported).
+const instance = getCurrentInstance()
+const titleSegments = computed(() => {
+  const route = (instance?.proxy as { $route?: Record<string, unknown> } | null)?.$route
+  const params = (route?.params ?? {}) as Record<string, unknown>
+  const meta = (route?.meta ?? {}) as Record<string, unknown>
+  const c =
+    chat.conversations.find((x) => x.id === params.id) ??
+    (chat.currentConversation?.id === params.id ? chat.currentConversation : undefined)
+  return documentTitleSegments({
+    name: route?.name as string | undefined,
+    params,
+    section: typeof meta.title === 'string' ? $gettext(meta.title) : '',
+    app: $gettext('Agent'),
+    task: $gettext('Task'),
+    enrolled: store.status?.enrolled !== false,
+    conversationTitle: c?.title
+  })
+})
+useDocumentTitle({ titleSegments })
 
 const retry = () => {
   void store.retryNow() // one status read, with the delays restarted during an outage

@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, reactive, type Ref } from 'vue'
+import { useDocumentTitle } from '@ownclouders/web-pkg'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Layout from './Layout.vue'
 import { PLATFORM_KEY } from '../platform'
 import { makePlatform } from '../test/platform'
 import { apiErr, gatewayErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { useAgentStore } from '../stores/agent'
-import type { Status } from '../api/types'
+import { useChatStore } from '../stores/chat'
+import type { Conversation, Status } from '../api/types'
 
 const HostRouterView = defineComponent({ render: () => h('div', { class: 'host-rv' }) })
 
@@ -26,13 +28,13 @@ const serve = (status: () => Response | Promise<Response>) =>
     return apiErr(503, 'unavailable') // the event stream
   })
 
-const mountLayout = (fetch: ReturnType<typeof serve>) => {
+const mountLayout = (fetch: ReturnType<typeof serve>, $route: object = { name: 'agent-chat', params: {}, meta: { title: 'Chat' } }) => {
   const platform = makePlatform({ fetch: fetch as unknown as typeof globalThis.fetch })
   wrapper = mount(Layout, {
     global: {
       provide: { [PLATFORM_KEY as symbol]: platform },
       components: { RouterView: HostRouterView },
-      mocks: { $router: { push: vi.fn() } }
+      mocks: { $router: { push: vi.fn() }, $route }
     }
   })
   return wrapper
@@ -169,5 +171,51 @@ describe('Layout before the first status', () => {
     expect(w.find('.agent-layout-loading [role=alert] [data-stub=OcIcon]').attributes('data-icon')).toBe('wifi-off')
     expect(w.find('.agent-banner').exists()).toBe(false)
     expect(w.find('.host-rv').exists()).toBe(false)
+  })
+
+  describe('page title', () => {
+    const lastSegments = () => {
+      const calls = vi.mocked(useDocumentTitle).mock.calls
+      return (calls[calls.length - 1][0].titleSegments as Ref<string[]>).value
+    }
+
+    it('publishes the section and the app for the current route', async () => {
+      mountLayout(serve(() => json(statusOf())), { name: 'agent-approvals', params: {}, meta: { title: 'Approvals' } })
+      await flushPromises()
+      expect(lastSegments()).toEqual(['Approvals', 'Agent'])
+    })
+
+    it('adds a fixed label for a task and the cleaned name of a memory file', async () => {
+      mountLayout(serve(() => json(statusOf())), { name: 'agent-tasks-job', params: { id: 'j1' }, meta: { title: 'Tasks' } })
+      await flushPromises()
+      expect(lastSegments()).toEqual(['Task', 'Tasks', 'Agent'])
+      wrapper?.unmount()
+      mountLayout(serve(() => json(statusOf())), {
+        name: 'agent-memory-file',
+        params: { name: ['notes', 'a\u202Eb.md'] },
+        meta: { title: 'Memory' }
+      })
+      await flushPromises()
+      expect(lastSegments()).toEqual(['notes/ab.md', 'Memory', 'Agent'])
+    })
+
+    it('uses the loaded conversation title and follows route changes', async () => {
+      const route = reactive<Record<string, unknown>>({ name: 'agent-chat', params: {}, meta: { title: 'Chat' } })
+      mountLayout(serve(() => json(statusOf())), route)
+      await flushPromises()
+      expect(lastSegments()).toEqual(['Chat', 'Agent'])
+      const chat = useChatStore()
+      chat.conversations = [{ id: 'c1', title: 'Weekday brief' } as Conversation]
+      route.name = 'agent-chat-conversation'
+      route.params = { id: 'c1' }
+      await flushPromises()
+      expect(lastSegments()).toEqual(['Weekday brief', 'Chat', 'Agent'])
+    })
+
+    it('is just the app on the enrolment screen', async () => {
+      mountLayout(serve(() => json(statusOf({ enrolled: false }))))
+      await flushPromises()
+      expect(lastSegments()).toEqual(['Agent'])
+    })
   })
 })

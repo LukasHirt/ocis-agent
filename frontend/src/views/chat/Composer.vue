@@ -118,6 +118,8 @@ defineExpose({ focus: () => input.value?.focus() })
 }
 .agent-composer-box:focus-within {
   border-color: var(--oc-color-swatch-primary-default);
+  outline: 2px solid var(--oc-color-swatch-primary-default);
+  outline-offset: 1px;
 }
 .agent-composer-input .oc-label {
   position: absolute;
@@ -139,6 +141,13 @@ defineExpose({ focus: () => input.value?.focus() })
   min-height: auto;
   max-height: 12rem;
   padding: var(--agent-space-1);
+}
+/* the box shows the one focus ring; the field inside stays flat */
+.agent-composer-input textarea:is(:focus, :focus-visible, :hover, :active) {
+  outline: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
 }
 .agent-composer-bar {
   display: flex;

@@ -110,6 +110,11 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   const needsEnrol = ref(false)
   const actionError = ref<string | null>(null)
   const draftByConversation = reactive<Record<string, string>>({})
+  // the landing (no conversation open): its draft, its refusal and whether a
+  // conversation is being started
+  const landingDraft = ref('')
+  const landingError = shallowRef<SendError | null>(null)
+  const starting = ref(false)
   const notices = reactive<Record<string, AgentNotice>>({})
   const jobApprovals = reactive<Record<string, JobApprovals>>({})
 
@@ -460,22 +465,33 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
   // refusal the draft stays and sendError has the fixed text. A send
   // outlives switching away: its draft is still cleared on the 202, but its
   // refusal is not shown in another conversation.
-  const send = async (text: string): Promise<boolean> => {
+  // checkSend is what stops a send before it reaches the server: text it
+  // would refuse and the local cooldown. null when the text may go.
+  const checkSend = (text: string): SendError | null => {
     const s = session()
-    const id = current.value
-    if (!s || id === null || sendingIn.has(id)) return false
+    if (!s) return null
     const problem = checkMessage(text)
-    if (problem) {
-      sendError.value = { code: problem, message: textProblem(s, problem) }
-      return false
-    }
+    if (problem) return { code: problem, message: textProblem(s, problem) }
     const now = s.platform.now()
     if (now < blockedUntil.value) {
       const secs = Math.ceil((blockedUntil.value - now) / 1000)
-      sendError.value = {
+      return {
         code: 'cooldown',
         message: s.gettext('Wait %{time} before sending again.').replace('%{time}', fmtSeconds(secs))
       }
+    }
+    return null
+  }
+
+  const send = (text: string): Promise<boolean> =>
+    current.value === null ? Promise.resolve(false) : sendTo(current.value, text)
+
+  const sendTo = async (id: string, text: string): Promise<boolean> => {
+    const s = session()
+    if (!s || sendingIn.has(id)) return false
+    const refused = checkSend(text)
+    if (refused) {
+      sendError.value = refused
       return false
     }
     const g = sessionGen
@@ -506,6 +522,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
         dropConversation(id)
       }
       if (open) sendError.value = err
+      else if (starting.value) landingError.value = err // the route never landed
       return false
     } finally {
       if (g === sessionGen) sendingIn.delete(id)
@@ -535,6 +552,61 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
         actionError.value = describe(s, e)
       }
       return null
+    }
+  }
+
+  // whenOpen resolves once the screen has opened conversation id (it
+  // navigates after startConversation's callback), or after a short wait.
+  const whenOpen = (id: string): Promise<void> => {
+    if (current.value === id) return Promise.resolve()
+    return new Promise((resolve) => {
+      let stop = () => {}
+      const timer = setTimeout(() => {
+        stop()
+        resolve()
+      }, 2000)
+      stop = watch(current, (v) => {
+        if (v !== id) return
+        clearTimeout(timer)
+        stop()
+        resolve()
+      })
+    })
+  }
+
+  // startConversation creates a conversation for the landing's text, has
+  // the screen open it (go) and sends the text there, strictly in that
+  // order. One at a time: a second call while one runs does nothing. A
+  // refusal before the create leaves the draft on the landing; after it the
+  // text is the new conversation's draft and send refusals are shown there.
+  const startConversation = async (text: string, go: (id: string) => void): Promise<boolean> => {
+    if (starting.value) return false
+    const s = session()
+    if (!s) return false
+    const refused = checkSend(text)
+    if (refused) {
+      landingError.value = refused
+      return false
+    }
+    starting.value = true
+    landingError.value = null
+    const g = sessionGen
+    try {
+      const c = await createConversation()
+      if (g !== sessionGen) return false
+      if (!c) {
+        landingError.value = { code: 'create_failed', message: actionError.value ?? '' }
+        actionError.value = null
+        return false
+      }
+      draftByConversation[c.id] = text
+      landingDraft.value = ''
+      go(c.id)
+      await whenOpen(c.id)
+      if (g !== sessionGen) return false
+      return await sendTo(c.id, text)
+    } finally {
+      starting.value = false
     }
   }
 
@@ -703,8 +775,18 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     needsEnrol.value = false
     actionError.value = null
     for (const k of Object.keys(draftByConversation)) delete draftByConversation[k]
+    landingDraft.value = ''
+    landingError.value = null
+    starting.value = false
     for (const k of Object.keys(notices)) delete notices[k]
     bound = agent.session()
+  }
+
+  // reloadJobApprovals rereads the pending approvals of the waiting jobs, after
+  // an inline decision.
+  const reloadJobApprovals = (): Promise<unknown> => {
+    const s = session()
+    return s ? loadJobApprovals(s, threadGen) : Promise.resolve()
   }
 
   return {
@@ -731,6 +813,9 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     needsEnrol,
     actionError,
     draftByConversation,
+    landingDraft,
+    landingError,
+    starting,
     notices,
     jobApprovals,
     attach,
@@ -740,13 +825,17 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     openConversation,
     closeConversation,
     createConversation,
+    startConversation,
+    checkSend,
     titleError,
     rename,
     remove,
     enrol,
     loadOlder,
     send,
+    sendTo,
     refreshOpen,
+    reloadJobApprovals,
     reset
   }
 })

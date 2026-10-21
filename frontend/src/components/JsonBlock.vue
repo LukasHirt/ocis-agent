@@ -17,14 +17,16 @@ import { prettyJson, stringifyValue } from '../util/json'
 
 // JsonBlock shows JSON in full (approval cards need the exact arguments):
 // raw text is re-indented as stored, invalid JSON is shown as text.
-const props = defineProps<{ value?: unknown; raw?: string }>()
+const props = withDefaults(defineProps<{ value?: unknown; raw?: string; maxHeight?: string }>(), {
+  maxHeight: '24rem'
+})
 
 const shown = computed(() => {
   if (typeof props.raw === 'string') return prettyJson(props.raw) ?? props.raw
   return stringifyValue(props.value)
 })
 
-const preStyle = { maxHeight: '24rem', overflow: 'auto' }
+const preStyle = computed(() => ({ maxHeight: props.maxHeight, overflow: 'auto' }))
 
 const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard?.writeText
 const copied = ref(false)

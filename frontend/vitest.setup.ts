@@ -1,8 +1,12 @@
-import { beforeEach } from 'vitest'
+import { beforeEach, vi } from 'vitest'
 import { config } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createGettext } from 'vue3-gettext'
 import { defineComponent, h, ref } from 'vue'
+
+// The host composable needs the host's theme store and event bus; specs
+// only check the segments it is given.
+vi.mock('@ownclouders/web-pkg', () => ({ useDocumentTitle: vi.fn() }))
 
 export { makePlatform } from './src/test/platform'
 

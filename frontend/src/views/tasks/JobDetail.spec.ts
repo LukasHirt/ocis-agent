@@ -53,6 +53,7 @@ describe('JobDetail', () => {
     expect(w.find('.agent-job-detail-runs').text()).toBe('2')
     expect(w.find('.agent-job-detail-tokens').text()).toBe('2000 in, 100 out')
     expect(w.find('.agent-job-detail-answer').text()).toBe('All sorted')
+    expect(w.find('.agent-job-detail-answer strong').exists()).toBe(false)
     expect(button(w, 'Cancel task')).toBeUndefined()
   })
 
@@ -123,15 +124,18 @@ describe('JobDetail', () => {
     expect(w.find('.agent-job-detail-nosteps').text()).toBe('No steps yet.')
   })
 
-  it('lists the pending approvals of a waiting job with a link to the inbox', async () => {
+  it('decides the pending approvals of a waiting job inline and links the inbox', async () => {
     const st = jobsState({
       jobs: [jobOf('j1', { state: 'waiting_approval' })],
       approvals: { j1: [approvalOf('a1', { job_id: 'j1', tool: 'files.delete', risk: 'destructive' })] }
     })
     const { w } = await setup(st)
-    const list = w.find('.agent-job-detail-approvals')
-    expect(list.find('.agent-job-detail-tool').text()).toBe('files.delete')
-    const link = list.find('.agent-job-detail-inbox')
+    const panel = w.find('.agent-job-detail-approvals')
+    expect(panel.find('h3').text()).toBe('Waiting for your decision')
+    expect(panel.find('.agent-inline-approvals').exists()).toBe(true)
+    expect(panel.find('.agent-card--compact .agent-card-tool').text()).toBe('files.delete')
+    expect(panel.find('.agent-card-args').exists()).toBe(true)
+    const link = panel.find('.agent-inline-inbox')
     expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'agent-approvals', query: { job: 'j1' } })
   })
 
@@ -203,10 +207,28 @@ describe('JobDetail', () => {
     expect(w.find('.agent-job-detail-answer-section').exists()).toBe(false)
   })
 
+  it('renders the answer as markdown', async () => {
+    const job = jobOf('j1', { state: 'succeeded' })
+    const { w } = await setup(jobsState({ jobs: [job], answers: { j1: '**a** <b>x</b>' } }))
+    const answer = w.find('.agent-job-detail-answer')
+    expect(answer.find('strong').text()).toBe('a')
+    expect(answer.find('b').exists()).toBe(false)
+    expect(answer.text()).toContain('<b>x</b>')
+  })
+
+  it('closes unfinished markdown in the partial answer', async () => {
+    const job = jobOf('j1', { state: 'running', partial: 'so **far', partial_state: 'writing' })
+    const { w } = await setup(jobsState({ jobs: [job] }))
+    expect(w.find('.agent-job-detail-partial strong').text()).toBe('far')
+  })
+
   it('says the model of a running job is still thinking', async () => {
     const job = jobOf('j1', { state: 'running', partial: '', partial_state: 'thinking' })
     const { w } = await setup(jobsState({ jobs: [job] }))
-    expect(w.find('.agent-job-detail-partial-section').text()).toContain('Thinking…')
+    const section = w.find('.agent-job-detail-partial-section')
+    expect(section.find('.agent-msg-busy').text()).toContain('Thinking')
+    expect(section.find('.agent-dots').exists()).toBe(true)
+    expect(section.find('.agent-chip').exists()).toBe(false)
   })
 
   it.each(['waiting_approval', 'failed', 'succeeded', 'cancelled', 'queued'])(
