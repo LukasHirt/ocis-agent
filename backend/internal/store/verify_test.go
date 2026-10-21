@@ -50,3 +50,25 @@ func TestApprovalOutcomeUncertainAndNeedsVerification(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeOutcome(t *testing.T) {
+	o, err := DecodeOutcome(json.RawMessage(`{"outcome":"done","result":{"summary":"s","diff":"d","blocks":[{"source":"file","path":"/p","sha256":"h","content":"c"}]},"reason":"r"}`))
+	if err != nil || o.Outcome != "done" || o.Reason != "r" || o.Result == nil || o.Result.Summary != "s" || o.Result.Diff != "d" ||
+		len(o.Result.Blocks) != 1 || o.Result.Blocks[0] != (OutcomeBlock{Source: "file", Path: "/p", SHA256: "h", Content: "c"}) || !o.Certain() {
+		t.Fatalf("decoded = %+v %v", o, err)
+	}
+	for _, raw := range []string{`["x"]`, `{"outcome":5}`, `{"outcome":"done","result":{"blocks":5}}`, `{"outcome":"done","result":{"blocks":[{"content":1}]}}`, `{x`} {
+		if _, err := DecodeOutcome(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s decoded", raw)
+		}
+	}
+	for out, certain := range map[string]bool{"done": true, "failed": true, "expired": true, "unknown": false, "": false, "maybe": false} {
+		if (RecordedOutcome{Outcome: out}).Certain() != certain {
+			t.Errorf("%q: Certain != %v", out, certain)
+		}
+	}
+	a := Approval{State: ApprovalExecuted, Result: json.RawMessage(`{"outcome":"done","result":{"blocks":5}}`)}
+	if !a.OutcomeUncertain() {
+		t.Error("a result with unreadable blocks is uncertain")
+	}
+}

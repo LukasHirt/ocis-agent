@@ -26,23 +26,14 @@ const (
 	reasonNoOutcome     = "No outcome was recorded; please verify the action."
 )
 
+// maxVerifyScan caps the candidates one needs_verification list examines.
+const maxVerifyScan = store.MaxVerifyScan
+
 // maxBulkItems caps one bulk decision.
 const maxBulkItems = 100
 
 // maxHashLen bounds an echoed arguments hash ("sha256:" and 64 hex digits).
 const maxHashLen = 128
-
-// storedOutcome mirrors the executor's record in Approval.Result
-// ({"outcome","result":{"summary","blocks","diff"},"reason"}). Blocks are
-// file contents for the model and are never shown here.
-type storedOutcome struct {
-	Outcome string `json:"outcome"`
-	Result  *struct {
-		Summary string `json:"summary"`
-		Diff    string `json:"diff"`
-	} `json:"result"`
-	Reason string `json:"reason"`
-}
 
 // approvalViewer builds views inside one read transaction, looking up each
 // approval's job once, with the light GetJobStatus (never the checkpoint).
@@ -102,8 +93,8 @@ func (v *approvalViewer) view(a store.Approval) (approvalView, error) {
 // is pending, approved or executing.
 func outcomeOf(a store.Approval, j *store.JobStatus) *outcomeView {
 	if len(a.Result) > 0 {
-		var so storedOutcome
-		if err := json.Unmarshal(a.Result, &so); err != nil {
+		so, err := store.DecodeOutcome(a.Result) // blocks are for the model, never shown here
+		if err != nil {
 			return &outcomeView{State: "unknown", Reason: reasonUnreadable}
 		}
 		o := &outcomeView{State: so.Outcome, Reason: capText(so.Reason, maxReasonView)}
@@ -148,7 +139,9 @@ func outcomeOf(a store.Approval, j *store.JobStatus) *outcomeView {
 // listApprovals is GET /agent-api/v1/approvals?state=&job_id=&needs_verification=&limit=&cursor=
 // (state default pending, "all" for every state; newest first).
 // needs_verification=true (the only value) keeps the approvals whose
-// needs_verification is true; with it the state defaults to all.
+// needs_verification is true; with it the state defaults to all, and one
+// request examines at most maxVerifyScan candidates (a page cut there may be
+// short or empty and carries a cursor).
 func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
@@ -180,7 +173,7 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	// approvals carry args and preview (up to 2 MiB each): the store loads
 	// only the rows within the response's byte budget (plus the one that
 	// reaches it)
-	f := store.ApprovalFilter{Limit: limit + 1, MaxBytes: maxListBytes, NeedsVerification: verify}
+	f := store.ApprovalFilter{Limit: limit + 1, MaxBytes: maxListBytes}
 	switch {
 	case state == "" && verify: // every state
 	case state == "":
@@ -209,7 +202,13 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 			}
 			f.Before = &k
 		}
-		list, err := tx.ListApprovals(p.UserID, f)
+		var list []store.Approval
+		var scannedTo *store.PageKey
+		if verify {
+			list, scannedTo, err = tx.ListApprovalsToVerify(p.UserID, f, maxVerifyScan)
+		} else {
+			list, err = tx.ListApprovals(p.UserID, f)
+		}
 		if err != nil {
 			return err
 		}
@@ -221,6 +220,11 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 			// can follow (the next page may then be empty, with a null cursor)
 			last := list[len(list)-1].ID
 			out.NextCursor = &last
+		}
+		if err == nil && out.NextCursor == nil && scannedTo != nil {
+			// the scan cap ended the search: the page (maybe empty) holds
+			// everything up to that row, the rest follows after it
+			out.NextCursor = &scannedTo.ID
 		}
 		return err
 	})

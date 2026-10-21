@@ -64,7 +64,8 @@ type Outcome struct {
 	Err        error
 }
 
-// stored is the JSON kept in the idempotency record and the approval result.
+// stored is the JSON kept in the idempotency record and the approval result
+// (written here, read with store.DecodeOutcome).
 type stored struct {
 	Outcome string        `json:"outcome"`
 	Result  *tools.Result `json:"result,omitempty"`
@@ -82,13 +83,19 @@ func encode(o Outcome) json.RawMessage {
 }
 
 func decodeOutcome(raw json.RawMessage) Outcome {
-	var s stored
-	if err := json.Unmarshal(raw, &s); err != nil {
+	s, err := store.DecodeOutcome(raw) // the one decoder every reader of a stored outcome uses
+	if err != nil {
 		return Outcome{State: OutcomeUnknown, Reason: "the stored outcome is unreadable; please verify the action", Reconciled: true}
 	}
 	o := Outcome{Reason: s.Reason, Reconciled: true}
 	if s.Result != nil {
-		o.Result = *s.Result
+		o.Result = tools.Result{Summary: s.Result.Summary, Diff: s.Result.Diff}
+		if s.Result.Blocks != nil {
+			o.Result.Blocks = make([]tools.Block, len(s.Result.Blocks))
+			for i, b := range s.Result.Blocks {
+				o.Result.Blocks[i] = tools.Block(b) // fails to compile if the shapes drift apart
+			}
+		}
 	}
 	switch s.Outcome {
 	case "done":

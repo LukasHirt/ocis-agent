@@ -43,18 +43,28 @@ func settledApproval(t *testing.T, st store.Store, clk *Clock, c store.Claim, ke
 
 func listVerify(t *testing.T, st store.Store, user string, f store.ApprovalFilter) []string {
 	t.Helper()
-	f.NeedsVerification = true
+	ids, to := scanVerify(t, st, user, f, 0)
+	if to != nil {
+		t.Fatalf("the scan stopped early at %+v", to)
+	}
+	return ids
+}
+
+func scanVerify(t *testing.T, st store.Store, user string, f store.ApprovalFilter, maxScan int) ([]string, *store.PageKey) {
+	t.Helper()
 	var ids []string
+	var to *store.PageKey
 	if err := st.View(bg(), func(tx store.Tx) error {
-		list, err := tx.ListApprovals(user, f)
+		list, k, err := tx.ListApprovalsToVerify(user, f, maxScan)
 		for _, a := range list {
 			ids = append(ids, a.ID)
 		}
+		to = k
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return ids
+	return ids, to
 }
 
 func runAcknowledge(t *testing.T, f Factory) {
@@ -196,6 +206,44 @@ func runAcknowledge(t *testing.T, f Factory) {
 		mustUser(t, st, "u2")
 		if got := listVerify(t, st, "u2", store.ApprovalFilter{}); len(got) != 0 {
 			t.Errorf("another user = %v", got)
+		}
+	})
+
+	t.Run("the verification scan examines at most maxScan candidates", func(t *testing.T) {
+		st, clk := open(t, f)
+		c := runningFor(t, st, "u1")
+		old := settledApproval(t, st, clk, c, "old", store.ApprovalUnknown, "")
+		var certain []store.Approval
+		for i := 0; i < 5; i++ {
+			clk.Advance(time.Second)
+			certain = append(certain, settledApproval(t, st, clk, c, string(rune('a'+i)), store.ApprovalExecuted, `{"outcome":"done"}`))
+		}
+		clk.Advance(time.Second)
+		putApproval(t, st, c, approvalFor(c, clk, "pending")) // no candidate: not counted
+		clk.Advance(time.Second)
+		newest := settledApproval(t, st, clk, c, "new", store.ApprovalUnknown, "")
+
+		// newest first: new, e, d, c (the cap), then b, a, old
+		ids, to := scanVerify(t, st, "u1", store.ApprovalFilter{}, 4)
+		if !equalIDs(ids, []string{newest.ID}) || to == nil || to.ID != certain[2].ID ||
+			!to.At.Equal(getApproval(t, st, "u1", certain[2].ID).RequestedAt) {
+			t.Fatalf("first scan = %v, stopped at %+v", ids, to)
+		}
+		ids, to = scanVerify(t, st, "u1", store.ApprovalFilter{Before: to}, 2)
+		if len(ids) != 0 || to == nil || to.ID != certain[0].ID {
+			t.Fatalf("second scan = %v, stopped at %+v", ids, to)
+		}
+		ids, to = scanVerify(t, st, "u1", store.ApprovalFilter{Before: to}, 2)
+		if !equalIDs(ids, []string{old.ID}) || to != nil {
+			t.Fatalf("last scan = %v, stopped at %+v", ids, to)
+		}
+		// a scan that ends on its limit does not report a stop
+		if ids, to := scanVerify(t, st, "u1", store.ApprovalFilter{Limit: 1}, 1); !equalIDs(ids, []string{newest.ID}) || to != nil {
+			t.Fatalf("limit = %v, %+v", ids, to)
+		}
+		// the default cap covers this history
+		if ids, to := scanVerify(t, st, "u1", store.ApprovalFilter{}, 0); !equalIDs(ids, []string{newest.ID, old.ID}) || to != nil {
+			t.Fatalf("default = %v, %+v", ids, to)
 		}
 	})
 }

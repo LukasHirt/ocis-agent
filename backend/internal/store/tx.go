@@ -161,6 +161,14 @@ type Tx interface {
 	// ListApprovals returns the user's approvals, newest first. f.Limit <= 0
 	// means 50; the maximum is 500.
 	ListApprovals(userID string, f ApprovalFilter) ([]Approval, error)
+	// ListApprovalsToVerify is ListApprovals restricted to the approvals
+	// whose NeedsVerification is true. It examines at most maxScan
+	// candidates (<= 0 or more than MaxVerifyScan: MaxVerifyScan) in list
+	// order, reading their state and result but not their args. If it
+	// stopped because of maxScan, scannedTo is the key of the last row it
+	// examined: everything up to it is covered, so a client continues after
+	// it. Otherwise scannedTo is nil.
+	ListApprovalsToVerify(userID string, f ApprovalFilter, maxScan int) (list []Approval, scannedTo *PageKey, err error)
 	// DecideApproval records the user's decision (approved or rejected) on a
 	// pending approval. ErrNotFound; ErrConflict if it is no longer pending;
 	// ErrExpired if it is past ExpiresAt (state unchanged); ErrInvalid if the

@@ -1,13 +1,16 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/store"
+	"github.com/owncloud/ocis-agent/backend/internal/store/storetest"
 )
 
 func (s *stack) acknowledge(login, id, body string) *httptest.ResponseRecorder {
@@ -119,7 +122,10 @@ func TestAcknowledgeRefusals(t *testing.T) {
 	s.settle(t, marie, store.ApprovalUnknown, "")
 
 	for _, a := range []store.Approval{pending, aps["approved:"], aps[`executed:{"outcome":"done","result":{"summary":"ok"}}`], aps[`failed:{"outcome":"failed","reason":"no"}`]} {
-		wantError(t, s.acknowledge("einstein", a.ID, ""), http.StatusConflict, "not_acknowledgeable")
+		e := wantError(t, s.acknowledge("einstein", a.ID, ""), http.StatusConflict, "not_acknowledgeable")
+		if e.Error.Message != "There is no uncertain outcome to acknowledge for this action." {
+			t.Errorf("message = %q", e.Error.Message)
+		}
 		if got := s.approval(t, einsteinID, a.ID); got.AcknowledgedAt != nil {
 			t.Errorf("%s acknowledged", got.State)
 		}
@@ -233,5 +239,68 @@ func TestApprovalListVerificationFilter(t *testing.T) {
 	}
 	for _, q := range []string{"false", "1", "", "TRUE", "true&needs_verification=true"} {
 		wantError(t, s.as("einstein", http.MethodGet, approvalsPath+"?needs_verification="+q, ""), http.StatusBadRequest, "invalid_request")
+	}
+}
+
+// TestOutcomeViewAgreesWithTheStore: the view's outcome is unknown exactly
+// when the store calls the outcome uncertain (needs_verification).
+func TestOutcomeViewAgreesWithTheStore(t *testing.T) {
+	for _, raw := range storetest.StoredResults {
+		a := store.Approval{State: store.ApprovalExecuted, Result: json.RawMessage(raw)}
+		o := outcomeOf(a, nil)
+		if got, want := o != nil && o.State == "unknown", a.OutcomeUncertain(); got != want {
+			t.Errorf("%s: view unknown = %v, store uncertain = %v", raw, got, want)
+		}
+	}
+}
+
+// TestVerificationListScansABoundedHistory: a long history without an
+// uncertain outcome is not walked in one request; a page that stopped at
+// the scan cap is short (here empty) and carries a cursor, and following
+// the cursors reaches every uncertain approval.
+func TestVerificationListScansABoundedHistory(t *testing.T) {
+	s := newWorkStack(t)
+	oldest := s.settledApprovals(t, einsteinID, map[store.ApprovalState][]string{store.ApprovalUnknown: {""}})["unknown:"]
+	s.fake.Advance(time.Second)
+	c := s.startJob(t, einsteinID, "chat", "history")
+	args := make([]string, maxVerifyScan+maxVerifyScan/2)
+	for i := range args {
+		args[i] = fmt.Sprintf(`{"n":%d}`, i)
+	}
+	history := s.requestApprovals(t, c, args...)
+	s.mustTx(t, func(tx store.Tx) error {
+		for _, a := range history {
+			if _, err := tx.DecideApproval(a.UserID, a.ID, store.ApprovalApproved, a.UserID, a.ArgsHash); err != nil {
+				return err
+			}
+			if _, err := tx.TransitionApproval(a.UserID, a.ID, store.ApprovalApproved, store.ApprovalExecuting, store.ApprovalPatch{}); err != nil {
+				return err
+			}
+			if _, err := tx.TransitionApproval(a.UserID, a.ID, store.ApprovalExecuting, store.ApprovalExecuted,
+				store.ApprovalPatch{Result: json.RawMessage(`{"outcome":"done","result":{"summary":"ok"}}`)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	s.fake.Advance(time.Second)
+	newest := s.settledApprovals(t, einsteinID, map[store.ApprovalState][]string{store.ApprovalUnknown: {""}})["unknown:"]
+
+	p := s.listApprovals(t, "einstein", "?needs_verification=true")
+	if got := ids(p.Approvals); len(got) != 1 || got[0] != newest.ID || p.NextCursor == nil {
+		t.Fatalf("page 1 = %v %v: the scan must stop at the cap with a cursor", got, p.NextCursor)
+	}
+	var seen []string
+	seen = append(seen, ids(p.Approvals)...)
+	pages := 1
+	for p.NextCursor != nil {
+		p = s.listApprovals(t, "einstein", "?needs_verification=true&cursor="+*p.NextCursor)
+		seen = append(seen, ids(p.Approvals)...)
+		if pages++; pages > 10 {
+			t.Fatal("the cursors do not advance")
+		}
+	}
+	if strings.Join(seen, ",") != newest.ID+","+oldest.ID || pages < 2 {
+		t.Fatalf("seen %v in %d pages", seen, pages)
 	}
 }

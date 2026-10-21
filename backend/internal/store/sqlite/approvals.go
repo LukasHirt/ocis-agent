@@ -130,8 +130,9 @@ func (t *tx) CountPendingOfLiveJobs(userID string) (int, error) {
 	return n, err
 }
 
-// ListApprovals implements store.Tx.
-func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Approval, error) {
+// approvalListQuery is the FROM ... ORDER BY tail of a list query and its
+// arguments, with the limit clamped.
+func approvalListQuery(userID string, f store.ApprovalFilter, extra string) (string, []any, int, error) {
 	limit := f.Limit
 	if limit <= 0 {
 		limit = defaultApprovalLimit
@@ -140,7 +141,7 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		limit = maxApprovalLimit
 	}
 	if f.MaxBytes < 0 {
-		return nil, store.Invalid("the byte budget must not be negative")
+		return "", nil, 0, store.Invalid("the byte budget must not be negative")
 	}
 	query := ` FROM approvals WHERE user_id = ?`
 	args := []any{userID}
@@ -156,32 +157,105 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
-	if f.NeedsVerification {
-		// the candidates; Approval.NeedsVerification decides on each
-		query += ` AND acknowledged_at IS NULL AND (state = 'unknown' OR result != '')`
-	}
+	query += extra
 	cond, cargs, err := keysetBefore("requested_at", f.Before)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	query += cond + ` ORDER BY requested_at DESC, id DESC`
+	return query, append(args, cargs...), limit, nil
+}
+
+// ListApprovals implements store.Tx.
+func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Approval, error) {
+	query, args, limit, err := approvalListQuery(userID, f, "")
 	if err != nil {
 		return nil, err
 	}
-	query += cond + ` ORDER BY requested_at DESC, id DESC`
-	args = append(args, cargs...)
-
-	if f.MaxBytes > 0 || f.NeedsVerification {
-		// first the sizes (and the outcomes to check), then only the rows
-		// within the limit and the budget
-		ids, err := t.approvalsWithin(query, args, limit, f.MaxBytes, f.NeedsVerification)
-		if err != nil || len(ids) == 0 {
+	query += ` LIMIT ?`
+	args = append(args, limit)
+	if f.MaxBytes > 0 {
+		// first the sizes, then only the rows within the budget
+		ids, err := t.approvalsWithin(query, args, f.MaxBytes)
+		if err != nil {
 			return nil, err
 		}
-		marks := strings.Repeat(",?", len(ids))[1:]
-		query = ` FROM approvals WHERE user_id = ? AND id IN (` + marks + `) ORDER BY requested_at DESC, id DESC`
-		args = append([]any{userID}, ids...)
-	} else {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+		return t.approvalsByID(userID, ids)
 	}
-	rows, err := t.q.QueryContext(t.ctx, `SELECT `+approvalColumns+query, args...)
+	return t.queryApprovals(query, args)
+}
+
+// ListApprovalsToVerify implements store.Tx.
+func (t *tx) ListApprovalsToVerify(userID string, f store.ApprovalFilter, maxScan int) ([]store.Approval, *store.PageKey, error) {
+	if maxScan <= 0 || maxScan > store.MaxVerifyScan {
+		maxScan = store.MaxVerifyScan
+	}
+	// the candidates; Approval.NeedsVerification decides on each
+	query, args, limit, err := approvalListQuery(userID, f,
+		` AND acknowledged_at IS NULL AND (state = 'unknown' OR result != '')`)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT id, requested_at, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0), state, result`+
+			query+` LIMIT ?`, append(args, maxScan)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ids []any
+	var total int64
+	var last store.PageKey
+	scanned, stopped := 0, false
+	for rows.Next() {
+		var id, state, result string
+		var at, n int64
+		if err := rows.Scan(&id, &at, &n, &state, &result); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		scanned++
+		last = store.PageKey{At: fromMS(at), ID: id}
+		a := store.Approval{State: store.ApprovalState(state)}
+		if result != "" {
+			a.Result = json.RawMessage(result)
+		}
+		if !a.NeedsVerification() {
+			continue
+		}
+		ids = append(ids, id)
+		if total += n; len(ids) >= limit || (f.MaxBytes > 0 && total >= f.MaxBytes) {
+			stopped = true
+			break
+		}
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	var to *store.PageKey
+	if !stopped && scanned == maxScan {
+		to = &last
+	}
+	list, err := t.approvalsByID(userID, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	return list, to, nil
+}
+
+// approvalsByID loads the user's approvals with these ids in list order.
+func (t *tx) approvalsByID(userID string, ids []any) ([]store.Approval, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	marks := strings.Repeat(",?", len(ids))[1:]
+	return t.queryApprovals(` FROM approvals WHERE user_id = ? AND id IN (`+marks+`) ORDER BY requested_at DESC, id DESC`,
+		append([]any{userID}, ids...))
+}
+
+func (t *tx) queryApprovals(tail string, args []any) ([]store.Approval, error) {
+	rows, err := t.q.QueryContext(t.ctx, `SELECT `+approvalColumns+tail, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,19 +271,11 @@ func (t *tx) ListApprovals(userID string, f store.ApprovalFilter) ([]store.Appro
 	return out, rows.Err()
 }
 
-// approvalsWithin returns the ids of at most limit rows of the list query
-// (FROM ... ORDER BY tail) until their args and preview reach budget bytes
-// (budget 0: no budget). With verify only the rows whose outcome needs
-// verification count; their state and result are read, never their args.
-func (t *tx) approvalsWithin(tail string, args []any, limit int, budget int64, verify bool) ([]any, error) {
-	cols := `SELECT id, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0), '', ''`
-	if verify {
-		cols = `SELECT id, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0), state, result`
-	} else {
-		tail += ` LIMIT ?`
-		args = append(args[:len(args):len(args)], limit)
-	}
-	rows, err := t.q.QueryContext(t.ctx, cols+tail, args...)
+// approvalsWithin returns the ids of the rows of the list query (FROM ...
+// LIMIT tail) until their args and preview reach budget bytes.
+func (t *tx) approvalsWithin(tail string, args []any, budget int64) ([]any, error) {
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT id, ifnull(length(CAST(args AS BLOB)), 0) + ifnull(length(CAST(preview AS BLOB)), 0)`+tail, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -217,22 +283,13 @@ func (t *tx) approvalsWithin(tail string, args []any, limit int, budget int64, v
 	var ids []any
 	var total int64
 	for rows.Next() {
-		var id, state, result string
+		var id string
 		var n int64
-		if err := rows.Scan(&id, &n, &state, &result); err != nil {
+		if err := rows.Scan(&id, &n); err != nil {
 			return nil, err
 		}
-		if verify {
-			a := store.Approval{State: store.ApprovalState(state)}
-			if result != "" {
-				a.Result = json.RawMessage(result)
-			}
-			if !a.NeedsVerification() {
-				continue
-			}
-		}
 		ids = append(ids, id)
-		if total += n; len(ids) >= limit || (budget > 0 && total >= budget) {
+		if total += n; total >= budget {
 			break
 		}
 	}

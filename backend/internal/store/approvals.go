@@ -90,20 +90,53 @@ type Approval struct {
 	AcknowledgedBy string
 }
 
-// recordedOutcome is the shape of a readable Result: the executor's
-// {"outcome","result":{"summary","diff",...},"reason"}.
-type recordedOutcome struct {
-	Outcome string `json:"outcome"`
-	Result  *struct {
-		Summary string `json:"summary"`
-		Diff    string `json:"diff"`
-	} `json:"result"`
-	Reason string `json:"reason"`
+// RecordedOutcome is a stored approval result (Approval.Result), as the
+// executor writes it: {"outcome","result":{"summary","blocks","diff"},
+// "reason"}. Every reader decodes it with DecodeOutcome, so all agree on
+// what is readable.
+type RecordedOutcome struct {
+	Outcome string         `json:"outcome"`
+	Result  *OutcomeResult `json:"result"`
+	Reason  string         `json:"reason"`
+}
+
+// OutcomeResult is the tool result of a done outcome (tools.Result).
+type OutcomeResult struct {
+	Summary string         `json:"summary"`
+	Blocks  []OutcomeBlock `json:"blocks"`
+	Diff    string         `json:"diff"`
+}
+
+// OutcomeBlock is one untrusted block of a tool result (tools.Block).
+type OutcomeBlock struct {
+	Source  string `json:"source"`
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Content string `json:"content"`
+}
+
+// DecodeOutcome decodes a stored result. An error means it is unreadable.
+func DecodeOutcome(raw json.RawMessage) (RecordedOutcome, error) {
+	var o RecordedOutcome
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return RecordedOutcome{}, err
+	}
+	return o, nil
+}
+
+// Certain reports an outcome that is known: done, failed or expired.
+func (o RecordedOutcome) Certain() bool {
+	switch o.Outcome {
+	case "done", "failed", "expired":
+		return true
+	}
+	return false
 }
 
 // OutcomeUncertain reports whether nobody knows for sure what the approved
 // action did: the state is unknown, or a stored result is unreadable or
-// records an unknown outcome. The user should check their files.
+// records an outcome that is not Certain. The user should check their
+// files.
 func (a Approval) OutcomeUncertain() bool {
 	if a.State == ApprovalUnknown {
 		return true
@@ -111,15 +144,8 @@ func (a Approval) OutcomeUncertain() bool {
 	if len(a.Result) == 0 {
 		return false
 	}
-	var o recordedOutcome
-	if err := json.Unmarshal(a.Result, &o); err != nil {
-		return true
-	}
-	switch o.Outcome {
-	case "done", "failed", "expired":
-		return false
-	}
-	return true
+	o, err := DecodeOutcome(a.Result)
+	return err != nil || !o.Certain()
 }
 
 // NeedsVerification reports an uncertain outcome the user has not
@@ -141,10 +167,11 @@ type ApprovalFilter struct {
 	// can be up to 2 MiB each, stays within the budget plus one row. The
 	// rows past the budget are never loaded. < 0 is ErrInvalid.
 	MaxBytes int64
-	// NeedsVerification keeps only the approvals whose NeedsVerification
-	// is true (together with the other conditions).
-	NeedsVerification bool
 }
+
+// MaxVerifyScan is the most candidate rows one ListApprovalsToVerify
+// examines.
+const MaxVerifyScan = 2000
 
 // ApprovalPatch carries what a worker transition may record.
 type ApprovalPatch struct {

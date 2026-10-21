@@ -33,7 +33,7 @@ var errorMessages = map[string]string{
 	"job_ended":              "The job has already ended.",
 	"stale_arguments":        "The action is not the one you were shown; reload it.",
 	"already_decided":        "This approval has already been decided.",
-	"not_acknowledgeable":    "The outcome of this action is known; there is nothing to acknowledge.",
+	"not_acknowledgeable":    "There is no uncertain outcome to acknowledge for this action.",
 	"limit_reached":          "A limit has been reached.",
 	"not_enrolled":           "You are not enrolled; enrol first.",
 	"budget_exhausted":       "Today's token budget is used up; it resets at midnight UTC.",
@@ -104,8 +104,8 @@ var (
 	// errAlreadyDecided: the approval is no longer pending.
 	errAlreadyDecided = newAPIError(http.StatusConflict, "already_decided")
 	errExpired        = newAPIError(http.StatusGone, "expired")
-	// errNotAcknowledgeable: the approval's outcome is not uncertain (or
-	// not settled yet).
+	// errNotAcknowledgeable: the approval has no uncertain outcome (it is
+	// certain, or not settled yet).
 	errNotAcknowledgeable = newAPIError(http.StatusConflict, "not_acknowledgeable")
 )
 
