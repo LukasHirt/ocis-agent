@@ -43,9 +43,11 @@ type Credentials interface {
 	Seen(ctx context.Context, userID string) error
 }
 
-// Decider records the user's approval decisions (approvals.Gate).
+// Decider records the user's approval decisions and acknowledgements
+// (approvals.Gate).
 type Decider interface {
 	Decide(ctx context.Context, userID, decidedBy string, items []approvals.DecisionItem) ([]store.Approval, error)
+	Acknowledge(ctx context.Context, userID, approvalID, by string) (store.Approval, error)
 }
 
 // Waker wakes the workers after a change that makes a job claimable
@@ -226,6 +228,7 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/approvals/{id}", s.getApproval)
 	s.handle("POST /agent-api/v1/approvals/{id}/decision", s.decideApproval)
 	s.handle("POST /agent-api/v1/approvals/bulk-decision", s.bulkDecision)
+	s.handle("POST /agent-api/v1/approvals/{id}/acknowledge", s.acknowledgeApproval)
 	s.handle("GET /agent-api/v1/memory", s.listMemory)
 	// no {name...} subtree pattern (the mux would redirect /memory): the
 	// notes folder has its own single-segment pattern

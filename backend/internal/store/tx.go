@@ -173,6 +173,17 @@ type Tx interface {
 	// the edges ApprovalTransitionAllowed permits. ErrInvalid for any other
 	// edge, ErrNotFound, ErrConflict if the current state is not from.
 	TransitionApproval(userID, id string, from, to ApprovalState, patch ApprovalPatch) (Approval, error)
+	// AcknowledgeApproval records that the user checked the uncertain
+	// outcome of a settled approval (Terminal and OutcomeUncertain): it sets
+	// AcknowledgedAt and AcknowledgedBy and changes nothing else, so the
+	// state machine and what may execute are untouched. Settled approvals
+	// never move again, so an acknowledgement is never followed by another
+	// outcome. changed is false (and nothing is written) if it was already
+	// acknowledged. ErrNotFound; ErrInvalid if by is empty; ErrConflict if
+	// the approval is not settled or its outcome is certain. Run it in the
+	// same transaction as the approval_acknowledged audit event (when
+	// changed).
+	AcknowledgeApproval(userID, id, by string) (a Approval, changed bool, err error)
 	// ExpireApprovals moves every pending approval past its ExpiresAt to
 	// expired and returns what it changed. Run it in the same transaction as
 	// ResumeJobIfSettled for every returned ref: the refs are never returned

@@ -83,7 +83,48 @@ type Approval struct {
 	DecidedAt   *time.Time
 	ExecutedAt  *time.Time
 	Result      json.RawMessage
+	// AcknowledgedAt and AcknowledgedBy record that the user checked an
+	// uncertain outcome (AcknowledgeApproval). They change neither the
+	// state nor the result.
+	AcknowledgedAt *time.Time
+	AcknowledgedBy string
 }
+
+// recordedOutcome is the shape of a readable Result: the executor's
+// {"outcome","result":{"summary","diff",...},"reason"}.
+type recordedOutcome struct {
+	Outcome string `json:"outcome"`
+	Result  *struct {
+		Summary string `json:"summary"`
+		Diff    string `json:"diff"`
+	} `json:"result"`
+	Reason string `json:"reason"`
+}
+
+// OutcomeUncertain reports whether nobody knows for sure what the approved
+// action did: the state is unknown, or a stored result is unreadable or
+// records an unknown outcome. The user should check their files.
+func (a Approval) OutcomeUncertain() bool {
+	if a.State == ApprovalUnknown {
+		return true
+	}
+	if len(a.Result) == 0 {
+		return false
+	}
+	var o recordedOutcome
+	if err := json.Unmarshal(a.Result, &o); err != nil {
+		return true
+	}
+	switch o.Outcome {
+	case "done", "failed", "expired":
+		return false
+	}
+	return true
+}
+
+// NeedsVerification reports an uncertain outcome the user has not
+// acknowledged yet.
+func (a Approval) NeedsVerification() bool { return a.AcknowledgedAt == nil && a.OutcomeUncertain() }
 
 // ApprovalFilter narrows ListApprovals.
 type ApprovalFilter struct {
@@ -100,6 +141,9 @@ type ApprovalFilter struct {
 	// can be up to 2 MiB each, stays within the budget plus one row. The
 	// rows past the budget are never loaded. < 0 is ErrInvalid.
 	MaxBytes int64
+	// NeedsVerification keeps only the approvals whose NeedsVerification
+	// is true (together with the other conditions).
+	NeedsVerification bool
 }
 
 // ApprovalPatch carries what a worker transition may record.

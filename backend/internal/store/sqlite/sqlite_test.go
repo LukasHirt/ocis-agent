@@ -209,10 +209,6 @@ func TestJobEndedAtBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var version int
-	if err := s.w.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
 	var live, done store.Job
 	if err := s.InTx(context.Background(), func(tx store.Tx) error {
 		if err := tx.PutUser(store.User{ID: "u1", Name: "n", PersonalDriveID: "d"}); err != nil {
@@ -229,11 +225,14 @@ func TestJobEndedAtBackfill(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// back to the schema before the migration, with an updated_at to copy
+	// back to the schema before the migration (0012, so the later ones are
+	// undone too), with an updated_at to copy
 	for _, q := range []string{
+		`ALTER TABLE approvals DROP COLUMN acknowledged_at`,
+		`ALTER TABLE approvals DROP COLUMN acknowledged_by`,
 		`ALTER TABLE jobs DROP COLUMN ended_at`,
 		`UPDATE jobs SET updated_at = 123456789`,
-		`PRAGMA user_version = ` + strconv.Itoa(version-1),
+		`PRAGMA user_version = 11`,
 	} {
 		if _, err := s.w.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)

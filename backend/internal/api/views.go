@@ -217,7 +217,9 @@ type approvalView struct {
 	ExecutedAt        *string         `json:"executed_at"`
 	Outcome           *outcomeView    `json:"outcome"` // null while undecided or not yet run
 	JobEnded          bool            `json:"job_ended"`
-	NeedsVerification bool            `json:"needs_verification"`
+	NeedsVerification bool            `json:"needs_verification"` // uncertain outcome, not acknowledged
+	AcknowledgedAt    *string         `json:"acknowledged_at"`
+	AcknowledgedBy    string          `json:"acknowledged_by"`
 }
 
 // outcomeView is how a decided approval ended. State is done, failed,

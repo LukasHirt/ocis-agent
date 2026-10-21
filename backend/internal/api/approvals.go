@@ -92,7 +92,8 @@ func (v *approvalViewer) view(a store.Approval) (approvalView, error) {
 		out.Preview = json.RawMessage("{}")
 	}
 	out.Outcome = outcomeOf(a, j)
-	out.NeedsVerification = a.State == store.ApprovalUnknown || (out.Outcome != nil && out.Outcome.State == "unknown")
+	out.NeedsVerification = a.NeedsVerification()
+	out.AcknowledgedAt, out.AcknowledgedBy = timePtrView(a.AcknowledgedAt), a.AcknowledgedBy
 	return out, nil
 }
 
@@ -144,20 +145,33 @@ func outcomeOf(a store.Approval, j *store.JobStatus) *outcomeView {
 	return nil
 }
 
-// listApprovals is GET /agent-api/v1/approvals?state=&job_id=&limit=&cursor=
+// listApprovals is GET /agent-api/v1/approvals?state=&job_id=&needs_verification=&limit=&cursor=
 // (state default pending, "all" for every state; newest first).
+// needs_verification=true (the only value) keeps the approvals whose
+// needs_verification is true; with it the state defaults to all.
 func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	p, ok := principal(r.Context())
 	if !ok {
 		return errNoPrincipal
 	}
-	q, err := query(r, "state", "job_id", "limit", "cursor")
+	q, err := query(r, "state", "job_id", "needs_verification", "limit", "cursor")
 	if err != nil {
 		return err
 	}
 	state, err := queryValue(q, "state")
 	if err != nil {
 		return err
+	}
+	verify := false
+	if _, ok := q["needs_verification"]; ok {
+		v, err := queryValue(q, "needs_verification")
+		if err != nil {
+			return err
+		}
+		if v != "true" {
+			return errBadQuery
+		}
+		verify = true
 	}
 	limit, cursor, err := pageParams(q, maxApprovPageLimit)
 	if err != nil {
@@ -166,8 +180,9 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) error {
 	// approvals carry args and preview (up to 2 MiB each): the store loads
 	// only the rows within the response's byte budget (plus the one that
 	// reaches it)
-	f := store.ApprovalFilter{Limit: limit + 1, MaxBytes: maxListBytes}
+	f := store.ApprovalFilter{Limit: limit + 1, MaxBytes: maxListBytes, NeedsVerification: verify}
 	switch {
+	case state == "" && verify: // every state
 	case state == "":
 		f.States = []store.ApprovalState{store.ApprovalPending}
 	case state == "all":
@@ -477,5 +492,38 @@ func (s *Server) bulkDecision(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, approvalsView{Approvals: views})
+	return nil
+}
+
+// acknowledgeApproval is POST /agent-api/v1/approvals/{id}/acknowledge
+// (empty body or {}): the user checked the uncertain outcome of an approval
+// (needs_verification), which then no longer needs verification. The state
+// stays as it is and nothing is woken. 200 with the view, also when it was
+// acknowledged before; 409 not_acknowledgeable when the outcome is not
+// uncertain.
+func (s *Server) acknowledgeApproval(w http.ResponseWriter, r *http.Request) error {
+	p, ok := principal(r.Context())
+	if !ok {
+		return errNoPrincipal
+	}
+	id := r.PathValue("id")
+	if !validID(id) {
+		return errNotFound
+	}
+	var body struct{}
+	if err := decodeOptionalBody(w, r, &body); err != nil {
+		return err
+	}
+	if _, err := s.d.Gate.Acknowledge(r.Context(), p.UserID, id, p.Subject); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return errNotAcknowledgeable
+		}
+		return err
+	}
+	views, err := s.approvalViews(r, p.UserID, []string{id})
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, views[0])
 	return nil
 }

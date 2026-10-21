@@ -85,6 +85,38 @@ func (g *Gate) Decide(ctx context.Context, userID, decidedBy string, items []Dec
 	return out, nil
 }
 
+// Acknowledge records that the user checked the uncertain outcome of an
+// approval (store.Approval.OutcomeUncertain) and audits it in the same
+// transaction (job and approval ids and the tool, never arguments). The
+// state does not change and nothing is woken or executed; a second
+// acknowledgement returns the stored one and audits nothing.
+// store.ErrConflict if the outcome is not uncertain. Only a request
+// authenticated with the user's OIDC token may call this.
+func (g *Gate) Acknowledge(ctx context.Context, userID, approvalID, by string) (store.Approval, error) {
+	if by == "" {
+		return store.Approval{}, store.Invalid("the acknowledging user is required")
+	}
+	var out store.Approval
+	err := g.st.InTx(ctx, func(tx store.Tx) error {
+		a, changed, err := tx.AcknowledgeApproval(userID, approvalID, by)
+		if err != nil {
+			return err
+		}
+		out = a
+		if !changed {
+			return nil
+		}
+		return g.event(tx, audit.Event{
+			UserID: userID, JobID: a.JobID, Kind: audit.KindApprovalAcknowledged, Tool: a.Tool, Cred: "oidc",
+			Detail: "approval=" + a.ID,
+		})
+	})
+	if err != nil {
+		return store.Approval{}, err
+	}
+	return out, nil
+}
+
 // ExpireAndResume expires every pending approval past its deadline, audits
 // each, and wakes the jobs that were waiting for them, all in one
 // transaction (the refs are returned only once, so a split would strand the

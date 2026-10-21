@@ -156,6 +156,10 @@ func (fakeDecider) Decide(context.Context, string, string, []approvals.DecisionI
 	return nil, errNotUsed
 }
 
+func (fakeDecider) Acknowledge(context.Context, string, string, string) (store.Approval, error) {
+	return store.Approval{}, errNotUsed
+}
+
 type fakeWaker struct {
 	mu sync.Mutex
 	n  int
