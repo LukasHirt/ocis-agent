@@ -190,4 +190,32 @@ describe('JobDetail', () => {
     await flushPromises()
     expect(w.find('.agent-job-detail-goal').text()).toBe('goal of j1')
   })
+
+  it('shows the partial answer of a running job as unfinished plain text', async () => {
+    const hostile = '<b>so far</b>\u202e'
+    const job = jobOf('j1', { state: 'running', partial: hostile, partial_state: 'writing' })
+    const { w } = await setup(jobsState({ jobs: [job] }))
+    const section = w.find('.agent-job-detail-partial-section')
+    expect(section.find('h3').text()).toBe('Partial answer (unfinished)')
+    const text = section.find('.agent-job-detail-partial')
+    expect(text.find('b').exists()).toBe(false)
+    expect(text.text()).toBe('<b>so far</b>\\u{202E}')
+    expect(w.find('.agent-job-detail-answer-section').exists()).toBe(false)
+  })
+
+  it('says the model of a running job is still thinking', async () => {
+    const job = jobOf('j1', { state: 'running', partial: '', partial_state: 'thinking' })
+    const { w } = await setup(jobsState({ jobs: [job] }))
+    expect(w.find('.agent-job-detail-partial-section').text()).toContain('Thinking…')
+  })
+
+  it.each(['waiting_approval', 'failed', 'succeeded', 'cancelled', 'queued'])(
+    'shows no partial answer for a %s job',
+    async (state) => {
+      const job = jobOf('j1', { state, partial: 'stale', partial_state: 'writing', error: 'The agent stopped.' })
+      const { w } = await setup(jobsState({ jobs: [job] }))
+      expect(w.find('.agent-job-detail-partial-section').exists()).toBe(false)
+      expect(w.text()).not.toContain('stale')
+    }
+  )
 })

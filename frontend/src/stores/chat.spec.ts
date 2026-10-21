@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { apiErr, approvalOf, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
@@ -8,12 +8,13 @@ import {
   chatState,
   conversationOf,
   errWithRetry,
+  jobOfMessage,
   messageOf,
   userMessage,
   type ChatState
 } from '../test/chat'
 import { LOCAL_BLOCK_MAX_MS, MESSAGE_PAGE, useChatStore } from './chat'
-import type { Message } from '../api/types'
+import type { Message, MessageJob } from '../api/types'
 
 let detach: (() => void) | undefined
 afterEach(() => {
@@ -88,7 +89,7 @@ describe('useChatStore', () => {
   it('opens a conversation and shows the thread oldest first', async () => {
     const st = chatState({
       conversations: [conversationOf('c1')],
-      messages: { c1: [answer('m2'), userMessage('m1', { id: 'j1', state: 'succeeded', error: '' })] }
+      messages: { c1: [answer('m2'), userMessage('m1', jobOfMessage('j1', 'succeeded'))] }
     })
     const { chat } = await setup(st)
     await chat.openConversation('c1')
@@ -386,7 +387,7 @@ describe('useChatStore', () => {
   it('refreshes the inline approvals on an activity change', async () => {
     const st = chatState({
       conversations: [conversationOf('c1')],
-      messages: { c1: [userMessage('m1', { id: 'j1', state: 'waiting_approval', error: '' })] },
+      messages: { c1: [userMessage('m1', jobOfMessage('j1', 'waiting_approval'))] },
       approvals: { j1: [approvalOf('a1', { job_id: 'j1' }), approvalOf('a2', { job_id: 'j1' })] }
     })
     const { chat, events } = await setup(st)
@@ -513,8 +514,8 @@ describe('useChatStore', () => {
       conversations: [conversationOf('c1')],
       messages: {
         c1: [
-          userMessage('m2', { id: 'j2', state: 'waiting_approval', error: '' }),
-          userMessage('m1', { id: 'j1', state: 'succeeded', error: '' })
+          userMessage('m2', jobOfMessage('j2', 'waiting_approval')),
+          userMessage('m1', jobOfMessage('j1', 'succeeded'))
         ]
       },
       approvals: { j2: [approvalOf('a1', { job_id: 'j2' })] }
@@ -545,7 +546,7 @@ describe('useChatStore', () => {
   it('refreshes the thread on a jobs change only while a question is unanswered', async () => {
     const st = chatState({
       conversations: [conversationOf('c1')],
-      messages: { c1: [userMessage('m1', { id: 'j1', state: 'succeeded', error: '' })] }
+      messages: { c1: [userMessage('m1', jobOfMessage('j1', 'succeeded'))] }
     })
     const { chat, events, server } = await setup(st)
     await chat.openConversation('c1')
@@ -554,12 +555,92 @@ describe('useChatStore', () => {
     await events().onChanged(['jobs'])
     await flushPromises()
     expect(reads()).toBe(before)
-    st.messages.c1 = [userMessage('m1', { id: 'j1', state: 'running', error: '' })]
+    st.messages.c1 = [userMessage('m1', jobOfMessage('j1', 'running'))]
     await chat.refreshOpen()
-    st.messages.c1 = [userMessage('m1', { id: 'j1', state: 'failed', error: 'The agent stopped.' })]
+    st.messages.c1 = [userMessage('m1', jobOfMessage('j1', 'failed', { error: 'The agent stopped.' }))]
     await events().onChanged(['jobs'])
     await flushPromises()
     expect(chat.thread[0].job?.state).toBe('failed')
+  })
+
+  it('follows the partial answer on change events and replaces it with the answer', async () => {
+    const running = (partial: string, partial_state: string): MessageJob => ({
+      id: 'j1',
+      state: 'running',
+      error: '',
+      partial,
+      partial_state
+    })
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: { c1: [userMessage('m1', running('', 'thinking'))] }
+    })
+    const { chat, events, server } = await setup(st)
+    await chat.openConversation('c1')
+    expect(chat.partials).toEqual({ m1: { text: '', state: 'thinking' } })
+
+    st.messages.c1 = [userMessage('m1', running('Hello', 'writing'))]
+    await events().onChanged(['jobs', 'messages'])
+    await flushPromises()
+    expect(chat.partials).toEqual({ m1: { text: 'Hello', state: 'writing' } })
+
+    // nothing is read between change events (no polling of its own)
+    const reads = () => server.calls.filter((c) => c.path === '/conversations/c1/messages').length
+    const before = reads()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval'] })
+    try {
+      vi.advanceTimersByTime(30_000)
+      await flushPromises()
+      expect(reads()).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // the end: the answer is listed, the partial gone in the same read
+    st.messages.c1 = [
+      { ...answer('m2', 'Hello world'), job_id: 'j1' },
+      userMessage('m1', { ...running('', ''), state: 'succeeded' })
+    ]
+    await events().onChanged(['jobs', 'messages'])
+    await flushPromises()
+    expect(chat.partials).toEqual({})
+    expect(chat.thread.map((m) => m.content)).toEqual(['question m1', 'Hello world'])
+  })
+
+  it.each([
+    ['waiting_approval', 'text', 'writing'],
+    ['failed', 'text', 'writing'],
+    ['cancelled', 'text', 'writing'],
+    ['queued', 'text', 'thinking'],
+    ['succeeded', 'text', 'writing'],
+    ['running', '', ''],
+    ['running', 'text', ''],
+    ['running', 'text', 'dreaming']
+  ])('shows no partial for a %s job with %j (%s)', async (state, partial, partial_state) => {
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: { c1: [userMessage('m1', { id: 'j1', state, error: '', partial, partial_state })] }
+    })
+    const { chat } = await setup(st)
+    await chat.openConversation('c1')
+    expect(chat.partials).toEqual({})
+  })
+
+  it('shows no partial once the answer of its job is listed, nor on an answer or notice', async () => {
+    const job: MessageJob = { id: 'j1', state: 'running', error: '', partial: 'x', partial_state: 'writing' }
+    const st = chatState({
+      conversations: [conversationOf('c1')],
+      messages: {
+        c1: [
+          { ...answer('m3', 'final'), job_id: 'j1', job },
+          messageOf('m2', { role: 'system', job_id: 'j1', job }),
+          userMessage('m1', job)
+        ]
+      }
+    })
+    const { chat } = await setup(st)
+    await chat.openConversation('c1')
+    expect(chat.partials).toEqual({})
   })
 
   it('reads everything again on a ready or poll', async () => {

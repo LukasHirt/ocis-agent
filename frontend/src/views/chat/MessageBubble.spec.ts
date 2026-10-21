@@ -7,7 +7,7 @@ import { approvalOf } from '../../test/fixtures'
 import type { MessageJob } from '../../api/types'
 import type { JobApprovals } from '../../stores/chat'
 
-const job = (state: string, error = ''): MessageJob => ({ id: 'j1', state, error })
+const job = (state: string, error = ''): MessageJob => ({ id: 'j1', state, error, partial: '', partial_state: '' })
 
 const mountBubble = (props: Record<string, unknown>) => mount(MessageBubble, { props: props as never })
 

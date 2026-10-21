@@ -92,6 +92,17 @@
         />
       </section>
 
+      <section v-if="partial" class="agent-job-detail-partial-section" aria-labelledby="agent-job-partial-h">
+        <h3 id="agent-job-partial-h" v-text="$gettext('Partial answer (unfinished)')" />
+        <div v-if="partial.text" class="agent-job-detail-partial" aria-live="off">
+          <TextBlock :text="partial.text" />
+        </div>
+        <p class="agent-job-detail-partial-state">
+          <oc-icon name="loader-4" size="small" />
+          <span v-text="partial.state === 'thinking' ? $gettext('Thinking…') : $gettext('Writing…')" />
+        </p>
+      </section>
+
       <section v-if="detail?.answer" class="agent-job-detail-answer-section" aria-labelledby="agent-job-answer-h">
         <h3 id="agent-job-answer-h" v-text="$gettext('Answer')" />
         <div class="agent-job-detail-answer"><TextBlock :text="detail.answer" /></div>
@@ -140,7 +151,7 @@ import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
 import { isLiveState, useJobsStore } from '../../stores/jobs'
 import { conversationOf, errorText, stateLabel, stepKindLabel, tokenCount, triggerLabel } from './labels'
-import type { JobState } from '../../api/types'
+import type { JobState, PartialState } from '../../api/types'
 
 // JobDetail shows the open job of the jobs store: goal, facts, error, the
 // pending approvals (decided in the inbox only), the answer and the steps;
@@ -159,6 +170,15 @@ const trigger = computed(() => triggerLabel(String(job.value?.trigger_kind ?? ''
 const live = computed(() => isLiveState(job.value?.state))
 const conversation = computed(() => (job.value ? conversationOf(job.value) : null))
 const waiting = computed(() => job.value?.state === ('waiting_approval' satisfies JobState))
+// the unfinished answer, only while the job runs (a stale one of an ended
+// or paused job is never shown)
+const partial = computed(() => {
+  const j = job.value
+  if (!j || j.state !== ('running' satisfies JobState)) return null
+  const st = String(j.partial_state ?? '')
+  if (st !== ('thinking' satisfies PartialState) && st !== ('writing' satisfies PartialState)) return null
+  return { text: typeof j.partial === 'string' ? j.partial : '', state: st }
+})
 const reason = computed(() => errorText(String(job.value?.error ?? ''), $gettext))
 
 const tokensText = (i: number, o: number) =>
@@ -183,14 +203,26 @@ const tokensText = (i: number, o: number) =>
 }
 .agent-job-detail-goal,
 .agent-job-detail-answer,
+.agent-job-detail-partial,
 .agent-step-summary {
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.agent-job-detail-answer {
+.agent-job-detail-answer,
+.agent-job-detail-partial {
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--oc-color-border, #ddd);
   border-radius: 6px;
+}
+.agent-job-detail-partial {
+  border-style: dashed;
+}
+.agent-job-detail-partial-state {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  font-size: 0.85em;
 }
 .agent-job-detail-facts {
   display: grid;

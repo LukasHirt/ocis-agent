@@ -24,6 +24,8 @@ export const jobOf = (id: string, over: Partial<Job> = {}): Job => {
     steps_count: 0,
     tokens_in: 0,
     tokens_out: 0,
+    partial: '',
+    partial_state: '',
     ...over
   }
   if (!('ended_at' in over) && ENDED.includes(j.state)) j.ended_at = j.updated_at

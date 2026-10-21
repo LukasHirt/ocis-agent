@@ -149,6 +149,10 @@ export type JobState = 'queued' | 'running' | 'waiting_approval' | 'succeeded' |
 // watched folder, or a review the user asked for.
 export type TriggerKind = 'chat' | 'schedule' | 'file_event' | 'manual'
 
+// What the model of a running job is doing: '' (nothing to show),
+// thinking (no visible text yet) or writing.
+export type PartialState = '' | 'thinking' | 'writing'
+
 export interface Job {
   id: string
   trigger_kind: TriggerKind | (string & {})
@@ -164,6 +168,8 @@ export interface Job {
   steps_count: number
   tokens_in: number // summed over the job's steps
   tokens_out: number
+  partial: string // the unfinished answer of a running job: untrusted, capped, '' otherwise
+  partial_state: PartialState | (string & {})
 }
 
 export interface Step {
@@ -255,6 +261,8 @@ export interface MessageJob {
   id: string
   state: JobState | (string & {})
   error: string
+  partial: string // as in Job: untrusted, '' unless the job is running
+  partial_state: PartialState | (string & {})
 }
 
 export interface Message {
