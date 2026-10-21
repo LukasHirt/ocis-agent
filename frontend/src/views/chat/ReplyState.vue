@@ -56,24 +56,15 @@
             <oc-icon name="hourglass" size="small" />
             <span class="agent-msg-state" v-text="$gettext('Needs your approval')" />
           </p>
-          <div v-if="approvals" class="agent-msg-approvals">
-            <p v-if="approvals.error" role="alert" v-text="approvals.error" />
-            <ul v-if="approvals.items.length > 0">
-              <li v-for="a in approvals.items" :key="a.id">
-                <TextBlock :text="a.tool" class="agent-msg-tool" />
-                <RiskBadge :risk="a.risk" />
-                <router-link
-                  :to="{ name: `${APPID}-approvals`, query: { job: a.job_id } }"
-                  v-text="$gettext('Review')"
-                />
-              </li>
-            </ul>
-            <p v-if="approvals.more" v-text="$gettext('More actions are waiting; see them all in the inbox.')" />
+          <div class="agent-msg-approvals">
+            <InlineApprovals
+              :job-id="reply.jobId"
+              :items="approvals?.items ?? []"
+              :more="approvals?.more ?? false"
+              :error="approvals?.error ?? null"
+              @settled="emit('settled')"
+            />
           </div>
-          <router-link
-            :to="{ name: `${APPID}-approvals`, query: { job: reply.jobId } }"
-            v-text="$gettext('Open the approvals inbox')"
-          />
         </template>
 
         <template v-else-if="reply.kind === 'error'">
@@ -98,8 +89,7 @@
 import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
-import RiskBadge from '../../components/RiskBadge.vue'
-import { APPID } from '../../appid'
+import InlineApprovals from '../approvals/InlineApprovals.vue'
 import { formatTime } from '../../util/format'
 import { errorText } from '../../util/reasons'
 import type { AgentNotice, JobApprovals } from '../../stores/chat'
@@ -117,6 +107,7 @@ const props = withDefaults(
   }>(),
   { announce: false }
 )
+const emit = defineEmits<{ settled: [] }>()
 const { $gettext } = useGettext()
 
 const busy = computed(() => props.reply.kind === 'working' || props.reply.kind === 'waiting')
@@ -196,24 +187,6 @@ const noticeText = computed(() => {
 .agent-msg-approvals {
   margin-top: var(--agent-space-2);
 }
-.agent-msg-approvals p {
-  margin: 0;
-}
-.agent-msg-approvals ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--agent-space-1);
-}
-.agent-msg-approvals li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--agent-space-2);
-}
-.agent-msg-tool,
 .agent-msg-raw-state {
   font-family: var(--agent-font-mono);
 }

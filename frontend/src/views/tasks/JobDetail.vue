@@ -138,18 +138,12 @@
 
         <section v-if="waiting || approvals" class="agent-job-detail-approvals" aria-labelledby="agent-job-approvals-h">
           <h3 id="agent-job-approvals-h" class="agent-card-title" v-text="$gettext('Waiting for your decision')" />
-          <p v-if="approvals?.error" role="alert" v-text="approvals.error" />
-          <ul v-if="approvals && approvals.items.length > 0">
-            <li v-for="a in approvals.items" :key="a.id">
-              <TextBlock :text="a.tool" class="agent-job-detail-tool agent-job-raw" />
-              <RiskBadge :risk="a.risk" />
-            </li>
-          </ul>
-          <p v-if="approvals?.more" v-text="$gettext('More actions are waiting; see them all in the inbox.')" />
-          <router-link
-            class="agent-job-detail-inbox"
-            :to="{ name: `${APPID}-approvals`, query: { job: job.id } }"
-            v-text="$gettext('Review in the approvals inbox')"
+          <InlineApprovals
+            :job-id="job.id"
+            :items="approvals?.items ?? []"
+            :more="approvals?.more ?? false"
+            :error="approvals?.error ?? null"
+            @settled="jobs.refreshDetail()"
           />
         </section>
       </aside>
@@ -162,7 +156,7 @@ import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
 import MarkdownBlock from '../../components/MarkdownBlock.vue'
-import RiskBadge from '../../components/RiskBadge.vue'
+import InlineApprovals from '../approvals/InlineApprovals.vue'
 import EmptyState from '../../components/state/EmptyState.vue'
 import ErrorState from '../../components/state/ErrorState.vue'
 import LoadingState from '../../components/state/LoadingState.vue'
@@ -174,7 +168,7 @@ import { conversationOf, errorText, stateLabel, stepKindLabel, stateTone, tokenC
 import type { JobState, PartialState } from '../../api/types'
 
 // JobDetail shows the open job of the jobs store: goal, facts, error, the
-// pending approvals (decided in the inbox only), the answer and the steps;
+// pending approvals (decided inline or in the inbox), the answer and the steps;
 // a chat job links to its conversation.
 // Goal, answer, tools, statuses and summaries are untrusted text.
 const jobs = useJobsStore()
@@ -275,22 +269,12 @@ const tokensText = (i: number, o: number) =>
   flex-direction: column;
   gap: var(--agent-space-3);
 }
-.agent-job-detail-approvals ul,
 .agent-job-detail-steps ol {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-}
-.agent-job-detail-approvals ul {
-  gap: var(--agent-space-2);
-}
-.agent-job-detail-approvals li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--agent-space-2);
 }
 .agent-step {
   position: relative;

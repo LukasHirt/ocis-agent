@@ -707,6 +707,13 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     bound = agent.session()
   }
 
+  // reloadJobApprovals rereads the pending approvals of the waiting jobs, after
+  // an inline decision.
+  const reloadJobApprovals = (): Promise<unknown> => {
+    const s = session()
+    return s ? loadJobApprovals(s, threadGen) : Promise.resolve()
+  }
+
   return {
     conversations,
     conversationsCursor,
@@ -747,6 +754,7 @@ export const useChatStore = defineStore('ocis-agent-chat', () => {
     loadOlder,
     send,
     refreshOpen,
+    reloadJobApprovals,
     reset
   }
 })

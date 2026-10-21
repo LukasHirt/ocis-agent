@@ -23,8 +23,11 @@ export const needsConfirm = (risk: Approval['risk']): boolean =>
 
 export interface Decisions {
   busy(id: string): boolean
-  decide(a: Approval, d: Decision): Promise<void>
-  decideAll(list: Approval[], d: Decision): Promise<void>
+  // decide and decideAll resolve true only when the request was sent and
+  // the server accepted it; false for a refused, locked, cancelled or
+  // failed call.
+  decide(a: Approval, d: Decision): Promise<boolean>
+  decideAll(list: Approval[], d: Decision): Promise<boolean>
   // acknowledge records that the user checked the outcome of an action
   // that needs verification (no confirmation: it changes no file).
   acknowledge(a: Approval): Promise<void>
@@ -91,8 +94,8 @@ const createDecisions = (): Decisions => {
     platform.notify('error', describeError(e, $gettext))
   }
 
-  const decide = async (a: Approval, d: Decision) => {
-    if (inflight.has(a.id) || a.job_ended || a.state !== ('pending' satisfies ApprovalState)) return
+  const decide = async (a: Approval, d: Decision): Promise<boolean> => {
+    if (inflight.has(a.id) || a.job_ended || a.state !== ('pending' satisfies ApprovalState)) return false
     const id = a.id
     const hash = a.args_hash
     inflight.add(id)
@@ -104,22 +107,24 @@ const createDecisions = (): Decisions => {
           confirmText: $gettext('Approve'),
           danger: true
         })
-        if (!ok) return
+        if (!ok) return false
       }
       await store.decide(id, d, hash)
       platform.notify('success', d === 'approve' ? $gettext('Approved') : $gettext('Rejected'))
+      return true
     } catch (e) {
       report(e)
+      return false
     } finally {
       inflight.delete(id)
     }
   }
 
-  const decideAll = async (list: Approval[], d: Decision) => {
+  const decideAll = async (list: Approval[], d: Decision): Promise<boolean> => {
     const items = list.filter((a) => !a.job_ended && a.state === ('pending' satisfies ApprovalState))
-    if (items.length === 0 || items.length > MAX_BULK) return
-    if (items.some((a) => inflight.has(a.id))) return
-    if (new Set(items.map((a) => a.job_id)).size !== 1) return
+    if (items.length === 0 || items.length > MAX_BULK) return false
+    if (items.some((a) => inflight.has(a.id))) return false
+    if (new Set(items.map((a) => a.job_id)).size !== 1) return false
     const sent = items.map((a) => ({ id: a.id, args_hash: a.args_hash }))
     for (const it of sent) inflight.add(it.id)
     try {
@@ -139,7 +144,7 @@ const createDecisions = (): Decisions => {
           confirmText: line($gettext('Approve all %{count}'), { count: items.length }),
           danger: true
         })
-        if (!ok) return
+        if (!ok) return false
       }
       await store.bulkDecide(d, sent)
       platform.notify(
@@ -148,8 +153,10 @@ const createDecisions = (): Decisions => {
           ? line($gettext('Approved %{count} actions'), { count: sent.length })
           : line($gettext('Rejected %{count} actions'), { count: sent.length })
       )
+      return true
     } catch (e) {
       report(e)
+      return false
     } finally {
       for (const it of sent) inflight.delete(it.id)
     }

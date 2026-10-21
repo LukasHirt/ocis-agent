@@ -1,5 +1,11 @@
 <template>
-  <article :class="['agent-card', 'agent-surface', { 'agent-card-danger': danger, 'agent-card-ended': ended }]">
+  <article
+    :class="[
+      'agent-card',
+      'agent-surface',
+      { 'agent-card-danger': danger, 'agent-card-ended': ended, 'agent-card--compact': compactView }
+    ]"
+  >
     <p v-if="warning" class="agent-card-warning agent-notice agent-notice--danger">
       <oc-icon name="alert" size="small" />
       <strong v-text="warning" />
@@ -32,7 +38,26 @@
       <span class="agent-label" v-text="$ngettext('Target:', 'Targets:', targets.length)" />
       <span v-for="(t, i) in targets" :key="i" class="agent-card-target agent-mono" v-text="quote(t)" />
     </p>
-    <details v-if="collapsible" class="agent-card-disclosure">
+    <div v-if="compactView" class="agent-card-body agent-card-body--compact">
+      <div class="agent-card-args">
+        <span class="agent-label" v-text="$gettext('Exact arguments')" />
+        <JsonBlock :value="shown.args" max-height="12rem" />
+        <p
+          v-if="lossy"
+          class="agent-card-lossy"
+          v-text="
+            $gettext(
+              'Some numbers in these arguments are too large to be shown exactly here; the agent would use the exact values.'
+            )
+          "
+        />
+      </div>
+      <details class="agent-card-preview-disclosure">
+        <summary v-text="$gettext('What will happen')" />
+        <JsonBlock :value="shown.preview" max-height="12rem" />
+      </details>
+    </div>
+    <details v-else-if="collapsible" class="agent-card-disclosure">
       <summary v-text="$gettext('Exact arguments and preview')" />
       <div class="agent-card-body">
         <div class="agent-card-args">
@@ -75,7 +100,7 @@
     </div>
     <div v-if="shown.rationale" class="agent-card-rationale">
       <span class="agent-label" v-text="$gettext('Agent\'s explanation (unverified)')" />
-      <TextBlock :text="shown.rationale" />
+      <TextBlock :text="shown.rationale" :max-lines="compactView ? 3 : undefined" />
     </div>
     <OutcomeBlock v-if="shown.outcome" :outcome="shown.outcome" />
     <template v-if="pending">
@@ -85,21 +110,40 @@
         v-text="$gettext('The job ended; this can no longer be approved')"
       />
       <div class="agent-card-actions">
-        <oc-button
-          appearance="filled"
-          :variation="danger ? 'danger' : 'primary'"
-          :disabled="disabled"
-          :aria-label="ariaLabel($gettext('Approve %{tool}'))"
-          @click="decisions.decide(shown, 'approve')"
-          v-text="$gettext('Approve')"
-        />
-        <oc-button
-          appearance="outline"
-          :disabled="disabled"
-          :aria-label="ariaLabel($gettext('Reject %{tool}'))"
-          @click="decisions.decide(shown, 'reject')"
-          v-text="$gettext('Reject')"
-        />
+        <template v-if="rejectFirst">
+          <oc-button
+            appearance="outline"
+            :disabled="disabled"
+            :aria-label="ariaLabel($gettext('Reject %{tool}'))"
+            @click="decide('reject')"
+            v-text="$gettext('Reject')"
+          />
+          <oc-button
+            appearance="filled"
+            variation="danger"
+            :disabled="disabled"
+            :aria-label="ariaLabel($gettext('Approve %{tool}'))"
+            @click="decide('approve')"
+            v-text="$gettext('Approve')"
+          />
+        </template>
+        <template v-else>
+          <oc-button
+            appearance="filled"
+            :variation="danger ? 'danger' : 'primary'"
+            :disabled="disabled"
+            :aria-label="ariaLabel($gettext('Approve %{tool}'))"
+            @click="decide('approve')"
+            v-text="$gettext('Approve')"
+          />
+          <oc-button
+            appearance="outline"
+            :disabled="disabled"
+            :aria-label="ariaLabel($gettext('Reject %{tool}'))"
+            @click="decide('reject')"
+            v-text="$gettext('Reject')"
+          />
+        </template>
       </div>
     </template>
   </article>
@@ -118,12 +162,18 @@ import { formatDuration, formatTime } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
 import { quote, targetsOf } from './targets'
 import { needsConfirm, useDecisions } from './decisions'
-import type { Approval, ApprovalState, Risk } from '../../api/types'
+import type { Approval, ApprovalState, Decision, Risk } from '../../api/types'
 
 // ApprovalCard shows one approval: exactly what will execute (the stored
 // arguments, always in full), the server's preview, and the model's
 // explanation clearly marked as unverified. Every API string is text.
-const props = defineProps<{ approval: Approval }>()
+// compact (the inline form in the chat and the task view) keeps the exact
+// arguments in view and folds only the preview; the safe button comes first
+// for a dangerous action; nothing is focused automatically, so a stray key
+// press never decides anything. decided follows an accepted decision,
+// attempted every finished attempt.
+const props = defineProps<{ approval: Approval; compact?: boolean }>()
+const emit = defineEmits<{ decided: [Decision]; attempted: [] }>()
 const store = useAgentStore()
 // shown is the approval as an acknowledgement returned it, if there was one
 const shown = computed(() => store.viewOf(props.approval))
@@ -137,6 +187,8 @@ const targets = computed(() => targetsOf(shown.value.preview, shown.value.args))
 // Only decided history folds the arguments away; a pending approval and one
 // that needs verification always show them without a click.
 const collapsible = computed(() => !pending.value && !shown.value.needs_verification)
+const compactView = computed(() => props.compact === true && pending.value && !shown.value.needs_verification)
+const rejectFirst = computed(() => compactView.value && needsConfirm(shown.value.risk))
 const danger = computed(() => needsConfirm(shown.value.risk))
 const disabled = computed(() => ended.value || decisions.busy(shown.value.id))
 
@@ -152,6 +204,11 @@ const warning = computed(() => {
   }
   return $gettext('The risk of this action is unknown')
 })
+
+const decide = async (d: Decision) => {
+  if (await decisions.decide(shown.value, d)) emit('decided', d)
+  emit('attempted')
+}
 
 const ariaLabel = (msgid: string) => interpolate(msgid, { tool: visibleText(shown.value.tool).text }, true)
 
@@ -290,5 +347,31 @@ const decidedAt = computed(() => {
 }
 .agent-card-verify p {
   margin: 0;
+}
+.agent-card--compact {
+  padding: var(--agent-space-3);
+  gap: var(--agent-space-2);
+  background: var(--oc-color-background-default);
+}
+.agent-card--compact .agent-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--agent-space-2);
+}
+.agent-card-body--compact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-2);
+}
+.agent-card-preview-disclosure > summary {
+  cursor: pointer;
+  color: var(--oc-color-text-muted);
+  font-size: var(--agent-font-s);
+  margin-bottom: var(--agent-space-1);
+}
+@container agent (max-width: 699px) {
+  .agent-card--compact .agent-card-actions > * {
+    flex: 1 1 8rem;
+  }
 }
 </style>

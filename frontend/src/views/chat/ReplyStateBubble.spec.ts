@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createGettext } from 'vue3-gettext'
 import ReplyState from './ReplyState.vue'
-import { approvalOf } from '../../test/fixtures'
+import { apiErr, approvalOf } from '../../test/fixtures'
+import { fakeServer, startStore } from '../../test/server'
+import { PLATFORM_KEY } from '../../platform'
 import type { Reply, ReplyKind } from './replyState'
 import type { JobApprovals } from '../../stores/chat'
 
@@ -66,7 +68,7 @@ describe('ReplyState', () => {
     expect(mountReply({ reply: replyOf('working'), notice: 'paused' }).find('.agent-msg-notice').exists()).toBe(false)
   })
 
-  it('lists the pending approvals without decisions and links the inbox', () => {
+  it('shows the pending approvals inline with decisions and the inbox link', async () => {
     const approvals: JobApprovals = {
       items: [
         approvalOf('a1', { job_id: 'j1', tool: 'files.write', risk: 'write' }),
@@ -75,18 +77,37 @@ describe('ReplyState', () => {
       more: true,
       error: null
     }
-    const w = mountReply({ reply: replyOf('approval'), approvals })
+    const server = fakeServer()
+    const { platform } = await startStore(server)
+    const w = mount(ReplyState, {
+      props: { reply: replyOf('approval'), approvals } as never,
+      global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+    })
     expect(w.find('.agent-msg-reply-title').text()).toContain('Needs your approval')
     expect(w.find('.agent-msg-reply-title [data-icon]').exists()).toBe(true)
-    const rows = w.findAll('.agent-msg-approvals li')
-    expect(rows).toHaveLength(2)
-    expect(rows[0].text()).toContain('files.write')
-    expect(rows[1].text()).toContain('Destructive')
-    expect(rows[0].find('a').text()).toBe('Review')
+    expect(w.find('.agent-msg-approvals .agent-inline-approvals').exists()).toBe(true)
+    const cards = w.findAll('.agent-card--compact')
+    expect(cards).toHaveLength(2)
+    expect(cards[1].text()).toContain('Destructive')
     expect(w.text()).toContain('More actions are waiting')
-    expect(w.findAll('button').filter((b) => /Approve|Reject/.test(b.text()))).toHaveLength(0)
-    const inbox = w.findAll('a').find((a) => a.text() === 'Open the approvals inbox')!
+    expect(w.findAll('button').some((b) => b.text() === 'Approve all 2')).toBe(true)
+    const inbox = w.find('a.agent-inline-inbox')
     expect(JSON.parse(inbox.attributes('data-to')!)).toEqual({ name: 'agent-approvals', query: { job: 'j1' } })
+    w.unmount()
+  })
+
+  it('re-emits settled after a decision attempt', async () => {
+    const a = approvalOf('a1', { job_id: 'j1' })
+    const server = fakeServer((c) => (c.path === '/approvals/a1/decision' ? apiErr(409, 'stale_arguments') : undefined))
+    const { platform } = await startStore(server)
+    const w = mount(ReplyState, {
+      props: { reply: replyOf('approval'), approvals: { items: [a], more: false, error: null } } as never,
+      global: { provide: { [PLATFORM_KEY as symbol]: platform } }
+    })
+    await w.findAll('button').find((b) => b.text() === 'Approve')!.trigger('click')
+    await flushPromises()
+    expect(w.emitted('settled')).toHaveLength(1)
+    w.unmount()
   })
 
   it('shows a distinct error reply: icon instead of the robot, a bold heading and the reason', () => {

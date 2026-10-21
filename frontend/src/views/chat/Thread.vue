@@ -26,6 +26,7 @@
           :notice="notices[m.id]"
           :approvals="m.job ? jobApprovals[m.job.id] : undefined"
           :announce="announced(m.id)"
+          @settled="emit('approvals-settled')"
         />
       </template>
     </div>
@@ -63,7 +64,7 @@ const props = defineProps<{
   olderError: string | null
   loaded: boolean
 }>()
-const emit = defineEmits<{ 'load-older': [] }>()
+const emit = defineEmits<{ 'load-older': []; 'approvals-settled': [] }>()
 useGettext()
 
 // the jobs that have a reply (any message that is not a question) and the job

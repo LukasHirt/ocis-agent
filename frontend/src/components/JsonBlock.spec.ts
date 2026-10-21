@@ -64,6 +64,12 @@ describe('JsonBlock', () => {
     expect(style.overflow).toBe('auto')
   })
 
+  it('caps the height at 24rem unless told otherwise', () => {
+    const style = (el: ReturnType<typeof mount>) => (pre(el).element as HTMLElement).style.maxHeight
+    expect(style(mount(JsonBlock, { props: { value: {} } }))).toBe('24rem')
+    expect(style(mount(JsonBlock, { props: { value: {}, maxHeight: '12rem' } }))).toBe('12rem')
+  })
+
   it('copies the shown text with the clipboard API', async () => {
     const writeText = vi.fn(async () => {})
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })

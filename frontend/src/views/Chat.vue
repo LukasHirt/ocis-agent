@@ -70,6 +70,7 @@
           :older-error="chat.olderError"
           :loaded="chat.messagesLoaded"
           @load-older="chat.loadOlder()"
+          @approvals-settled="chat.reloadJobApprovals()"
         />
         <Composer
           ref="composer"
