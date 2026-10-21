@@ -6,7 +6,7 @@
     </router-link>
 
     <div class="agent-memory-viewer-head">
-      <h2 v-if="validName" class="agent-memory-viewer-name"><TextBlock :text="validName" /></h2>
+      <h2 v-if="validName" class="agent-memory-viewer-name agent-section-title agent-mono"><TextBlock :text="validName" /></h2>
       <div v-if="!mem.editing" class="agent-memory-actions">
         <oc-button v-if="mem.canEdit" size="small" @click="mem.startEdit()">
           <oc-icon name="edit" size="small" />
@@ -44,15 +44,15 @@
     <template v-if="mem.file">
       <Editor v-if="mem.editing" />
       <template v-else>
-        <p v-if="mem.file.truncated" class="agent-memory-banner" role="status">
+        <p v-if="mem.file.truncated" class="agent-memory-banner agent-notice agent-notice--warning" role="status">
           <oc-icon name="information" size="small" />
           <span v-text="$gettext('Showing the first part; this file cannot be edited here.')" />
         </p>
-        <p v-else-if="!mem.file.editable" class="agent-memory-banner" role="status">
+        <p v-else-if="!mem.file.editable" class="agent-memory-banner agent-notice agent-notice--warning" role="status">
           <oc-icon name="information" size="small" />
           <span v-text="$gettext('This file cannot be edited here.')" />
         </p>
-        <TextBlock class="agent-memory-content" :text="mem.file.content" mono />
+        <TextBlock class="agent-memory-content agent-code" :text="mem.file.content" mono />
         <p v-if="mem.file.content === ''" class="agent-memory-empty" v-text="$gettext('This file is empty.')" />
       </template>
     </template>
@@ -91,41 +91,34 @@ const validName = computed(() => (mem.openName !== null && isMemoryName(mem.open
 .agent-memory-viewer {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--agent-space-3);
   min-width: 0;
 }
 .agent-memory-back {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
   align-self: flex-start;
+}
+@container agent (min-width: 700px) {
+  .agent-memory-back {
+    display: none;
+  }
 }
 .agent-memory-viewer-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: var(--agent-space-2);
 }
 .agent-memory-viewer-name {
-  margin: 0;
-  font-family: var(--oc-font-family-mono, monospace);
   overflow-wrap: anywhere;
 }
-.agent-memory-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0;
-  padding: 0.5rem 0.75rem;
-  border-left: 4px solid var(--oc-color-swatch-warning-default, #b8860b);
-  background: var(--oc-color-background-muted, #f5f5f5);
-}
 .agent-memory-content {
-  padding: 0.75rem;
-  border: 1px solid var(--oc-color-border, #ddd);
-  border-radius: 4px;
+  font-size: var(--agent-font-s);
+  padding: var(--agent-space-3);
   max-width: 100%;
-  overflow-x: auto;
+  box-sizing: border-box;
 }
 </style>

@@ -3,26 +3,36 @@
     <section data-testid="agent-memory-core">
       <h2 class="agent-memory-group" v-text="$gettext('Profile and projects')" />
       <ul class="agent-memory-list">
-        <li v-for="f in mem.coreFiles" :key="f.name" class="agent-memory-file">
-          <router-link class="agent-memory-file-link" :to="fileRoute(f.name)">
-            <span class="agent-memory-file-name" v-text="f.name" />
-          </router-link>
-          <span class="agent-memory-file-meta">
-            <span v-text="formatBytes(f.size)" />
-            <time v-if="f.modified" :datetime="f.modified" v-text="formatTime(f.modified)" />
-            <span
-              v-if="f.size > MAX_FILE_BYTES"
-              class="agent-memory-readonly"
-              v-text="$gettext('Read only: too large to edit here')"
-            />
-          </span>
+        <li v-for="f in mem.coreFiles" :key="f.name" :class="['agent-memory-file', 'agent-row', { 'agent-memory-file-current': mem.openName === f.name }]">
+          <oc-icon name="file-text" size="small" />
+          <div class="agent-memory-file-body">
+            <router-link
+              class="agent-memory-file-link agent-row-link"
+              :to="fileRoute(f.name)"
+              :aria-current="mem.openName === f.name ? 'page' : undefined"
+            >
+              <span class="agent-memory-file-name" v-text="f.name" />
+            </router-link>
+            <span class="agent-memory-file-meta agent-meta">
+              <span v-text="formatBytes(f.size)" />
+              <time v-if="f.modified" :datetime="f.modified" v-text="formatTime(f.modified)" />
+              <span
+                v-if="f.size > MAX_FILE_BYTES"
+                class="agent-memory-readonly"
+                v-text="$gettext('Read only: too large to edit here')"
+              />
+            </span>
+          </div>
         </li>
       </ul>
       <ul v-if="mem.listLoaded && mem.missingCore.length" class="agent-memory-list" data-testid="agent-memory-missing">
-        <li v-for="name in mem.missingCore" :key="name" class="agent-memory-missing-file">
-          <span class="agent-memory-file-missing-name" v-text="name" />
-          <span class="agent-memory-file-meta" v-text="$gettext('Not created yet')" />
-          <oc-button size="small" appearance="outline" :disabled="mem.creating" @click="createCore(name)">
+        <li v-for="name in mem.missingCore" :key="name" class="agent-memory-missing-file agent-row">
+          <oc-icon name="file-text" size="small" />
+          <div class="agent-memory-file-body">
+            <span class="agent-memory-file-missing-name" v-text="name" />
+            <span class="agent-memory-file-meta agent-meta" v-text="$gettext('Not created yet')" />
+          </div>
+          <oc-button class="agent-row-aside" size="small" appearance="outline" :disabled="mem.creating" @click="createCore(name)">
             <oc-icon name="add" size="small" />
             <span v-text="$gettext('Create')" />
           </oc-button>
@@ -34,19 +44,26 @@
     <section data-testid="agent-memory-notes">
       <h2 class="agent-memory-group" v-text="$gettext('Notes')" />
       <ul class="agent-memory-list">
-        <li v-for="f in mem.notes" :key="f.name" class="agent-memory-file">
-          <router-link class="agent-memory-file-link" :to="fileRoute(f.name)">
-            <span class="agent-memory-file-name" v-text="f.name" />
-          </router-link>
-          <span class="agent-memory-file-meta">
-            <span v-text="formatBytes(f.size)" />
-            <time v-if="f.modified" :datetime="f.modified" v-text="formatTime(f.modified)" />
-            <span
-              v-if="f.size > MAX_FILE_BYTES"
-              class="agent-memory-readonly"
-              v-text="$gettext('Read only: too large to edit here')"
-            />
-          </span>
+        <li v-for="f in mem.notes" :key="f.name" :class="['agent-memory-file', 'agent-row', { 'agent-memory-file-current': mem.openName === f.name }]">
+          <oc-icon name="file-text" size="small" />
+          <div class="agent-memory-file-body">
+            <router-link
+              class="agent-memory-file-link agent-row-link"
+              :to="fileRoute(f.name)"
+              :aria-current="mem.openName === f.name ? 'page' : undefined"
+            >
+              <span class="agent-memory-file-name" v-text="f.name" />
+            </router-link>
+            <span class="agent-memory-file-meta agent-meta">
+              <span v-text="formatBytes(f.size)" />
+              <time v-if="f.modified" :datetime="f.modified" v-text="formatTime(f.modified)" />
+              <span
+                v-if="f.size > MAX_FILE_BYTES"
+                class="agent-memory-readonly"
+                v-text="$gettext('Read only: too large to edit here')"
+              />
+            </span>
+          </div>
         </li>
       </ul>
       <EmptyState
@@ -93,11 +110,13 @@ const createCore = async (name: string) => {
 .agent-memory-files {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: var(--agent-space-4);
 }
 .agent-memory-group {
-  font-size: 1.1rem;
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--agent-space-1);
+  font-size: var(--agent-font-xs);
+  font-weight: 600;
+  color: var(--oc-color-text-muted);
 }
 .agent-memory-list {
   list-style: none;
@@ -105,31 +124,46 @@ const createCore = async (name: string) => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 2px;
 }
 .agent-memory-file,
 .agent-memory-missing-file {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: start;
+  gap: var(--agent-space-2);
+  padding: var(--agent-space-2);
+  border-radius: var(--agent-radius-m);
+}
+.agent-memory-missing-file {
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.5rem 1rem;
+}
+.agent-memory-missing-file .agent-memory-file-missing-name {
+  color: var(--oc-color-text-muted);
+}
+.agent-memory-file-current {
+  background: var(--oc-color-background-highlight);
+}
+.agent-memory-file-body {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 .agent-memory-file-link {
   overflow-wrap: anywhere;
-  font-family: var(--oc-font-family-mono, monospace);
+  font-family: var(--agent-font-mono);
 }
 .agent-memory-file-missing-name {
-  font-family: var(--oc-font-family-mono, monospace);
+  font-family: var(--agent-font-mono);
+  overflow-wrap: anywhere;
 }
 .agent-memory-file-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
-  color: var(--oc-color-text-muted, #666);
-  font-size: 0.875rem;
+  gap: var(--agent-space-1) var(--agent-space-2);
 }
 .agent-memory-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  color: var(--oc-color-swatch-danger-default);
 }
 </style>

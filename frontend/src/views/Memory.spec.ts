@@ -42,10 +42,34 @@ describe('Memory', () => {
 
   it('shows the file of the route', async () => {
     const { w } = await setup(memoryState({ 'notes/a.md': 'hello' }), { name: 'notes/a.md' })
-    expect(w.find('h2').text()).toBe('notes/a.md')
+    expect(w.find('.agent-memory-viewer-name').text()).toBe('notes/a.md')
     expect(w.find('pre.agent-text').text()).toBe('hello')
-    expect(w.find('.agent-memory-file-name').exists()).toBe(false)
     expect(w.findAll('button').some((b) => /delete/i.test(b.text()))).toBe(false)
+  })
+
+  it('keeps the list visible next to the open file and marks the current row', async () => {
+    const { w } = await setup(memoryState({ 'notes/a.md': 'a', 'notes/b.md': 'b' }), { name: 'notes/a.md' })
+    expect(w.classes()).toContain('agent-memory--open')
+    expect(w.findAll('.agent-memory-side .agent-memory-file-name')).toHaveLength(2)
+    const current = w.findAll('.agent-memory-file-current')
+    expect(current).toHaveLength(1)
+    expect(current[0].text()).toContain('notes/a.md')
+    expect(current[0].find('a, [aria-current]').attributes('aria-current')).toBe('page')
+    expect(w.find('.agent-memory-detail .agent-memory-viewer').exists()).toBe(true)
+  })
+
+  it('shows an empty detail pane when nothing is open', async () => {
+    const { w } = await setup(memoryState({ 'notes/a.md': 'a' }))
+    expect(w.classes()).not.toContain('agent-memory--open')
+    expect(w.find('.agent-memory-detail').text()).toContain('Choose a file to read or edit it.')
+  })
+
+  it('renders the new note form in the detail pane', async () => {
+    const { w } = await setup(memoryState())
+    await button(w, 'New note')!.trigger('click')
+    expect(w.classes()).toContain('agent-memory--open')
+    expect(w.find('.agent-memory-detail .agent-memory-new').exists()).toBe(true)
+    expect(button(w, 'New note')).toBeUndefined()
   })
 
   it('switches between files and back to the list', async () => {
@@ -65,7 +89,7 @@ describe('Memory', () => {
     const { w, push } = await setup(st)
     await button(w, 'New note')!.trigger('click')
     await w.find('.agent-memory-new input').setValue('trip')
-    await button(w, 'Create')!.trigger('click')
+    await w.findAll('.agent-memory-new button').find((b) => b.text() === 'Create')!.trigger('click')
     await flushPromises()
     expect(st.files['notes/trip.md']).toBeDefined()
     expect(push).toHaveBeenCalledWith({ name: 'agent-memory-file', params: { name: ['notes', 'trip.md'] } })

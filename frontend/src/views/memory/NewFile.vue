@@ -1,21 +1,21 @@
 <template>
-  <form class="agent-memory-new" @submit.prevent="submit">
-    <h2 v-text="$gettext('New note')" />
+  <form class="agent-memory-new agent-surface" @submit.prevent="submit">
+    <h2 class="agent-section-title" v-text="$gettext('New note')" />
     <oc-text-input
       v-model="slug"
-      class="agent-memory-new-slug"
+      class="agent-memory-new-slug agent-field"
       :label="$gettext('Name')"
       :error-message="slugError ?? undefined"
       autocomplete="off"
       spellcheck="false"
     />
-    <p class="agent-memory-new-hint">
+    <p class="agent-memory-new-hint agent-field-help">
       <span v-text="$gettext('The note is saved as')" />
       <code class="agent-memory-new-name" v-text="name" />
     </p>
     <oc-textarea
       v-model="content"
-      class="agent-memory-new-content"
+      class="agent-memory-new-content agent-field"
       :label="$gettext('Content (optional)')"
       :submit-on-enter="false"
       :error-message="contentError ?? undefined"
@@ -84,27 +84,24 @@ onBeforeUnmount(() => mem.clearCreateError())
 
 <style>
 .agent-memory-new {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
   max-width: 40rem;
 }
-.agent-memory-new h2 {
-  margin: 0;
-  font-size: 1.1rem;
+.agent-memory-new .agent-field {
+  max-width: none;
 }
 .agent-memory-new-hint {
-  margin: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
+  gap: var(--agent-space-1);
 }
 .agent-memory-new-error {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  margin: 0;
+  color: var(--oc-color-swatch-danger-default);
 }
 .agent-memory-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  align-items: center;
+  gap: var(--agent-space-2);
 }
 </style>

@@ -1,6 +1,22 @@
 <template>
   <div class="agent-memory-editor">
-    <p v-if="mem.serverChanged && !mem.conflict" class="agent-memory-banner agent-memory-changed" role="status">
+    <div v-if="!mem.conflict" class="agent-memory-actions agent-memory-editor-bar">
+      <oc-button
+        appearance="filled"
+        variation="primary"
+        :disabled="!canSave"
+        @click="mem.save()"
+        v-text="mem.saving ? $gettext('Saving…') : $gettext('Save')"
+      />
+      <oc-button :disabled="mem.saving" @click="mem.cancelEdit()" v-text="$gettext('Cancel')" />
+      <span class="agent-memory-size" v-text="size" />
+    </div>
+
+    <p
+      v-if="mem.serverChanged && !mem.conflict"
+      class="agent-memory-banner agent-memory-changed agent-notice agent-notice--warning"
+      role="status"
+    >
       <oc-icon name="error-warning" size="small" />
       <span v-text="$gettext('Changed on the server. Your text is kept; saving shows both versions so you can choose.')" />
     </p>
@@ -8,6 +24,7 @@
     <section v-if="mem.conflict" class="agent-memory-conflict">
       <p
         role="alert"
+        class="agent-notice agent-notice--danger"
         v-text="
           mem.conflict.current
             ? $gettext('The file changed since you opened it. Compare the versions and choose which to keep.')
@@ -15,12 +32,12 @@
         "
       />
       <div class="agent-memory-versions">
-        <div class="agent-memory-version">
-          <h3 v-text="$gettext('Your version')" />
+        <div class="agent-memory-version agent-surface">
+          <h3 class="agent-card-title" v-text="$gettext('Your version')" />
           <TextBlock :text="mem.draft" mono :max-lines="30" />
         </div>
-        <div v-if="mem.conflict.current" class="agent-memory-version">
-          <h3 v-text="$gettext('Current version')" />
+        <div v-if="mem.conflict.current" class="agent-memory-version agent-surface">
+          <h3 class="agent-card-title" v-text="$gettext('Current version')" />
           <TextBlock :text="mem.conflict.current.content" mono :max-lines="30" />
         </div>
       </div>
@@ -57,27 +74,15 @@
         rows="18"
         spellcheck="false"
       />
-      <p class="agent-memory-size" v-text="size" />
       <p
         v-if="mem.mixedLineEndings"
-        class="agent-memory-eol"
+        class="agent-memory-eol agent-notice agent-notice--info"
         role="status"
         v-text="$gettext('This file mixes line endings. Saving it changes them all to LF (Unix style).')"
       />
     </template>
 
-    <p v-if="mem.saveError" role="alert" class="agent-memory-save-error" v-text="mem.saveError" />
-
-    <div v-if="!mem.conflict" class="agent-memory-actions">
-      <oc-button
-        appearance="filled"
-        variation="primary"
-        :disabled="!canSave"
-        @click="mem.save()"
-        v-text="mem.saving ? $gettext('Saving…') : $gettext('Save')"
-      />
-      <oc-button :disabled="mem.saving" @click="mem.cancelEdit()" v-text="$gettext('Cancel')" />
-    </div>
+    <p v-if="mem.saveError" role="alert" class="agent-memory-save-error agent-notice agent-notice--danger" v-text="mem.saveError" />
   </div>
 </template>
 
@@ -150,38 +155,46 @@ onBeforeUnmount(() => {
 .agent-memory-editor {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--agent-space-3);
   min-width: 0;
 }
+.agent-memory-editor-bar {
+  position: sticky;
+  top: calc(var(--agent-space-4) * -1);
+  z-index: 1;
+  align-items: center;
+  margin: calc(var(--agent-space-4) * -1) 0 0;
+  padding: var(--agent-space-3) 0 var(--agent-space-2);
+  background: var(--oc-color-background-default);
+  border-bottom: var(--agent-line);
+}
 .agent-memory-draft textarea {
-  font-family: var(--oc-font-family-mono, monospace);
+  font-family: var(--agent-font-mono);
   width: 100%;
+  min-height: 50vh;
   box-sizing: border-box;
 }
 .agent-memory-size {
-  margin: 0;
-  font-size: 0.875rem;
-  color: var(--oc-color-text-muted, #666);
-}
-.agent-memory-save-error,
-.agent-memory-conflict > [role='alert'] {
-  color: var(--oc-color-swatch-danger-default, #b00020);
+  margin: 0 0 0 auto;
+  font-size: var(--agent-font-xs);
+  color: var(--oc-color-text-muted);
 }
 .agent-memory-versions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-  gap: 0.75rem;
+  gap: var(--agent-space-3);
+  margin: var(--agent-space-3) 0;
+}
+.agent-memory-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-3);
 }
 .agent-memory-version {
   min-width: 0;
 }
-.agent-memory-version h3 {
-  margin: 0 0 0.25rem;
-  font-size: 1rem;
-}
 .agent-memory-version .agent-text {
-  padding: 0.5rem;
-  border: 1px solid var(--oc-color-border, #ddd);
-  border-radius: 4px;
+  max-width: 100%;
+  overflow: auto;
 }
 </style>
