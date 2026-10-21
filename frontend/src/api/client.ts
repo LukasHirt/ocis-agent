@@ -48,18 +48,27 @@ export interface PageParams {
 }
 
 export interface ApprovalListParams extends PageParams {
-  state?: string // a state, or "all"; default pending
+  state?: string // a state, or "all"; default pending (all with needsVerification)
   jobId?: string
+  needsVerification?: boolean // only the approvals whose outcome the user should check
 }
 
 export interface JobListParams extends PageParams {
   state?: string
 }
 
+// The audit log is listed ascending by seq (the cursor is the seq after
+// which a page starts) or, with order desc, newest first (the cursor is
+// the server's "d<seq>" before which a page starts). A cursor is only
+// valid in the order that issued it.
+export type AuditOrder = 'asc' | 'desc'
+
 export interface AuditListParams extends PageParams {
+  order?: AuditOrder
   jobId?: string
   tool?: string
   risk?: string
+  kind?: string
 }
 
 export type ResumeReason = 'user' | 'token_anomaly'
@@ -87,6 +96,9 @@ export interface ApiClient {
   getApproval(id: string, signal?: AbortSignal): Promise<Approval>
   decide(id: string, decision: Decision, argsHash: string, signal?: AbortSignal): Promise<Approval>
   bulkDecide(decision: Decision, items: DecisionItem[], signal?: AbortSignal): Promise<Approvals>
+  // acknowledge records that the user checked the outcome of an approval
+  // whose outcome is uncertain (409 not_acknowledgeable otherwise).
+  acknowledge(id: string, signal?: AbortSignal): Promise<Approval>
   listJobs(params?: JobListParams, signal?: AbortSignal): Promise<JobPage>
   getJob(id: string, signal?: AbortSignal): Promise<JobDetail>
   cancelJob(id: string, signal?: AbortSignal): Promise<Job>
@@ -148,7 +160,7 @@ const memoryPath = (name: unknown): string => {
   throw invalid()
 }
 
-type QueryKind = 'string' | 'name' | 'tool' | 'limit100' | 'limit200' | 'seq'
+type QueryKind = 'string' | 'name' | 'tool' | 'limit100' | 'limit200' | 'seq' | 'descSeq' | 'order' | 'true'
 
 // a page limit within the server's cap of the route
 const limitUpTo = (max: number) => (v: unknown) =>
@@ -161,7 +173,10 @@ const QUERY_RULES: Record<QueryKind, (v: unknown) => boolean> = {
   // the server's page caps: approvals and chat 100, jobs and audit 200
   limit100: limitUpTo(100),
   limit200: limitUpTo(200),
-  seq: (v) => typeof v === 'string' && /^\d{1,19}$/.test(v)
+  seq: (v) => typeof v === 'string' && /^\d{1,19}$/.test(v),
+  descSeq: (v) => typeof v === 'string' && /^d\d{1,19}$/.test(v),
+  order: (v) => v === 'asc' || v === 'desc',
+  true: (v) => v === true
 }
 
 // query builds a query string from validated primitives; undefined and ''
@@ -480,11 +495,14 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
           query([
             ['state', params?.state, 'name'],
             ['job_id', params?.jobId, 'string'],
+            // only true is sent; false means no filter
+            ['needs_verification', params?.needsVerification === false ? undefined : params?.needsVerification, 'true'],
             ...pageQuery(params, 'limit100')
           ]),
         signal
       ),
     getApproval: async (id, signal) => get('/approvals/' + segment(id), signal),
+    acknowledge: async (id, signal) => post('/approvals/' + segment(id) + '/acknowledge', {}, signal),
     decide: async (id, d, argsHash, signal) =>
       post(
         '/approvals/' + segment(id) + '/decision',
@@ -538,11 +556,13 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       get(
         '/audit' +
           query([
-            ['cursor', params?.cursor, 'seq'],
+            ['order', params?.order, 'order'],
+            ['cursor', params?.cursor, params?.order === 'desc' ? 'descSeq' : 'seq'],
             ['limit', params?.limit, 'limit200'],
             ['job_id', params?.jobId, 'string'],
             ['tool', params?.tool, 'tool'],
-            ['risk', params?.risk, 'name']
+            ['risk', params?.risk, 'name'],
+            ['kind', params?.kind, 'name']
           ]),
         signal
       ),

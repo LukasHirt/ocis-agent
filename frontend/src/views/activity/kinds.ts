@@ -1,11 +1,13 @@
 type Gettext = (msgid: string) => string
 
-// The audit event kinds the sidecar writes, each with its label. Every
-// msgid is a literal so it can be extracted for translation.
+// The audit event kinds the sidecar writes, each with its label (the
+// server's kind filter accepts exactly these). Every msgid is a literal so
+// it can be extracted for translation.
 const KINDS: Record<string, (t: Gettext) => string> = {
   approval_requested: (t) => t('Approval requested'),
   approval_decided: (t) => t('Approval decided'),
   approval_expired: (t) => t('Approval expired'),
+  approval_acknowledged: (t) => t('Outcome check confirmed by you'),
   tool_call: (t) => t('Tool used'),
   action_executed: (t) => t('Action carried out'),
   policy_denied: (t) => t('Action refused by policy'),

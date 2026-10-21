@@ -16,7 +16,7 @@
         :searchable="false"
         data-testid="agent-activity-kind"
         :label="$gettext('Show')"
-        @update:model-value="(o: KindOption | null) => o && audit.setKind(o.value)"
+        @update:model-value="(o: KindOption | null) => o && void audit.setKind(o.value)"
       />
       <oc-button size="small" :disabled="audit.loading" @click="audit.refresh()">
         <oc-icon name="refresh" size="small" />
@@ -45,18 +45,13 @@
     <oc-spinner v-if="!audit.loaded && !audit.error" :aria-label="$gettext('Loading the activity')" />
 
     <template v-if="audit.loaded">
-      <p
-        v-if="audit.kind !== ''"
-        class="agent-activity-filter-note"
-        v-text="$gettext('Only the events loaded so far are filtered. Load older events to search further back.')"
-      />
       <ul class="agent-activity-list">
-        <li v-for="e in audit.shown" :key="e.seq"><EventRow :event="e" /></li>
+        <li v-for="e in audit.events" :key="e.seq"><EventRow :event="e" /></li>
       </ul>
       <p
-        v-if="audit.shown.length === 0"
+        v-if="audit.events.length === 0"
         class="agent-activity-empty"
-        v-text="audit.kind === '' ? $gettext('No activity yet.') : $gettext('None of the loaded events is of this kind.')"
+        v-text="audit.kind === '' ? $gettext('No activity yet.') : $gettext('No events of this kind.')"
       />
       <oc-spinner v-if="audit.olderLoading" size="small" :aria-label="$gettext('Loading older events')" />
       <oc-button
@@ -80,7 +75,7 @@ import { KNOWN_KINDS, kindLabel } from './activity/kinds'
 import { formatBytes } from '../util/format'
 
 // The activity screen: the audit log newest first with older pages on
-// request, a kind filter over the loaded events, the chain check and the
+// request, a kind filter (applied by the server), the chain check and the
 // export. It listens for changes only while shown; leaving it stops a
 // running export.
 const audit = useAuditStore()
@@ -152,8 +147,5 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 0.5rem;
   color: var(--oc-color-swatch-danger-default, #b00020);
-}
-.agent-activity-filter-note {
-  font-size: 0.875rem;
 }
 </style>

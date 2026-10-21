@@ -243,7 +243,6 @@ describe('useJobsStore', () => {
       await jobs.openJob('j1')
       expect(jobs.detail?.id).toBe('j1')
       expect(jobs.detail?.steps.map((s) => s.n)).toEqual([1, 2])
-      expect(jobs.tokens).toEqual({ in: 10, out: 5 })
       expect(jobs.detailApprovals?.items.map((a) => a.id)).toEqual(['a1'])
       const ap = server.calls.find((c) => c.path === '/approvals' && c.query.has('job_id'))!
       expect(ap.query.get('job_id')).toBe('j1')

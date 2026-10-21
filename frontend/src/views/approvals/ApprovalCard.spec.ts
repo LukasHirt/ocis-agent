@@ -347,6 +347,57 @@ describe('ApprovalCard', () => {
     expect(w.find('.agent-card-args').text()).toContain('/Docs/report.txt')
   })
 
+  it('lets the user confirm they checked an action with an unknown outcome', async () => {
+    const a = approvalOf('u1', {
+      state: 'unknown',
+      needs_verification: true,
+      outcome: { state: 'unknown', summary: '', reason: '', diff: '' }
+    })
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const { w, server, platform } = await setup(a, (c) =>
+      c.method === 'POST' && c.path === '/approvals/u1/acknowledge'
+        ? gate.then(() => json({ ...a, needs_verification: false, acknowledged_at: '2026-01-01T12:00:00Z' }))
+        : undefined
+    )
+    const b = button(w, 'I checked')
+    expect(b.attributes('aria-label')).toBe('I checked the outcome of files.write')
+    await b.trigger('click')
+    await flushPromises()
+    expect(button(w, 'I checked').attributes('disabled')).toBeDefined()
+    // a second click while it runs sends nothing more
+    await button(w, 'I checked').trigger('click')
+    release()
+    await flushPromises()
+    const sent = server.calls.filter((c) => c.method === 'POST' && c.path === '/approvals/u1/acknowledge')
+    expect(sent).toHaveLength(1)
+    expect(sent[0].body).toEqual({})
+    expect(platform.confirm).not.toHaveBeenCalled()
+    expect(platform.notify).toHaveBeenCalledWith('success', 'Marked as checked')
+    expect(server.calls.filter((c) => c.path === '/approvals' && c.query.get('needs_verification') === 'true').length).toBeGreaterThan(1)
+  })
+
+  it('shows a fixed toast when there is no unknown outcome to confirm', async () => {
+    const a = approvalOf('u1', { state: 'unknown', needs_verification: true })
+    const { w, platform } = await setup(a, (c) =>
+      c.method === 'POST' && c.path === '/approvals/u1/acknowledge' ? apiErr(409, 'not_acknowledgeable') : undefined
+    )
+    await button(w, 'I checked').trigger('click')
+    await flushPromises()
+    expect(platform.notify).toHaveBeenCalledWith(
+      'error',
+      'This action has no unknown outcome to confirm, or it has not finished yet.'
+    )
+    expect(JSON.stringify(platform.notify.mock.calls)).not.toContain('server text')
+  })
+
+  it('offers no confirmation for an action whose outcome is known', async () => {
+    const { w } = await setup(
+      approvalOf('a1', { state: 'executed', outcome: { state: 'done', summary: '', reason: '', diff: '' } })
+    )
+    expect(w.findAll('button').some((b) => b.text() === 'I checked')).toBe(false)
+  })
+
   it('shows hostile outcome text as text', async () => {
     const { w } = await setup(
       approvalOf('a1', {

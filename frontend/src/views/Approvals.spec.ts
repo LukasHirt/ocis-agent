@@ -28,9 +28,9 @@ const jobOf = (id: string, goal: string) => ({
 })
 
 // serve answers GET /approvals from the given lists (pending without a
-// state, unknown for state=unknown) and GET /jobs/{id} with goals.
+// state, verify for needs_verification=true) and GET /jobs/{id} with goals.
 const serve = (
-  lists: { pending?: Approval[]; unknown?: Approval[] },
+  lists: { pending?: Approval[]; verify?: Approval[] },
   goals: Record<string, string> = {},
   extra?: Handler
 ): Handler => {
@@ -40,11 +40,11 @@ const serve = (
     if (c.method === 'GET' && c.path === '/approvals' && !c.query.has('cursor')) {
       const state = c.query.get('state')
       const job = c.query.get('job_id')
+      if (c.query.get('needs_verification') === 'true') return json({ approvals: lists.verify ?? [], next_cursor: null })
       if (state === null && job !== null) {
         return json({ approvals: (lists.pending ?? []).filter((a) => a.job_id === job), next_cursor: null })
       }
       if (state === null) return json({ approvals: lists.pending ?? [], next_cursor: null })
-      if (state === 'unknown') return json({ approvals: lists.unknown ?? [], next_cursor: null })
     }
     const m = /^\/jobs\/([^/]+)$/.exec(c.path)
     if (c.method === 'GET' && m) {
@@ -54,6 +54,11 @@ const serve = (
     return undefined
   }
 }
+
+// isPendingList: the store's read of the pending approvals (not the list to
+// verify, the history or a job's list)
+const isPendingList = (c: Call) =>
+  c.path === '/approvals' && !c.query.has('state') && !c.query.has('needs_verification')
 
 const setup = async (handler: Handler, props: { job?: string } = {}) => {
   const server = fakeServer(handler)
@@ -138,7 +143,7 @@ describe('Approvals', () => {
     let release!: (r: Response) => void
     const { w } = await setup(
       serve({}, {}, (c) =>
-        c.path === '/approvals' && !c.query.has('state')
+        isPendingList(c)
           ? new Promise<Response>((r) => (release = r))
           : undefined
       )
@@ -320,7 +325,7 @@ describe('Approvals', () => {
     const { w } = await setup(
       serve({
         pending: [approvalOf('a1')],
-        unknown: [
+        verify: [
           approvalOf('u1', {
             state: 'unknown',
             needs_verification: true,
@@ -399,7 +404,7 @@ describe('Approvals', () => {
         pending = pending.filter((a) => a.id !== 'a1')
         return json({ ...approvalOf('a1'), state: 'approved' })
       }
-      if (c.path === '/approvals' && !c.query.has('state')) return json({ approvals: pending, next_cursor: null })
+      if (isPendingList(c)) return json({ approvals: pending, next_cursor: null })
       return undefined
     })
     expect(w.findAll('.agent-card')).toHaveLength(2)
@@ -497,35 +502,48 @@ describe('Approvals', () => {
     expect(w.find('.agent-group-goal').text()).toContain('later goal')
   })
 
-  it('also asks to verify executed or failed actions whose outcome is unknown', async () => {
+  it('lists every action the server says needs verification, without scanning the history', async () => {
     const odd = approvalOf('x1', {
       state: 'executed',
       needs_verification: true,
       args: { path: '/Docs/odd.txt' },
       outcome: { state: 'unknown', summary: '', reason: 'The stored outcome is unreadable.', diff: '' }
     })
-    const fine = approvalOf('x2', {
-      state: 'failed',
-      outcome: { state: 'failed', summary: '', reason: 'nope', diff: '' }
-    })
-    const { w, server } = await setup(
-      serve({}, {}, (c) => {
-        const st = c.query.get('state')
-        if (c.path === '/approvals' && st === 'executed') return json({ approvals: [odd], next_cursor: null })
-        if (c.path === '/approvals' && st === 'failed') return json({ approvals: [fine], next_cursor: null })
-        return undefined
-      })
-    )
-    expect(server.calls.some((c) => c.query.get('state') === 'executed')).toBe(true)
+    const { w, server } = await setup(serve({ verify: [odd] }))
+    expect(server.calls.some((c) => c.query.get('state') === 'executed' || c.query.get('state') === 'failed')).toBe(false)
     const verify = w.find('.agent-verify')
     expect(verify.findAll('.agent-card')).toHaveLength(1)
     expect(verify.text()).toContain('/Docs/odd.txt')
   })
 
+  it('removes an action from the list once the user confirmed they checked it', async () => {
+    const lists = {
+      verify: [
+        approvalOf('u1', { state: 'unknown', needs_verification: true, args: { path: '/Docs/x.txt' } }),
+        approvalOf('u2', { state: 'unknown', needs_verification: true, args: { path: '/Docs/y.txt' } })
+      ]
+    }
+    const { w, server, platform } = await setup(
+      serve(lists, {}, (c) => {
+        if (c.method !== 'POST' || c.path !== '/approvals/u1/acknowledge') return undefined
+        lists.verify = lists.verify.filter((a) => a.id !== 'u1')
+        return json(approvalOf('u1', { state: 'unknown', acknowledged_at: '2026-01-01T12:00:00Z' }))
+      })
+    )
+    expect(w.findAll('.agent-verify .agent-card')).toHaveLength(2)
+    await w.findAll('.agent-verify .agent-card')[0].findAll('button').find((b) => b.text() === 'I checked')!.trigger('click')
+    await flushPromises()
+    expect(server.calls.some((c) => c.path === '/approvals/u1/acknowledge')).toBe(true)
+    expect(platform.notify).toHaveBeenCalledWith('success', 'Marked as checked')
+    const cards = w.findAll('.agent-verify .agent-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].text()).toContain('/Docs/y.txt')
+  })
+
   it('does not say that nothing needs attention while actions must be verified', async () => {
     const { w } = await setup(
       serve({
-        unknown: [
+        verify: [
           approvalOf('u1', {
             state: 'unknown',
             needs_verification: true,
@@ -560,7 +578,7 @@ describe('Approvals', () => {
     let hang = false
     const { w, store, platform } = await setup(
       serve({}, {}, (c) =>
-        hang && c.path === '/approvals' && !c.query.has('state')
+        hang && isPendingList(c)
           ? new Promise<Response>((r) => (release = r))
           : undefined
       )

@@ -2,7 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { apiErr, json } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
-import { auditHandler, auditReads, auditState, eventOf, eventsUpTo, type AuditState } from '../test/audit'
+import {
+  auditHandler,
+  auditReads,
+  auditState,
+  eventOf,
+  eventsUpTo,
+  forward,
+  newest,
+  type AuditState
+} from '../test/audit'
 import { errWithRetry } from '../test/chat'
 import { AUDIT_PAGE, MAX_KEPT_EVENTS, useAuditStore } from './audit'
 import { useAgentStore } from './agent'
@@ -37,13 +46,13 @@ const range = (from: number, to: number) => {
 }
 
 describe('useAuditStore: reading', () => {
-  it('reads a short log in one request, newest first', async () => {
+  it('reads a short log in one newest-first request', async () => {
     const { audit, server } = await setup(auditState({ events: eventsUpTo(5) }))
     await audit.refresh()
     expect(seqs(audit.events)).toEqual([5, 4, 3, 2, 1])
     expect(audit.loaded).toBe(true)
     expect(audit.hasOlder).toBe(false)
-    expect(auditReads(server.calls)).toEqual([{ cursor: null, limit: String(AUDIT_PAGE) }])
+    expect(auditReads(server.calls)).toEqual([newest()])
   })
 
   it('shows an empty log as loaded and empty', async () => {
@@ -54,30 +63,26 @@ describe('useAuditStore: reading', () => {
     expect(audit.hasOlder).toBe(false)
   })
 
-  it('finds the newest events of a long log with few requests and pages back to the start', async () => {
-    const st = auditState({ events: eventsUpTo(1000) })
+  it('reads the newest events of a very long log with one request and pages back with the server cursors', async () => {
+    const st = auditState({ events: eventsUpTo(200_000) })
     const { audit, server } = await setup(st)
     await audit.refresh()
-    expect(seqs(audit.events)).toEqual(range(1000, 1000 - AUDIT_PAGE + 1))
+    expect(seqs(audit.events)).toEqual(range(200_000, 200_000 - AUDIT_PAGE + 1))
     expect(audit.hasOlder).toBe(true)
-    expect(auditReads(server.calls).length).toBeLessThan(20)
+    expect(auditReads(server.calls)).toEqual([newest()])
 
     const before = server.calls.length
     await audit.loadOlder()
-    expect(seqs(audit.events)).toEqual(range(1000, 1000 - 2 * AUDIT_PAGE + 1))
-    expect(auditReads(server.calls.slice(before))).toEqual([
-      { cursor: String(1000 - 2 * AUDIT_PAGE), limit: String(AUDIT_PAGE) }
-    ])
-    while (audit.hasOlder) await audit.loadOlder()
-    expect(seqs(audit.events)).toEqual(range(1000, 1))
+    expect(seqs(audit.events)).toEqual(range(200_000, 200_000 - 2 * AUDIT_PAGE + 1))
+    expect(auditReads(server.calls.slice(before))).toEqual([newest('d' + (200_000 - AUDIT_PAGE + 1))])
   })
 
-  it('needs few requests even for a very long log', async () => {
-    const { audit, server } = await setup(auditState({ events: eventsUpTo(200_000) }))
+  it('pages back to the start of the log', async () => {
+    const { audit, server } = await setup(auditState({ events: eventsUpTo(5 * AUDIT_PAGE + 3) }))
     await audit.refresh()
-    expect(audit.events[0].seq).toBe(200_000)
-    expect(audit.events).toHaveLength(AUDIT_PAGE)
-    expect(auditReads(server.calls).length).toBeLessThan(45)
+    while (audit.hasOlder) await audit.loadOlder()
+    expect(seqs(audit.events)).toEqual(range(5 * AUDIT_PAGE + 3, 1))
+    expect(auditReads(server.calls)).toHaveLength(6)
   })
 
   it('copes with gaps in the sequence numbers', async () => {
@@ -87,6 +92,23 @@ describe('useAuditStore: reading', () => {
     expect(audit.events[0].seq).toBe(400)
     while (audit.hasOlder) await audit.loadOlder()
     expect(seqs(audit.events)).toEqual(seqs([...events].reverse()))
+  })
+
+  it('follows a cursor of an empty page back', async () => {
+    let n = 0
+    const { audit } = await setup(auditState(), (c) => {
+      if (c.path !== '/audit') return undefined
+      n++
+      if (n === 1) return json({ events: [eventOf(9)], next_cursor: 'd9' })
+      if (n === 2) return json({ events: [], next_cursor: 'd4' })
+      return json({ events: [eventOf(2)], next_cursor: null })
+    })
+    await audit.refresh()
+    await audit.loadOlder()
+    expect(audit.hasOlder).toBe(true)
+    await audit.loadOlder()
+    expect(seqs(audit.events)).toEqual([9, 2])
+    expect(audit.hasOlder).toBe(false)
   })
 
   it('shows a fixed error and reads again on retry', async () => {
@@ -102,10 +124,15 @@ describe('useAuditStore: reading', () => {
     expect(seqs(audit.events)).toEqual([3, 2, 1])
   })
 
-  it('refuses an answer that is not a page', async () => {
-    const { audit } = await setup(auditState(), (c) => (c.path === '/audit' ? json({ nope: true }) : undefined))
+  it.each([
+    ['not a page', { nope: true }],
+    ['an ascending cursor on a newest-first page', { events: [eventOf(2)], next_cursor: '2' }],
+    ['a malformed cursor', { events: [eventOf(2)], next_cursor: 'd0' }]
+  ])('refuses an answer with %s', async (_name, body) => {
+    const { audit } = await setup(auditState(), (c) => (c.path === '/audit' ? json(body) : undefined))
     await audit.refresh()
-    expect(audit.error).not.toBeNull()
+    expect(audit.error).toBe('Something went wrong in the agent service.')
+    expect(audit.loaded).toBe(false)
   })
 
   it('shares one load between concurrent refreshes', async () => {
@@ -126,7 +153,7 @@ describe('useAuditStore: live updates', () => {
     events().onChanged(['activity'])
     await flushPromises()
     expect(seqs(audit.events)).toEqual([5, 4, 3, 2, 1])
-    expect(auditReads(server.calls.slice(before))).toEqual([{ cursor: '3', limit: String(AUDIT_PAGE) }])
+    expect(auditReads(server.calls.slice(before))).toEqual([forward('3')])
     // the same events once more (a repeated delivery): no duplicates
     events().onChanged(['activity'])
     await flushPromises()
@@ -138,7 +165,7 @@ describe('useAuditStore: live updates', () => {
     const { audit, events } = await setup(auditState(), (c) => {
       if (c.path !== '/audit') return undefined
       n++
-      if (n === 1) return json({ events: [eventOf(1), eventOf(2)], next_cursor: null })
+      if (n === 1) return json({ events: [eventOf(2), eventOf(1)], next_cursor: null })
       return json({ events: [eventOf(2), eventOf(3)], next_cursor: null })
     })
     await audit.refresh()
@@ -172,7 +199,7 @@ describe('useAuditStore: live updates', () => {
     expect(seqs(audit.events)).toEqual([1])
   })
 
-  it('jumps to the newest events when very many arrived', async () => {
+  it('reads the newest page afresh when very many arrived', async () => {
     const st = auditState({ events: eventsUpTo(2) })
     const { audit, events } = await setup(st)
     await audit.refresh()
@@ -186,7 +213,7 @@ describe('useAuditStore: live updates', () => {
 
   it('keeps at most MAX_KEPT_EVENTS events, dropping the oldest, and pages back to them', async () => {
     const st = auditState({ events: eventsUpTo(3) })
-    const { audit, events } = await setup(st)
+    const { audit, server, events } = await setup(st)
     await audit.refresh()
     expect(audit.hasOlder).toBe(false)
     let n = 3
@@ -203,6 +230,7 @@ describe('useAuditStore: live updates', () => {
     // the dropped ones are older events again
     expect(audit.hasOlder).toBe(true)
     await audit.loadOlder()
+    expect(auditReads(server.calls).at(-1)).toEqual(newest('d' + (n - MAX_KEPT_EVENTS + 1)))
     expect(seqs(audit.events)).toEqual(range(n, n - MAX_KEPT_EVENTS + 1 - AUDIT_PAGE))
   })
 
@@ -210,14 +238,14 @@ describe('useAuditStore: live updates', () => {
     const st = auditState({ events: eventsUpTo(1000) })
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
-    const held = String(1000 - 2 * AUDIT_PAGE)
+    const held = 'd' + (1000 - AUDIT_PAGE + 1)
     const { audit, server, events } = await setup(st, (c) =>
       c.path === '/audit' && c.query.get('cursor') === held ? gate.then(() => auditHandler(st)(c)!) : undefined
     )
     await audit.refresh()
     const older = audit.loadOlder()
     await flushPromises()
-    // very many new events: the next change looks up the newest page afresh
+    // very many new events: the next change reads the newest page afresh
     st.events = eventsUpTo(5000)
     events().onChanged(['activity'])
     await flushPromises()
@@ -227,7 +255,7 @@ describe('useAuditStore: live updates', () => {
     expect(audit.events[audit.events.length - 1].seq).toBe(5000 - AUDIT_PAGE + 1) // the stale page was dropped
     expect(audit.olderLoading).toBe(false)
     await audit.loadOlder()
-    expect(auditReads(server.calls).at(-1)).toEqual({ cursor: String(5000 - 2 * AUDIT_PAGE), limit: String(AUDIT_PAGE) })
+    expect(auditReads(server.calls).at(-1)).toEqual(newest('d' + (5000 - AUDIT_PAGE + 1)))
     expect(audit.events).toHaveLength(2 * AUDIT_PAGE)
   })
 
@@ -257,7 +285,7 @@ describe('useAuditStore: live updates', () => {
   it('forgets everything when the session ends', async () => {
     const { audit } = await setup(auditState({ events: eventsUpTo(2) }))
     await audit.refresh()
-    audit.setKind('tool_call')
+    await audit.setKind('tool_call')
     useAgentStore().stop()
     await flushPromises()
     expect(audit.events).toEqual([])
@@ -267,40 +295,111 @@ describe('useAuditStore: live updates', () => {
 })
 
 describe('useAuditStore: kind filter', () => {
-  it('filters the loaded events by kind', async () => {
-    const events = [eventOf(1, { kind: 'tool_call' }), eventOf(2, { kind: 'memory_edited' }), eventOf(3, { kind: 'tool_call' })]
-    const { audit } = await setup(auditState({ events }))
+  const mixed = () =>
+    eventsUpTo(300).map((e) => (e.seq % 10 === 0 ? { ...e, kind: 'memory_edited' } : e))
+
+  it('asks the server for the events of one kind, newest first, and pages back through them', async () => {
+    const st = auditState({ events: mixed() })
+    const { audit, server } = await setup(st)
     await audit.refresh()
-    expect(seqs(audit.shown)).toEqual([3, 2, 1])
-    audit.setKind('tool_call')
-    expect(seqs(audit.shown)).toEqual([3, 1])
-    audit.setKind('')
-    expect(seqs(audit.shown)).toEqual([3, 2, 1])
+    const before = server.calls.length
+    await audit.setKind('memory_edited')
+    expect(audit.kind).toBe('memory_edited')
+    expect(seqs(audit.events)).toEqual(range(30, 1).map((i) => i * 10))
+    expect(audit.hasOlder).toBe(false)
+    // the newest seq of the whole log first, then the kind's newest page
+    expect(auditReads(server.calls.slice(before))).toEqual([newest(null, null, 1), newest(null, 'memory_edited')])
+
+    await audit.setKind('')
+    expect(seqs(audit.events)).toEqual(range(300, 300 - AUDIT_PAGE + 1))
+  })
+
+  it('pages back through the events of one kind with its cursors', async () => {
+    const st = auditState({ events: eventsUpTo(200).map((e) => (e.seq % 2 === 0 ? { ...e, kind: 'chat_message' } : e)) })
+    const { audit, server } = await setup(st)
+    await audit.setKind('chat_message')
+    expect(audit.events).toHaveLength(AUDIT_PAGE)
+    const before = server.calls.length
+    await audit.loadOlder()
+    expect(auditReads(server.calls.slice(before))).toEqual([newest('d' + (200 - 2 * (AUDIT_PAGE - 1)), 'chat_message')])
+    expect(seqs(audit.events)).toEqual(range(100, 100 - 2 * AUDIT_PAGE + 1).map((i) => i * 2))
+  })
+
+  it('reads new events of the kind after the newest seq of the log, not after the newest shown', async () => {
+    const st = auditState({ events: mixed() })
+    const { audit, server, events } = await setup(st)
+    await audit.setKind('approval_expired') // none of this kind
+    expect(audit.events).toEqual([])
+    st.events.push(eventOf(301), eventOf(302, { kind: 'approval_expired' }))
+    const before = server.calls.length
+    events().onChanged(['activity'])
+    await flushPromises()
+    expect(auditReads(server.calls.slice(before))).toEqual([forward('300', 'approval_expired')])
+    expect(seqs(audit.events)).toEqual([302])
+  })
+
+  it('drops the answer for the kind shown before', async () => {
+    const st = auditState({ events: mixed() })
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const { audit } = await setup(st, (c) =>
+      c.path === '/audit' && c.query.get('kind') === 'memory_edited'
+        ? gate.then(() => auditHandler(st)(c)!)
+        : undefined
+    )
+    const first = audit.setKind('memory_edited')
+    await flushPromises()
+    await audit.setKind('tool_call')
+    release()
+    await first
+    await flushPromises()
+    expect(audit.kind).toBe('tool_call')
+    expect(audit.events.every((e) => e.kind === 'tool_call')).toBe(true)
+    expect(audit.events).toHaveLength(AUDIT_PAGE)
+    expect(audit.loading).toBe(false)
   })
 })
 
 describe('useAuditStore: verify', () => {
-  it('reports an intact chain', async () => {
-    const { audit } = await setup()
+  it('reports an intact chain with the number of verified events', async () => {
+    const { audit } = await setup(auditState({ events: eventsUpTo(7) }))
     await audit.verify()
     expect(audit.verifyResult).toBe('ok')
+    expect(audit.verifyChecked).toBe(7)
+    expect(audit.verifyBrokenAt).toBeNull()
     expect(audit.verifyError).toBeNull()
   })
 
-  it('reports a broken chain', async () => {
+  it('reports where the chain breaks', async () => {
     const st = auditState({
-      verify: json({ ok: false, message: 'the audit chain is broken', limitation: 'x' })
+      verify: json({ ok: false, message: 'the audit chain is broken', limitation: 'x', checked: 3, broken_at: 4 })
     })
     const { audit } = await setup(st)
     await audit.verify()
     expect(audit.verifyResult).toBe('broken')
+    expect(audit.verifyChecked).toBe(3)
+    expect(audit.verifyBrokenAt).toBe(4)
   })
 
-  it('refuses an answer without a boolean ok', async () => {
-    const { audit } = await setup(auditState({ verify: json({ ok: 'yes', limitation: 'x' }) }))
+  it('reports a broken chain without a position', async () => {
+    const st = auditState({ verify: json({ ok: false, message: 'm', limitation: 'x', checked: 0 }) })
+    const { audit } = await setup(st)
+    await audit.verify()
+    expect(audit.verifyResult).toBe('broken')
+    expect(audit.verifyBrokenAt).toBeNull()
+  })
+
+  it.each([
+    ['a non-boolean ok', { ok: 'yes', limitation: 'x', checked: 1 }],
+    ['no count', { ok: true, limitation: 'x' }],
+    ['a negative count', { ok: true, limitation: 'x', checked: -1 }],
+    ['a fractional position', { ok: false, limitation: 'x', checked: 1, broken_at: 1.5 }]
+  ])('refuses an answer with %s', async (_name, body) => {
+    const { audit } = await setup(auditState({ verify: json(body) }))
     await audit.verify()
     expect(audit.verifyResult).toBeNull()
-    expect(audit.verifyError).not.toBeNull()
+    expect(audit.verifyChecked).toBeNull()
+    expect(audit.verifyError).toBe('Something went wrong in the agent service.')
   })
 
   it('shows when to try again after a 429', async () => {

@@ -11,15 +11,23 @@
       <span v-if="decidedAt" class="agent-card-decided" v-text="decidedAt" />
     </header>
     <p v-if="stateLabel" class="agent-card-state" v-text="stateLabel" />
-    <p
-      v-if="approval.needs_verification"
-      class="agent-card-verify"
-      v-text="
-        $gettext(
-          'The agent could not confirm whether this action ran. Please check your files to see whether it happened, using the exact arguments below.'
-        )
-      "
-    />
+    <div v-if="approval.needs_verification" class="agent-card-verify">
+      <p
+        v-text="
+          $gettext(
+            'The agent could not confirm whether this action ran. Please check your files to see whether it happened, using the exact arguments below.'
+          )
+        "
+      />
+      <oc-button
+        appearance="outline"
+        size="small"
+        :disabled="decisions.busy(approval.id)"
+        :aria-label="ariaLabel($gettext('I checked the outcome of %{tool}'))"
+        @click="decisions.acknowledge(approval)"
+        v-text="$gettext('I checked')"
+      />
+    </div>
     <div class="agent-card-args">
       <span class="agent-label" v-text="$gettext('Exact arguments')" />
       <JsonBlock :value="approval.args" />
@@ -196,6 +204,15 @@ const decidedAt = computed(() => {
 .agent-card-actions {
   display: flex;
   gap: 0.5rem;
+}
+.agent-card-verify {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.agent-card-verify p {
+  margin: 0;
 }
 .agent-label {
   display: block;

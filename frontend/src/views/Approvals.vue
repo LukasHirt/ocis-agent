@@ -103,10 +103,8 @@ import { APPID } from '../appid'
 // job (the route's ?job=) shows only that job's pending approvals.
 const props = defineProps<{ job?: string }>()
 
-// HISTORY_PAGE is the page size of the history and of the scan for
-// settled actions that need verification.
+// HISTORY_PAGE is the page size of the history.
 const HISTORY_PAGE = 50
-const VERIFY_SCAN_PAGE = 100
 // GOAL_RETRY_MS: a failed goal lookup is tried again on a later change of
 // the list, at most this often.
 const GOAL_RETRY_MS = 60_000
@@ -250,28 +248,9 @@ watch(
   { immediate: true }
 )
 
-// settled: executed or failed approvals whose outcome is unknown too (the
-// stored result was unreadable); the store lists state unknown only. The
-// newest page of each is scanned once per mount, and history pages add
-// what they find.
-const settled = ref<Approval[]>([])
-const addSettled = (list: Approval[]) => {
-  const seen = new Set(settled.value.map((a) => a.id))
-  const add = list.filter(
-    (a) => a.needs_verification && a.state !== ('unknown' satisfies ApprovalState) && !seen.has(a.id)
-  )
-  if (add.length > 0) settled.value = [...settled.value, ...add]
-}
-for (const state of ['executed', 'failed']) {
-  client.listApprovals({ state, limit: VERIFY_SCAN_PAGE }, abort.signal).then(
-    (page) => addSettled(Array.isArray(page?.approvals) ? page.approvals : []),
-    () => {} // best effort: the history shows them too
-  )
-}
-const verify = computed(() => {
-  const ids = new Set(store.approvals.verify.map((a) => a.id))
-  return [...store.approvals.verify, ...settled.value.filter((a) => !ids.has(a.id))]
-})
+// verify: the actions whose outcome the user should check, as the server
+// lists them (needs_verification), until the user confirms they checked.
+const verify = computed(() => store.approvals.verify)
 
 const historyOpen = ref(false)
 const history = ref<Approval[]>([])
@@ -293,7 +272,6 @@ const loadHistory = async () => {
     const seen = new Set(history.value.map((a) => a.id))
     const decided = list.filter((a) => a.state !== ('pending' satisfies ApprovalState) && !seen.has(a.id))
     history.value = [...history.value, ...decided]
-    addSettled(list)
     historyCursor.value = typeof page?.next_cursor === 'string' ? page.next_cursor : null
     historyDone.value = true
   } catch (e) {

@@ -56,23 +56,27 @@ describe('Activity', () => {
     expect(button(w, 'Load older')).toBeUndefined()
   })
 
-  it('filters the loaded events by kind and says so', async () => {
-    const events = [eventOf(1, { kind: 'chat_message' }), eventOf(2, { kind: 'job_finished' }), eventOf(3, { kind: 'chat_message' })]
-    const { w } = await setup(auditState({ events }))
+  it('asks the server for the events of one kind', async () => {
+    const events = [
+      ...eventsUpTo(AUDIT_PAGE + 10),
+      eventOf(AUDIT_PAGE + 11, { kind: 'chat_message' }),
+      eventOf(AUDIT_PAGE + 12, { kind: 'job_finished' })
+    ]
+    events[0] = eventOf(1, { kind: 'chat_message' }) // older than the first page
+    const { w, server } = await setup(auditState({ events }))
     const select = w.find('[data-testid="agent-activity-kind"] select')
     const labels = select.findAll('option').map((o) => o.text())
     expect(labels[0]).toBe('All events')
     expect(labels).toContain('Chat question')
-    expect(w.find('.agent-activity-filter-note').exists()).toBe(false)
+    expect(labels).toContain('Outcome check confirmed by you')
     await select.setValue(String(labels.indexOf('Chat question')))
     await flushPromises()
     expect(kinds(w)).toEqual(['Chat question', 'Chat question'])
-    expect(w.find('.agent-activity-filter-note').text()).toBe(
-      'Only the events loaded so far are filtered. Load older events to search further back.'
-    )
+    expect(server.calls.some((c) => c.path === '/audit' && c.query.get('kind') === 'chat_message')).toBe(true)
+    expect(w.text()).not.toContain('Only the events loaded so far')
     await select.setValue(String(labels.indexOf('Approval expired')))
     await flushPromises()
-    expect(w.find('.agent-activity-empty').text()).toBe('None of the loaded events is of this kind.')
+    expect(w.find('.agent-activity-empty').text()).toBe('No events of this kind.')
   })
 
   it('shows an error with a retry', async () => {

@@ -32,6 +32,7 @@ const messages: Record<string, (t: Gettext) => string> = {
   job_ended: (t) => t('The task has already ended, so this can no longer be decided.'),
   stale_arguments: (t) => t('The action changed since it was shown. Review it again.'),
   already_decided: (t) => t('This approval has already been decided.'),
+  not_acknowledgeable: (t) => t('This action has no unknown outcome to confirm, or it has not finished yet.'),
   limit_reached: (t) => t('A limit has been reached. Try again later.'),
   budget_exhausted: (t) => t("Today's token budget is used up. It resets at midnight UTC."),
   too_many_pending: (t) => t('Too many messages are still waiting for an answer. Try again later.'),

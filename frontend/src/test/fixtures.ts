@@ -47,6 +47,8 @@ export const approvalOf = (id: string, over: Partial<Approval> = {}): Approval =
   outcome: null,
   job_ended: false,
   needs_verification: false,
+  acknowledged_at: null,
+  acknowledged_by: '',
   ...over
 })
 

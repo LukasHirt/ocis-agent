@@ -9,10 +9,8 @@ import { saveBlob } from '../util/download'
 
 // Events per page (the server caps audit pages at 200).
 export const AUDIT_PAGE = 50
-// The most lookups to find the newest events of a log.
-const MAX_PROBES = 64
 // The most pages of new events read after a change; with more the newest
-// page is looked up afresh.
+// page is read afresh.
 const MAX_NEW_PAGES = 10
 // The most events kept while new ones arrive; the oldest are dropped (and
 // can be paged back to as older events).
@@ -22,7 +20,7 @@ export type VerifyResult = 'ok' | 'broken'
 
 interface Page {
   events: AuditEvent[]
-  next: number | null
+  next: string | null // the server's cursor of the next page
 }
 
 const isEvent = (v: unknown): v is AuditEvent =>
@@ -32,15 +30,22 @@ const isEvent = (v: unknown): v is AuditEvent =>
   (v as { seq: number }).seq > 0 &&
   typeof (v as { kind?: unknown }).kind === 'string'
 
-const pageOf = (v: unknown): Page => {
+// The cursors the server issues: the last seq of an ascending page, "d"
+// and the last seq of a newest-first one.
+const ASC_CURSOR = /^[1-9]\d{0,17}$/
+const DESC_CURSOR = /^d[1-9]\d{0,17}$/
+
+const pageOf = (v: unknown, desc: boolean): Page => {
   const doc = v as Record<string, unknown> | null
   const items = doc?.events
   if (!Array.isArray(items) || !items.every(isEvent)) throw new ApiError(502, 'internal')
   const n = doc?.next_cursor
-  const next = typeof n === 'string' && /^[1-9]\d{0,17}$/.test(n) ? Number(n) : null
-  if (n !== null && n !== undefined && next === null) throw new ApiError(502, 'internal')
-  return { events: items, next }
+  if (n === null || n === undefined) return { events: items, next: null }
+  if (typeof n !== 'string' || !(desc ? DESC_CURSOR : ASC_CURSOR).test(n)) throw new ApiError(502, 'internal')
+  return { events: items, next: n }
 }
+
+const isCount = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0
 
 // merge adds events to a list (newest first), by seq, without repeats.
 const merge = (list: AuditEvent[], add: AuditEvent[]): AuditEvent[] => {
@@ -51,14 +56,13 @@ const merge = (list: AuditEvent[], add: AuditEvent[]): AuditEvent[] => {
 }
 
 // useAuditStore holds the activity screen's data: the user's audit log
-// newest first, the chain check and the export.
+// newest first (all of it or one kind, filtered by the server), the chain
+// check and the export.
 //
-// The API lists the log ascending by seq (the cursor is the seq after
-// which a page starts) and seqs count up from 1. The newest events are
-// found by looking ahead with one-event pages (doubling the step, then
-// halving the range) and then read as one page; older pages are read by
-// seq range below the oldest loaded event, new events forward from the
-// newest one. Gaps in the seqs only make pages shorter.
+// The newest page and older pages are read newest first, following the
+// server's cursors; new events are read forward (ascending) after the
+// newest seq of the log read so far. With a kind filter that seq is looked
+// up once per load (the kind's own newest event may be far back).
 export const useAuditStore = defineStore('ocis-agent-audit', () => {
   const agent = useAgentStore()
 
@@ -67,15 +71,16 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   const loaded = ref(false)
   const error = ref<string | null>(null)
   const olderLoading = ref(false)
-  // every event with a seq above floor (up to the newest) has been read
-  const floor = ref(0)
-  const hasOlder = computed(() => loaded.value && floor.value > 0)
+  // the cursor of the page below the oldest event kept (null: none older)
+  const older = ref<string | null>(null)
+  const hasOlder = computed(() => loaded.value && older.value !== null)
 
   const kind = ref('')
-  const shown = computed(() => (kind.value === '' ? events.value : events.value.filter((e) => e.kind === kind.value)))
 
   const verifying = ref(false)
   const verifyResult = ref<VerifyResult | null>(null)
+  const verifyChecked = ref<number | null>(null) // the events verified
+  const verifyBrokenAt = ref<number | null>(null) // the seq where the chain breaks
   const verifyError = ref<string | null>(null)
 
   const exporting = ref(false)
@@ -84,9 +89,10 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   let exportAbort: AbortController | null = null
 
   let bound: SessionHandle | null = null
-  let gen = 0 // grows on reset and every fresh load: older answers are dropped
+  let gen = 0 // grows on reset, a kind change and every fresh load: older answers are dropped
   let epoch = 0 // grows on reset only
-  let newest = 0 // the highest seq read (0: none)
+  let listEpoch = 0 // grows on reset and a kind change
+  let newest = 0 // the highest seq of the log read (0: none)
 
   const session = (): SessionHandle | null => {
     const s = agent.session()
@@ -106,83 +112,57 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   const describe = (s: SessionHandle, e: unknown) => describeError(e, s.gettext)
   const fmtSeconds = (secs: number) => formatDuration(Math.max(1, secs) * 1000)
 
-  const list = async (s: SessionHandle, after: number, limit: number): Promise<Page> =>
-    pageOf(await s.client.listAudit({ limit, ...(after > 0 ? { cursor: String(after) } : {}) }, s.signal))
+  const filterOf = (k: string) => (k !== '' ? { kind: k } : {})
 
-  // forward reads every event after `after`, following next_cursor; it
-  // returns null when more than maxPages pages follow.
-  const forward = async (s: SessionHandle, after: number, maxPages: number): Promise<AuditEvent[] | null> => {
+  // newestFirst reads a page newest first, below the cursor if one is given.
+  const newestFirst = async (s: SessionHandle, k: string, cursor: string | null, limit = AUDIT_PAGE): Promise<Page> =>
+    pageOf(
+      await s.client.listAudit(
+        { order: 'desc', limit, ...(cursor !== null ? { cursor } : {}), ...filterOf(k) },
+        s.signal
+      ),
+      true
+    )
+
+  // forward reads every event of the kind after `after`, following
+  // next_cursor; it returns null when more than maxPages pages follow.
+  const forward = async (s: SessionHandle, k: string, after: number, maxPages: number): Promise<AuditEvent[] | null> => {
     const out: AuditEvent[] = []
     let c = after
     for (let i = 0; i < maxPages; i++) {
-      const p = await list(s, c, AUDIT_PAGE)
+      const p = pageOf(
+        await s.client.listAudit({ limit: AUDIT_PAGE, ...(c > 0 ? { cursor: String(c) } : {}), ...filterOf(k) }, s.signal),
+        false
+      )
       out.push(...p.events.filter((e) => e.seq > after))
       if (p.next === null) return out
-      c = Math.max(p.next, c + 1)
+      c = Math.max(Number(p.next), c + 1)
     }
     return null
-  }
-
-  // newestPage finds the newest page of the log: the events and the floor
-  // below them.
-  const newestPage = async (s: SessionHandle): Promise<{ events: AuditEvent[]; floor: number }> => {
-    const first = await list(s, 0, AUDIT_PAGE)
-    if (first.next === null) return { events: first.events, floor: 0 }
-    // lo: a seq that exists with more after it; hi: nothing after it
-    let lo = first.events.length > 0 ? first.events[first.events.length - 1].seq : first.next
-    let hi: number | null = null
-    let probes = 0
-    const probe = async (c: number) => {
-      if (++probes > MAX_PROBES) throw new ApiError(502, 'internal')
-      return list(s, c, 1)
-    }
-    for (let step = AUDIT_PAGE * 4; hi === null; step *= 2) {
-      const c = lo + step
-      const p = await probe(c)
-      if (p.events.length === 0) {
-        if (p.next === null) hi = c
-        else lo = Math.max(lo, p.next)
-      } else if (p.next === null) {
-        lo = hi = p.events[0].seq
-      } else {
-        lo = p.events[0].seq
-      }
-    }
-    while (hi - lo > AUDIT_PAGE) {
-      const mid = Math.floor((lo + hi) / 2)
-      const p = await probe(mid)
-      if (p.events.length === 0 && p.next === null) hi = mid
-      else if (p.events.length > 0 && p.next === null) lo = hi = p.events[0].seq
-      else lo = Math.max(lo, p.events[0]?.seq ?? p.next ?? lo, mid)
-    }
-    // the tail is in [lo, hi]: a page below lo covers at least one page
-    const start = Math.max(0, lo - AUDIT_PAGE)
-    const got = await forward(s, start, MAX_NEW_PAGES)
-    if (got === null) throw new ApiError(502, 'internal')
-    // keep one page: the floor is then the newest event left out
-    const sorted = merge([], got)
-    const left = sorted.slice(AUDIT_PAGE)
-    return { events: sorted.slice(0, AUDIT_PAGE), floor: left.length > 0 ? left[0].seq : start }
   }
 
   // load reads the newest page from scratch.
   const load = async (s: SessionHandle) => {
     const g = ++gen
-    // a page of older events read meanwhile belongs to the old floor
+    const k = kind.value
+    // a page of older events read meanwhile belongs to the old list
     olderInflight = null
     olderLoading.value = false
-    const p = await newestPage(s)
+    // with a filter, the newest seq of the whole log: new events are read
+    // after it (read first, so nothing between the two reads is missed)
+    const top = k !== '' ? ((await newestFirst(s, '', null, 1)).events[0]?.seq ?? 0) : 0
+    const p = await newestFirst(s, k, null)
     if (g !== gen) return
     events.value = merge([], p.events)
-    floor.value = p.floor
-    newest = events.value[0]?.seq ?? p.floor
+    older.value = p.next
+    newest = Math.max(top, events.value[0]?.seq ?? 0)
     loaded.value = true
   }
 
   // readNew adds the events after the newest one read.
   const readNew = async (s: SessionHandle) => {
     const g = gen
-    const got = await forward(s, newest, MAX_NEW_PAGES)
+    const got = await forward(s, kind.value, newest, MAX_NEW_PAGES)
     if (g !== gen) return
     if (got === null) {
       await load(s)
@@ -192,9 +172,9 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     const all = merge(events.value, got)
     newest = Math.max(newest, all[0].seq)
     if (all.length > MAX_KEPT_EVENTS) {
-      // every event above the newest dropped one is still kept
-      floor.value = Math.max(floor.value, all[MAX_KEPT_EVENTS].seq)
-      // a page of older events read meanwhile belongs to the old floor
+      // the dropped events are older events again: below the oldest kept
+      older.value = 'd' + String(all[MAX_KEPT_EVENTS - 1].seq)
+      // a page of older events read meanwhile belongs to the old list
       gen++
       olderInflight = null
       olderLoading.value = false
@@ -207,17 +187,17 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   const sync = coalesce(async () => {
     const s = session()
     if (!s) return
-    const ep = epoch
+    const ep = listEpoch
     loading.value = true
     try {
       if (loaded.value) await readNew(s)
       else await load(s)
-      if (ep === epoch) error.value = null
+      if (ep === listEpoch) error.value = null
     } catch (e) {
-      if (ep !== epoch || isAbortError(e)) return
+      if (ep !== listEpoch || isAbortError(e)) return
       error.value = describe(s, e)
     } finally {
-      if (ep === epoch) loading.value = false
+      if (ep === listEpoch) loading.value = false
     }
   })
 
@@ -230,20 +210,16 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   const loadOlder = (): Promise<void> => {
     if (olderInflight) return olderInflight
     const s = session()
-    const to = floor.value
-    if (!s || !loaded.value || to === 0) return Promise.resolve()
+    const cursor = older.value
+    if (!s || !loaded.value || cursor === null) return Promise.resolve()
     const g = gen
-    const from = Math.max(0, to - AUDIT_PAGE)
     olderLoading.value = true
     const p = (async () => {
       try {
-        const page = await list(s, from, to - from)
+        const page = await newestFirst(s, kind.value, cursor)
         if (g !== gen) return
-        events.value = merge(
-          events.value,
-          page.events.filter((e) => e.seq > from && e.seq <= to)
-        )
-        floor.value = from
+        events.value = merge(events.value, page.events)
+        older.value = page.next
         error.value = null
       } catch (e) {
         if (g !== gen || isAbortError(e)) return
@@ -260,9 +236,29 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     return p
   }
 
-  // setKind shows only the loaded events of one kind ('' for all).
-  const setKind = (k: string) => {
-    kind.value = typeof k === 'string' ? k : ''
+  const clearList = () => {
+    gen++
+    listEpoch++
+    sync.clear()
+    olderInflight = null
+    events.value = []
+    newest = 0
+    older.value = null
+    loading.value = false
+    loaded.value = false
+    error.value = null
+    olderLoading.value = false
+  }
+
+  // setKind shows only the events of one kind ('' for all), read afresh
+  // from the server.
+  const setKind = (k: string): Promise<void> => {
+    const next = typeof k === 'string' ? k : ''
+    if (next === kind.value && (loaded.value || loading.value)) return Promise.resolve()
+    if (!session()) return Promise.resolve()
+    clearList()
+    kind.value = next
+    return sync()
   }
 
   // --- verify
@@ -276,13 +272,19 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     const ep = epoch
     verifying.value = true
     verifyResult.value = null
+    verifyChecked.value = null
+    verifyBrokenAt.value = null
     verifyError.value = null
     const run = async () => {
       try {
-        const v = (await s.client.verifyAudit(s.signal)) as { ok?: unknown }
+        const v = (await s.client.verifyAudit(s.signal)) as { ok?: unknown; checked?: unknown; broken_at?: unknown }
         if (ep !== epoch) return
-        if (typeof v?.ok !== 'boolean') throw new ApiError(502, 'internal')
+        if (typeof v?.ok !== 'boolean' || !isCount(v.checked)) throw new ApiError(502, 'internal')
+        const at = v.ok ? undefined : v.broken_at
+        if (at !== undefined && !(isCount(at) && at > 0)) throw new ApiError(502, 'internal')
         verifyResult.value = v.ok ? 'ok' : 'broken'
+        verifyChecked.value = v.checked
+        verifyBrokenAt.value = at ?? null
       } catch (e) {
         if (ep !== epoch || isAbortError(e)) return
         if (e instanceof ApiError && e.status === 429) {
@@ -372,22 +374,15 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
   }
 
   const reset = () => {
-    gen++
     epoch++
-    sync.clear()
-    olderInflight = null
+    clearList()
     verifyInflight = null
     abortExport()
-    events.value = []
-    newest = 0
-    floor.value = 0
-    loading.value = false
-    loaded.value = false
-    error.value = null
-    olderLoading.value = false
     kind.value = ''
     verifying.value = false
     verifyResult.value = null
+    verifyChecked.value = null
+    verifyBrokenAt.value = null
     verifyError.value = null
     exportBytes.value = 0
     exportError.value = null
@@ -396,7 +391,6 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
 
   return {
     events,
-    shown,
     loading,
     loaded,
     error,
@@ -405,6 +399,8 @@ export const useAuditStore = defineStore('ocis-agent-audit', () => {
     kind,
     verifying,
     verifyResult,
+    verifyChecked,
+    verifyBrokenAt,
     verifyError,
     exporting,
     exportBytes,

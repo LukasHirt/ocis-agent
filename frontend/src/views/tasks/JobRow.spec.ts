@@ -46,13 +46,28 @@ describe('JobRow', () => {
     expect(row({ trigger_kind: 'file_event' }).find('.agent-job-trigger').text()).toBe('file_event')
   })
 
-  it('shows when a job was created, and ended once it ended', () => {
+  it('shows when a job was created, and when it ended once it ended', () => {
     const live = row({ state: 'running' })
     expect(live.find('.agent-job-created time').attributes('datetime')).toBe('2026-01-01T10:00:00Z')
     expect(live.find('.agent-job-changed').text()).toContain('Updated')
-    const ended = row({ state: 'failed' })
+    expect(live.find('.agent-job-changed time').attributes('datetime')).toBe('2026-01-01T10:05:00Z')
+    const ended = row({ state: 'failed', updated_at: '2026-01-01T11:00:00Z', ended_at: '2026-01-01T10:30:00Z' })
     expect(ended.find('.agent-job-changed').text()).toContain('Ended')
-    expect(ended.find('.agent-job-changed time').attributes('datetime')).toBe('2026-01-01T10:05:00Z')
+    expect(ended.find('.agent-job-changed time').attributes('datetime')).toBe('2026-01-01T10:30:00Z')
+  })
+
+  it('shows the tokens a job used, and nothing for none', () => {
+    expect(row({ tokens_in: 1200, tokens_out: 34 }).find('.agent-job-tokens').text()).toBe('1200 in, 34 out')
+    expect(row().find('.agent-job-tokens').exists()).toBe(false)
+  })
+
+  it('links a chat job to its conversation', () => {
+    const w = row({ trigger_kind: 'chat', trigger_ref: 'conv-1' })
+    const link = w.find('.agent-job-conversation')
+    expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'agent-chat-conversation', params: { id: 'conv-1' } })
+    expect(link.text()).toBe('Open the conversation')
+    expect(row({ trigger_kind: 'chat', trigger_ref: '' }).find('.agent-job-conversation').exists()).toBe(false)
+    expect(row({ trigger_kind: 'file_event', trigger_ref: 'x' }).find('.agent-job-conversation').exists()).toBe(false)
   })
 
   it('counts the steps', () => {

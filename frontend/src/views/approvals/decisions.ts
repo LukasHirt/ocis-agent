@@ -25,11 +25,15 @@ export interface Decisions {
   busy(id: string): boolean
   decide(a: Approval, d: Decision): Promise<void>
   decideAll(list: Approval[], d: Decision): Promise<void>
+  // acknowledge records that the user checked the outcome of an action
+  // that needs verification (no confirmation: it changes no file).
+  acknowledge(a: Approval): Promise<void>
 }
 
 const KEY: InjectionKey<Decisions> = Symbol('ocis-agent-decisions')
 
-// createDecisions sends the user's decisions through the store. Every
+// createDecisions sends the user's decisions (and acknowledgements)
+// through the store. Every
 // decision carries the args_hash of the approval as it was displayed when
 // the user clicked; an approval already being decided is never sent again.
 // Failures become fixed toasts (the store refetches what is stale).
@@ -151,7 +155,21 @@ const createDecisions = (): Decisions => {
     }
   }
 
-  return { busy: (id) => inflight.has(id), decide, decideAll }
+  const acknowledge = async (a: Approval) => {
+    if (inflight.has(a.id) || !a.needs_verification) return
+    const id = a.id
+    inflight.add(id)
+    try {
+      await store.acknowledge(id)
+      platform.notify('success', $gettext('Marked as checked'))
+    } catch (e) {
+      report(e)
+    } finally {
+      inflight.delete(id)
+    }
+  }
+
+  return { busy: (id) => inflight.has(id), decide, decideAll, acknowledge }
 }
 
 // provideDecisions shares one set of decisions (and the in-flight state)
