@@ -162,6 +162,9 @@ func TestLLMRefusals(t *testing.T) {
 		{"idle timeout too long", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "11m"}), "AGENT_LLM_IDLE_TIMEOUT"},
 		{"idle timeout negative", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "-1m"}), "AGENT_LLM_IDLE_TIMEOUT"},
 		{"idle timeout without base url", map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "1m"}, "AGENT_LLM_BASE_URL"},
+		{"idle timeout longer than the timeout", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "5m", "AGENT_LLM_TIMEOUT": "2m"}), "AGENT_LLM_IDLE_TIMEOUT"},
+		{"idle timeout equal to the timeout", with(map[string]string{"AGENT_LLM_IDLE_TIMEOUT": "2m", "AGENT_LLM_TIMEOUT": "2m"}), "AGENT_LLM_TIMEOUT"},
+		{"default idle timeout over a short timeout", with(map[string]string{"AGENT_LLM_TIMEOUT": "30s"}), "AGENT_LLM_IDLE_TIMEOUT"},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
@@ -231,14 +234,14 @@ func TestLLMTimeoutAndReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.LLM.Timeout != 120*time.Second || cfg.LLM.ReasoningEffort != "" {
-		t.Errorf("defaults: Timeout = %v, ReasoningEffort = %q, want 120s and empty", cfg.LLM.Timeout, cfg.LLM.ReasoningEffort)
+	if cfg.LLM.Timeout != 30*time.Minute || cfg.LLM.ReasoningEffort != "" {
+		t.Errorf("defaults: Timeout = %v, ReasoningEffort = %q, want 30m (streaming) and empty", cfg.LLM.Timeout, cfg.LLM.ReasoningEffort)
 	}
 	for _, c := range []struct {
 		timeout, effort string
 		want            time.Duration
 	}{{"10s", "none", 10 * time.Second}, {" 15m ", "low", 15 * time.Minute}, {"30m", " medium ", 30 * time.Minute}, {"2m", "high", 2 * time.Minute}} {
-		env := map[string]string{"AGENT_LLM_TIMEOUT": c.timeout, "AGENT_LLM_REASONING_EFFORT": c.effort}
+		env := map[string]string{"AGENT_LLM_TIMEOUT": c.timeout, "AGENT_LLM_REASONING_EFFORT": c.effort, "AGENT_LLM_IDLE_TIMEOUT": "5s"}
 		for k, v := range base {
 			env[k] = v
 		}
@@ -258,7 +261,7 @@ func TestLLMStreamingDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.LLM.Stream || cfg.LLM.IdleTimeout != 60*time.Second || cfg.LLM.Timeout != 120*time.Second {
+	if !cfg.LLM.Stream || cfg.LLM.IdleTimeout != 60*time.Second || cfg.LLM.Timeout != 30*time.Minute {
 		t.Errorf("defaults: stream %v, idle %v, timeout %v", cfg.LLM.Stream, cfg.LLM.IdleTimeout, cfg.LLM.Timeout)
 	}
 	for _, c := range []struct {
@@ -281,5 +284,32 @@ func TestLLMStreamingDefaultsAndOverrides(t *testing.T) {
 		if cfg.LLM.Stream != c.wantStream || cfg.LLM.IdleTimeout != c.wantIdle {
 			t.Errorf("%v: stream %v, idle %v", c, cfg.LLM.Stream, cfg.LLM.IdleTimeout)
 		}
+	}
+}
+
+func TestLLMTimeoutDefaultDependsOnStreaming(t *testing.T) {
+	base := map[string]string{"AGENT_LLM_BASE_URL": "http://localhost:11434/v1", "AGENT_LLM_MODEL": "qwen3"}
+	with := func(extra map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	cfg, err := Load(llmEnv(with(map[string]string{"AGENT_LLM_STREAM": "false"})))
+	if err != nil || cfg.LLM.Timeout != 120*time.Second {
+		t.Errorf("without streaming: timeout %v, err %v, want 120s", cfg.LLM.Timeout, err)
+	}
+	// without streaming the idle timeout is not used, so it need not be shorter
+	cfg, err = Load(llmEnv(with(map[string]string{"AGENT_LLM_STREAM": "false", "AGENT_LLM_TIMEOUT": "10s", "AGENT_LLM_IDLE_TIMEOUT": "10m"})))
+	if err != nil || cfg.LLM.Timeout != 10*time.Second {
+		t.Errorf("without streaming: timeout %v, err %v", cfg.LLM.Timeout, err)
+	}
+	cfg, err = Load(llmEnv(with(map[string]string{"AGENT_LLM_TIMEOUT": "61s"})))
+	if err != nil || cfg.LLM.Timeout != 61*time.Second || cfg.LLM.IdleTimeout != time.Minute {
+		t.Errorf("streaming: timeout %v, idle %v, err %v", cfg.LLM.Timeout, cfg.LLM.IdleTimeout, err)
 	}
 }

@@ -75,8 +75,9 @@ type CompletionResponse struct {
 	Message Message
 	Usage   Usage
 	Stop    StopReason
-	// UsageEstimated means the provider streamed no usage and Usage is a
-	// conservative estimate (about four bytes a token, never zero).
+	// UsageEstimated means the provider streamed no usage (or not all of it)
+	// and the missing part of Usage is a rough estimate (about three bytes a
+	// token, never zero).
 	UsageEstimated bool
 }
 
@@ -95,9 +96,14 @@ type Delta struct {
 }
 
 // Streamer is a Provider that can report the answer while it is written.
-// CompleteStream calls onDelta (which may be nil) on the caller's goroutine,
-// so onDelta must return quickly; it returns the same response as Complete.
-// onDelta may never be called, for example when the endpoint does not stream.
+// CompleteStream calls onDelta (which may be nil) on the goroutine that reads
+// the response, and returns the same response as Complete. onDelta must not
+// block: the idle timeout keeps running while it does, so a slow callback
+// (a database write waiting for a lock) ends a healthy call as an outage.
+// Copy the delta and return. onDelta may never be called, for example when
+// the endpoint does not stream. On an error the response may still carry
+// the estimated Usage of a stream that had started (UsageEstimated set,
+// nothing else), so that a caller can charge the tokens spent.
 type Streamer interface {
 	Provider
 	CompleteStream(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error)
@@ -110,4 +116,18 @@ type ProviderFunc func(context.Context, CompletionRequest) (CompletionResponse, 
 // Complete calls f.
 func (f ProviderFunc) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
 	return f(ctx, req)
+}
+
+// StreamFunc adapts a function to Streamer; Complete calls it with a nil
+// onDelta.
+type StreamFunc func(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error)
+
+// Complete calls f without a delta callback.
+func (f StreamFunc) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	return f(ctx, req, nil)
+}
+
+// CompleteStream calls f.
+func (f StreamFunc) CompleteStream(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error) {
+	return f(ctx, req, onDelta)
 }

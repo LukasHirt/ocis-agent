@@ -77,7 +77,9 @@ type streamState struct {
 	content   strings.Builder
 	reasoning int // bytes of hidden reasoning, only counted
 	thinking  bool
+	kept      int64 // content, reasoning, tool names and arguments
 	calls     []*partialCall
+	byIndex   map[int]*partialCall // the latest call of each wire index
 	finish    *string
 	usage     *Usage
 	done      bool // [DONE] seen
@@ -95,35 +97,61 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+var errLineTooLong = errors.New("llm: line too long")
+
 // readStream parses a server-sent-events body (data lines, comments, CRLF,
-// multi-line data; event names, ids and retry hints are ignored). The whole
-// stream is capped at the response size limit. A stream that ends without a
-// finish reason or [DONE] is an outage, never a half answer.
-func (o *OpenAI) readStream(ctx context.Context, body io.Reader, reqSize int, onDelta func(Delta)) (CompletionResponse, error) {
-	cr := &countingReader{r: io.LimitReader(body, o.maxResponse+1)}
+// multi-line data; event names, ids and retry hints are ignored). What is
+// kept, one line and one event are capped at the response size limit, the
+// whole stream at maxWire. A stream that ends without a finish reason or
+// [DONE] is an outage, never a half answer. After the finish reason the rest
+// must arrive within the finish grace. On an error the response carries the
+// estimated usage of what was received.
+func (o *OpenAI) readStream(ctx context.Context, body *activity, reqSize int, onDelta func(Delta)) (CompletionResponse, error) {
+	st := &streamState{o: o, onDelta: onDelta, byIndex: map[int]*partialCall{}}
+	if err := st.read(ctx, body); err != nil {
+		u, _ := st.usageFor(reqSize)
+		return CompletionResponse{Usage: u, UsageEstimated: true}, err
+	}
+	resp, err := st.result(reqSize)
+	if err != nil {
+		u, _ := st.usageFor(reqSize)
+		return CompletionResponse{Usage: u, UsageEstimated: true}, err
+	}
+	return resp, nil
+}
+
+func (st *streamState) read(ctx context.Context, body *activity) error {
+	o := st.o
+	cr := &countingReader{r: io.LimitReader(body, o.maxWire+1)}
 	br := bufio.NewReaderSize(cr, 32<<10)
-	st := &streamState{o: o, onDelta: onDelta}
 	var data []byte
-	hasData := false
+	hasData, graced := false, false
 	for !st.done && !(st.finish != nil && st.usage != nil) {
-		line, rerr := readLine(br)
-		if cr.n > o.maxResponse {
-			return CompletionResponse{}, ErrTooLarge
+		if st.finish != nil && !graced {
+			graced = true
+			if body.d > o.finishGrace {
+				body.d = o.finishGrace // same goroutine as Read
+				body.t.Reset(o.finishGrace)
+			}
+		}
+		line, rerr := readLine(br, o.maxResponse)
+		if cr.n > o.maxWire || rerr == errLineTooLong {
+			return ErrTooLarge
 		}
 		if rerr != nil && rerr != io.EOF {
 			if cerr := ctx.Err(); cerr != nil {
-				return CompletionResponse{}, fmt.Errorf("llm: %w", cerr)
+				return fmt.Errorf("llm: %w", cerr)
 			}
 			if st.finish != nil {
 				break // finished; only the usage chunk is missing
 			}
-			return CompletionResponse{}, readError(ctx)
+			return readError(ctx)
 		}
 		if rerr == io.EOF {
 			// an event without its blank line: only [DONE] is trusted
 			if hasData && string(bytes.TrimSpace(data)) == "[DONE]" {
 				st.done = true
-			} else if line := bytes.TrimSpace(line); bytes.HasPrefix(line, []byte("data:")) && string(bytes.TrimSpace(line[5:])) == "[DONE]" && !hasData {
+			} else if line := bytes.TrimSpace(line); !hasData && bytes.HasPrefix(line, []byte("data:")) && string(bytes.TrimSpace(line[5:])) == "[DONE]" {
 				st.done = true
 			}
 			break
@@ -132,7 +160,7 @@ func (o *OpenAI) readStream(ctx context.Context, body io.Reader, reqSize int, on
 		case len(line) == 0:
 			if hasData {
 				if err := st.event(data); err != nil {
-					return CompletionResponse{}, err
+					return err
 				}
 			}
 			data, hasData = data[:0], false
@@ -148,26 +176,33 @@ func (o *OpenAI) readStream(ctx context.Context, body io.Reader, reqSize int, on
 			}
 			data = append(data, value...)
 			hasData = true
+			if int64(len(data)) > o.maxResponse {
+				return ErrTooLarge
+			}
 		}
 	}
 	if cerr := ctx.Err(); cerr != nil {
-		return CompletionResponse{}, fmt.Errorf("llm: %w", cerr)
+		return fmt.Errorf("llm: %w", cerr)
 	}
 	if !st.done && st.finish == nil {
-		return CompletionResponse{}, fmt.Errorf("%w: the stream ended early", ErrUnavailable)
+		return fmt.Errorf("%w: the stream ended early", ErrUnavailable)
 	}
-	return st.result(reqSize)
+	return nil
 }
 
-// readLine returns the next line without its LF or CRLF. At the end of the
-// body it returns what is left with io.EOF.
-func readLine(br *bufio.Reader) ([]byte, error) {
+// readLine returns the next line without its LF or CRLF, or errLineTooLong
+// once it exceeds limit. At the end of the body it returns what is left with
+// io.EOF.
+func readLine(br *bufio.Reader, limit int64) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
 		line = append(line, chunk...)
+		if int64(len(line)) > limit+2 { // the line ending does not count
+			return nil, errLineTooLong
+		}
 		if err == bufio.ErrBufferFull {
-			continue // the size cap bounds the line through the counting reader
+			continue
 		}
 		if err != nil {
 			return line, err
@@ -181,6 +216,15 @@ func (st *streamState) emit(d Delta) {
 	if st.onDelta != nil {
 		st.onDelta(d)
 	}
+}
+
+// keep counts n more bytes against the response size limit.
+func (st *streamState) keep(n int) error {
+	st.kept += int64(n)
+	if st.kept > st.o.maxResponse {
+		return ErrTooLarge
+	}
+	return nil
 }
 
 // event handles the data of one event.
@@ -207,6 +251,9 @@ func (st *streamState) event(data []byte) error {
 		for _, r := range []*string{d.Reasoning, d.ReasoningContent} {
 			if r != nil && *r != "" {
 				st.reasoning += len(*r)
+				if err := st.keep(len(*r)); err != nil {
+					return err
+				}
 				if !st.thinking {
 					st.thinking = true
 					st.emit(Delta{Thinking: true})
@@ -214,6 +261,9 @@ func (st *streamState) event(data []byte) error {
 			}
 		}
 		if d.Content != nil && *d.Content != "" {
+			if err := st.keep(len(*d.Content)); err != nil {
+				return err
+			}
 			st.content.WriteString(*d.Content)
 			st.emit(Delta{Text: *d.Content})
 		}
@@ -231,27 +281,37 @@ func (st *streamState) event(data []byte) error {
 }
 
 // callDelta adds a tool-call fragment. Fragments are matched by index; a
-// server that sends none starts a new call with every new id.
+// known index with a new id starts a new call once the current one has a
+// name (servers that number the calls of each chunk from 0), and a server
+// that sends no index starts a new call with every new id.
 func (st *streamState) callDelta(d wireCallDelta) error {
-	var i int
-	switch {
-	case d.Index != nil:
-		i = *d.Index
-	case len(st.calls) == 0 || (d.ID != "" && d.ID != st.calls[len(st.calls)-1].id):
-		i = len(st.calls)
-	default:
-		i = len(st.calls) - 1
-	}
-	if i < 0 || i > len(st.calls) {
-		return malformed("bad tool call index")
-	}
-	if i == len(st.calls) {
-		if i >= st.o.maxCalls {
+	var c *partialCall
+	newCall := func() error {
+		if len(st.calls) >= st.o.maxCalls {
 			return malformed("too many tool calls")
 		}
-		st.calls = append(st.calls, &partialCall{})
+		c = &partialCall{}
+		st.calls = append(st.calls, c)
+		return nil
 	}
-	c := st.calls[i]
+	if d.Index != nil {
+		if *d.Index < 0 {
+			return malformed("bad tool call index")
+		}
+		c = st.byIndex[*d.Index]
+		if c == nil || (d.ID != "" && c.id != "" && d.ID != c.id && c.name != "") {
+			if err := newCall(); err != nil {
+				return err
+			}
+			st.byIndex[*d.Index] = c
+		}
+	} else if len(st.calls) == 0 || (d.ID != "" && d.ID != st.calls[len(st.calls)-1].id) {
+		if err := newCall(); err != nil {
+			return err
+		}
+	} else {
+		c = st.calls[len(st.calls)-1]
+	}
 	if d.ID != "" {
 		if c.id != "" && c.id != d.ID {
 			return malformed("bad tool call id")
@@ -264,21 +324,41 @@ func (st *streamState) callDelta(d wireCallDelta) error {
 		}
 		c.typ = d.Type
 	}
-	// some servers repeat the whole name in every fragment
-	if n := d.Function.Name; n != "" && n != c.name {
-		c.name += n
+	if err := st.keep(len(d.Function.Name) + len(d.Function.Arguments)); err != nil {
+		return err
 	}
+	// name fragments are concatenated, like the arguments; a server that
+	// repeats the whole name yields an unknown tool, which the gate denies
+	c.name += d.Function.Name
 	c.args.WriteString(d.Function.Arguments)
 	return nil
 }
 
+// usageFor is the streamed usage with every missing (zero) field estimated
+// roughly at three bytes a token, never zero: the request for the prompt,
+// what was received (hidden reasoning included) for the output.
+func (st *streamState) usageFor(reqSize int) (Usage, bool) {
+	var u Usage
+	if st.usage != nil {
+		u = *st.usage
+	}
+	estimated := false
+	if u.In <= 0 {
+		u.In = clampUsage(int64(max(1, (reqSize+2)/3)))
+		estimated = true
+	}
+	if u.Out <= 0 {
+		u.Out = clampUsage(max(1, (st.kept+2)/3))
+		estimated = true
+	}
+	return u, estimated
+}
+
 func (st *streamState) result(reqSize int) (CompletionResponse, error) {
 	content := st.content.String()
-	out := len(content) + st.reasoning
 	calls := make([]wireCall, len(st.calls))
 	for i, c := range st.calls {
 		calls[i] = wireCall{ID: c.id, Type: c.typ, Function: wireFunc{Name: c.name, Arguments: c.args.String()}}
-		out += len(c.name) + c.args.Len()
 	}
 	finish := ""
 	if st.finish != nil {
@@ -289,12 +369,6 @@ func (st *streamState) result(reqSize int) (CompletionResponse, error) {
 		return CompletionResponse{}, err
 	}
 	resp := CompletionResponse{Message: msg, Stop: stop}
-	if st.usage != nil && st.usage.In+st.usage.Out > 0 {
-		resp.Usage = *st.usage
-	} else {
-		// no usage streamed: about four bytes a token, never zero
-		resp.Usage = Usage{In: clampUsage(int64(max(1, (reqSize+3)/4))), Out: clampUsage(int64(max(1, (out+3)/4)))}
-		resp.UsageEstimated = true
-	}
+	resp.Usage, resp.UsageEstimated = st.usageFor(reqSize)
 	return resp, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
@@ -127,5 +128,24 @@ func TestThePlainProviderDoesNotStream(t *testing.T) {
 	var p llm.Provider = New()
 	if _, ok := p.(llm.Streamer); ok {
 		t.Error("the plain scripted provider must not implement Streamer")
+	}
+}
+
+func TestStreamingProviderWaitsTheGapBeforeEachDelta(t *testing.T) {
+	s := Streamed(Say("ab", 1, 1), llm.Delta{Text: "a"}, llm.Delta{Text: "b"})
+	s.Gap = 40 * time.Millisecond
+	p := NewStreaming(s, s)
+	start := time.Now()
+	var at []time.Duration
+	if _, err := p.CompleteStream(context.Background(), req("a"), func(llm.Delta) { at = append(at, time.Since(start)) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(at) != 2 || at[0] < 40*time.Millisecond || at[1] < 80*time.Millisecond {
+		t.Errorf("deltas at %v", at)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := p.CompleteStream(ctx, req("b"), nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the context error during the gap", err)
 	}
 }

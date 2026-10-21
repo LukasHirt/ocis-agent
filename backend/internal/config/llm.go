@@ -24,7 +24,8 @@ type LLMConfig struct {
 	Catalog      llm.Catalog // the default model and the models users may choose
 	AllowedHosts []string    // empty: the host of BaseURL
 	AllowHTTP    bool        // true only for an http:// loopback endpoint
-	// Timeout bounds one model call (AGENT_LLM_TIMEOUT, default 120s).
+	// Timeout bounds one model call (AGENT_LLM_TIMEOUT, default 30m with
+	// streaming, else 120s).
 	Timeout time.Duration
 	// Stream requests streamed answers (AGENT_LLM_STREAM, default true).
 	Stream bool
@@ -131,12 +132,6 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 		return LLMConfig{}, errors.New("AGENT_LLM_ALLOWED_HOSTS must contain the host of AGENT_LLM_BASE_URL")
 	}
 
-	l.Timeout = 120 * time.Second
-	if timeoutRaw != "" {
-		if l.Timeout, err = time.ParseDuration(timeoutRaw); err != nil || l.Timeout < 10*time.Second || l.Timeout > 30*time.Minute {
-			return LLMConfig{}, errors.New("AGENT_LLM_TIMEOUT must be a duration from 10s to 30m")
-		}
-	}
 	if effort != "" && !llm.ValidReasoningEffort(effort) {
 		return LLMConfig{}, errors.New("AGENT_LLM_REASONING_EFFORT must be none, low, medium or high")
 	}
@@ -153,6 +148,20 @@ func loadLLM(getenv func(string) string) (LLMConfig, error) {
 		if l.IdleTimeout, err = time.ParseDuration(idleRaw); err != nil || l.IdleTimeout < 5*time.Second || l.IdleTimeout > 10*time.Minute {
 			return LLMConfig{}, errors.New("AGENT_LLM_IDLE_TIMEOUT must be a duration from 5s to 10m")
 		}
+	}
+	// with streaming the idle timeout is the stall guard, so the total
+	// bound defaults to the maximum
+	l.Timeout = 120 * time.Second
+	if l.Stream {
+		l.Timeout = 30 * time.Minute
+	}
+	if timeoutRaw != "" {
+		if l.Timeout, err = time.ParseDuration(timeoutRaw); err != nil || l.Timeout < 10*time.Second || l.Timeout > 30*time.Minute {
+			return LLMConfig{}, errors.New("AGENT_LLM_TIMEOUT must be a duration from 10s to 30m")
+		}
+	}
+	if l.Stream && l.IdleTimeout >= l.Timeout {
+		return LLMConfig{}, errors.New("AGENT_LLM_IDLE_TIMEOUT must be shorter than AGENT_LLM_TIMEOUT")
 	}
 	return l, nil
 }

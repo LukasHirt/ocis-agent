@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -20,21 +20,36 @@ const (
 	defaultMaxToolCalls = 16
 	maxResponseCap      = 64 << 20
 	defaultTimeout      = 120 * time.Second
+	defaultStreamTimout = 30 * time.Minute
 	defaultIdleTimeout  = 60 * time.Second
+	// the wire of a stream carries an envelope per token: it may be this
+	// many times the kept size, up to maxWireCap
+	wireFactor = 16
+	maxWireCap = 256 << 20
+	// once the model finished, the rest of a stream (usage, [DONE]) must
+	// follow within this time
+	finishGrace = 3 * time.Second
+	// what was learnt about an endpoint is forgotten after this time
+	learntTTL  = time.Hour
+	learntKeep = 256
 )
 
 // OpenAIConfig configures an OpenAI-compatible chat-completions client.
 type OpenAIConfig struct {
-	BaseURL          string // e.g. https://api.openai.com/v1
-	APIKey           Secret // may be empty only for a loopback host
-	Model            string
-	AllowedHosts     []string // egress guard; empty means the base URL's host
-	AllowHTTP        bool     // permit http:// (loopback endpoints and tests)
-	HTTPClient       *http.Client
-	MaxResponseBytes int64 // default 4 MiB
-	MaxToolCalls     int   // default 16
+	BaseURL      string // e.g. https://api.openai.com/v1
+	APIKey       Secret // may be empty only for a loopback host
+	Model        string
+	AllowedHosts []string // egress guard; empty means the base URL's host
+	AllowHTTP    bool     // permit http:// (loopback endpoints and tests)
+	HTTPClient   *http.Client
+	// MaxResponseBytes caps a plain response, and of a stream what is kept
+	// (text, reasoning, tool names and arguments); the stream itself may be
+	// 16 times as large. Default 4 MiB.
+	MaxResponseBytes int64
+	MaxToolCalls     int // default 16
 	// Timeout bounds one whole call, reading the response included; 0 means
-	// the HTTPClient's timeout, or 120s. A slow local model may need more.
+	// the HTTPClient's timeout, or 30m with Stream and 120s without. A slow
+	// local model may need more without streaming.
 	Timeout time.Duration
 	// Stream requests a streamed response (stream: true); see
 	// CompleteStream. Off, every call waits for the whole answer.
@@ -67,12 +82,27 @@ type OpenAI struct {
 	maxResponse int64
 	maxCalls    int
 	effort      string
+	maxWire     int64
 	stream      bool
 	idle        time.Duration
-	// learnt from the endpoint, for the lifetime of the client
-	noStream        atomic.Bool // it refuses stream: true
-	noStreamOptions atomic.Bool // it refuses stream_options
+	finishGrace time.Duration
+	now         func() time.Time
+	// learnt from the endpoint per model, forgotten after learntTTL
+	mu     sync.Mutex
+	learnt map[learntKey]time.Time
 }
+
+type learntKey struct {
+	model string
+	what  refusal
+}
+
+type refusal uint8
+
+const (
+	refusesStream        refusal = iota + 1 // stream: true
+	refusesStreamOptions                    // stream_options
+)
 
 // NewOpenAI validates the configuration and returns the client.
 func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
@@ -109,7 +139,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		return nil, errors.New("llm: the reasoning effort must be none, low, medium or high")
 	}
 
-	client := &http.Client{Timeout: defaultTimeout}
+	client := &http.Client{}
 	if cfg.HTTPClient != nil {
 		c := *cfg.HTTPClient
 		client = &c
@@ -119,6 +149,9 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	}
 	if client.Timeout <= 0 {
 		client.Timeout = defaultTimeout
+		if cfg.Stream {
+			client.Timeout = defaultStreamTimout
+		}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
@@ -131,6 +164,9 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		effort:      cfg.ReasoningEffort,
 		stream:      cfg.Stream,
 		idle:        cfg.IdleTimeout,
+		finishGrace: finishGrace,
+		now:         time.Now,
+		learnt:      map[learntKey]time.Time{},
 	}
 	if o.idle <= 0 {
 		o.idle = defaultIdleTimeout
@@ -139,6 +175,7 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 		o.maxResponse = defaultMaxResponse
 	}
 	o.maxResponse = min(o.maxResponse, maxResponseCap)
+	o.maxWire = min(o.maxResponse*wireFactor, maxWireCap)
 	if o.maxCalls <= 0 {
 		o.maxCalls = defaultMaxToolCalls
 	}
@@ -220,36 +257,69 @@ func (o *OpenAI) Complete(ctx context.Context, req CompletionRequest) (Completio
 }
 
 // CompleteStream implements Streamer. An endpoint that answers a streaming
-// request with 400, 404 or 501 gets it once more without stream_options (400
-// only) and then once without streaming; what worked is remembered for the
-// lifetime of the client. Deltas of a call that fails are not the answer.
+// request with 400 or 422 gets it once more without stream_options, and one
+// that answers 400, 404 or 501 then once without streaming; what worked is
+// remembered per model for an hour. Deltas of a call that fails are not the
+// answer. A stream that fails after it started returns, with the error, a
+// response whose only content is the estimated Usage of what it received
+// (UsageEstimated set), so that a caller can charge the tokens spent.
 func (o *OpenAI) CompleteStream(ctx context.Context, req CompletionRequest, onDelta func(Delta)) (CompletionResponse, error) {
 	if err := req.Validate(); err != nil {
 		return CompletionResponse{}, err
 	}
-	if !o.stream || o.noStream.Load() {
+	model := o.model
+	if req.Model != "" {
+		model = req.Model
+	}
+	if !o.stream || o.refuses(model, refusesStream) {
 		resp, _, err := o.post(ctx, req, false, false, nil)
 		return resp, err
 	}
-	opts := !o.noStreamOptions.Load()
+	opts := !o.refuses(model, refusesStreamOptions)
 	resp, status, err := o.post(ctx, req, true, opts, onDelta)
+	if opts && (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
+		resp, status, err = o.post(ctx, req, true, false, onDelta)
+		if status == http.StatusOK {
+			o.remember(model, refusesStreamOptions)
+		}
+	}
 	if !streamRefused(status) {
 		return resp, err
 	}
-	if opts && status == http.StatusBadRequest {
-		resp, status, err = o.post(ctx, req, true, false, onDelta)
-		if status == http.StatusOK {
-			o.noStreamOptions.Store(true)
-		}
-		if !streamRefused(status) {
-			return resp, err
-		}
-	}
 	resp, status, err = o.post(ctx, req, false, false, nil)
 	if status == http.StatusOK {
-		o.noStream.Store(true)
+		o.remember(model, refusesStream)
 	}
 	return resp, err
+}
+
+func (o *OpenAI) refuses(model string, what refusal) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	k := learntKey{model, what}
+	until, ok := o.learnt[k]
+	if ok && o.now().Before(until) {
+		return true
+	}
+	delete(o.learnt, k)
+	return false
+}
+
+func (o *OpenAI) remember(model string, what refusal) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := o.now()
+	if len(o.learnt) >= learntKeep {
+		for k, until := range o.learnt {
+			if !now.Before(until) {
+				delete(o.learnt, k)
+			}
+		}
+		if len(o.learnt) >= learntKeep {
+			clear(o.learnt)
+		}
+	}
+	o.learnt[learntKey{model, what}] = now.Add(learntTTL)
 }
 
 func streamRefused(status int) bool {
@@ -305,9 +375,10 @@ func (o *OpenAI) post(ctx context.Context, req CompletionRequest, stream, opts b
 	var rd io.Reader = resp.Body
 	if stream {
 		idle.Reset(o.idle)
-		rd = &activity{r: resp.Body, t: idle, d: o.idle}
+		act := &activity{r: resp.Body, t: idle, d: o.idle}
+		rd = act
 		if isEventStream(resp.Header.Get("Content-Type")) {
-			out, err := o.readStream(ctx, rd, len(body), onDelta)
+			out, err := o.readStream(ctx, act, len(body), onDelta)
 			return out, resp.StatusCode, err
 		}
 	}

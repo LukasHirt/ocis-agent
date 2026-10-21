@@ -444,6 +444,9 @@ func TestTheTimeoutDefaultsTo120sAndOverridesAGivenClient(t *testing.T) {
 	if o.client.Timeout != 120*time.Second {
 		t.Errorf("default timeout = %v, want 120s", o.client.Timeout)
 	}
+	if o := newClient(t, "http://127.0.0.1:1", func(c *OpenAIConfig) { c.Stream = true }); o.client.Timeout != 30*time.Minute {
+		t.Errorf("default timeout with streaming = %v, want 30m", o.client.Timeout)
+	}
 	o = newClient(t, "http://127.0.0.1:1", func(c *OpenAIConfig) {
 		c.HTTPClient = &http.Client{Timeout: time.Second}
 		c.Timeout = 10 * time.Minute

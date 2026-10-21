@@ -5,16 +5,18 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/owncloud/ocis-agent/backend/internal/llm"
 )
 
 // Step is one scripted answer. Deltas are reported by a StreamProvider
-// before it returns Resp or Err.
+// before it returns Resp or Err, each after waiting Gap.
 type Step struct {
 	Resp   llm.CompletionResponse
 	Err    error
 	Deltas []llm.Delta
+	Gap    time.Duration
 }
 
 // Streamed adds the deltas a StreamProvider reports before it answers s.
@@ -96,8 +98,9 @@ func (p *Provider) next(ctx context.Context, req llm.CompletionRequest) (Step, e
 }
 
 // StreamProvider is a Provider that also implements llm.Streamer: it reports
-// a step's deltas, stopping with the context error when ctx ends between
-// them, then answers like Provider.
+// a step's deltas (waiting the step's Gap before each), stopping with the
+// context error when ctx ends, then answers like Provider. For a model that
+// reacts to the request or to the caller use llm.StreamFunc.
 type StreamProvider struct {
 	*Provider
 }
@@ -112,6 +115,15 @@ func (p *StreamProvider) CompleteStream(ctx context.Context, req llm.CompletionR
 		return llm.CompletionResponse{}, err
 	}
 	for _, d := range s.Deltas {
+		if s.Gap > 0 {
+			t := time.NewTimer(s.Gap)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return llm.CompletionResponse{}, ctx.Err()
+			case <-t.C:
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return llm.CompletionResponse{}, err
 		}
