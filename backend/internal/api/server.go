@@ -83,6 +83,10 @@ type Settings struct {
 	Burst           int     // per-user burst
 	StreamsPerUser  int     // open event streams per user (0: 3)
 	StreamsTotal    int     // open event streams in the process (0: 200)
+	// Proactive are the caps of a manual review (POST /proactive/run), the
+	// same as the scheduler's: DailyJobs 0 is 24, DailyTokens 0 is
+	// UserDailyTokens, and KillSwitchEnv is also set by KillSwitchEnv.
+	Proactive store.ProactiveLimits
 }
 
 // Deps are the server's collaborators.
@@ -136,7 +140,7 @@ type Server struct {
 	// exportPageDeadline is the write deadline of each audit export page; a
 	// field for tests
 	exportPageDeadline time.Duration
-	actions            *cooldown    // enrol, renew, revoke, revoke-all per user
+	actions            *cooldown    // enrol, renew, revoke, revoke-all, proactive run per user
 	messages           *cooldown    // sent chat messages per user
 	streams            *streamSlots // open event streams
 	// eventTimers makes the timers of a stream and eventWriteDeadline is the
@@ -173,7 +177,16 @@ func NewServer(d Deps) (*Server, error) {
 		return nil, errors.New("api: the daily token cap must be positive")
 	case d.Cfg.StreamsPerUser < 0, d.Cfg.StreamsTotal < 0:
 		return nil, errors.New("api: the stream caps must not be negative")
+	case d.Cfg.Proactive.DailyJobs < 0, d.Cfg.Proactive.DailyTokens < 0:
+		return nil, errors.New("api: the proactive caps must not be negative")
 	}
+	if d.Cfg.Proactive.DailyJobs == 0 {
+		d.Cfg.Proactive.DailyJobs = defaultProactiveDailyJobs
+	}
+	if d.Cfg.Proactive.DailyTokens == 0 {
+		d.Cfg.Proactive.DailyTokens = d.Cfg.UserDailyTokens
+	}
+	d.Cfg.Proactive.KillSwitchEnv = d.Cfg.Proactive.KillSwitchEnv || d.Cfg.KillSwitchEnv
 	if d.Cfg.StreamsPerUser == 0 {
 		d.Cfg.StreamsPerUser = defaultStreamsPerUser
 	}
@@ -251,6 +264,7 @@ func (s *Server) routes() {
 	s.handle("GET /agent-api/v1/audit", s.listAudit)
 	s.handle("GET /agent-api/v1/audit/verify", s.verifyAudit)
 	s.handle("GET /agent-api/v1/audit/export", s.exportAudit, withTimeout(auditExportDeadline))
+	s.handle("POST /agent-api/v1/proactive/run", s.runProactive)
 	s.handle("GET /agent-api/v1/events", s.streamEvents, withStream(eventsRouteTimeout))
 }
 

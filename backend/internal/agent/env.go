@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/owncloud/ocis-agent/backend/internal/approvals"
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
@@ -35,14 +36,26 @@ func (b EnvBuilder) complete() bool {
 	return b.Creds != nil && b.Store != nil && b.Files != nil && b.Memory != nil
 }
 
-// Env returns the user's environment with fresh per-job budgets. An error
+// Env returns the user's environment with fresh per-job budgets and the
+// policy's watch folders as they are now. An error
 // from the credentials (auth.ErrCredentialInvalid) is returned wrapped.
 func (b EnvBuilder) Env(ctx context.Context, userID string) (tools.Env, error) {
 	var u store.User
+	var watch []string
 	if err := b.Store.View(ctx, func(tx store.Tx) error {
 		var err error
-		u, err = tx.GetUser(userID)
-		return err
+		if u, err = tx.GetUser(userID); err != nil {
+			return err
+		}
+		pol, err := tx.GetPolicy(userID)
+		switch {
+		case errors.Is(err, store.ErrNotFound): // no policy: nothing is watched
+		case err != nil:
+			return err
+		default:
+			watch = slices.Clone(pol.Watch)
+		}
+		return nil
 	}); err != nil {
 		return tools.Env{}, fmt.Errorf("agent: load user: %w", err)
 	}
@@ -57,6 +70,7 @@ func (b EnvBuilder) Env(ctx context.Context, userID string) (tools.Env, error) {
 		UserID: userID, DriveID: u.PersonalDriveID, Creds: creds, Files: b.Files, Memory: b.Memory,
 		Reads:        tools.NewReadBudget(tools.DefaultJobReadBytes),
 		MemoryWrites: memory.NewBudget(memory.DefaultLimits().MaxJobBytes),
+		WatchFolders: watch,
 	}, nil
 }
 

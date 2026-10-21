@@ -31,8 +31,11 @@ func TestAPIDocErrorStatuses(t *testing.T) {
 		errTooLarge, errBadJSON, errMediaType, errNotFound, errPreconditionRequired, errPreconditionFailed,
 		errAlreadyExists, errNotText, errFileTooLarge, errNotEnrolled, errTooManyPending, errBudgetExhausted,
 		errStaleArguments, errAlreadyDecided, errExpired, errNotAcknowledgeable, errDailyChatJobs, errStopping,
-		errBadQuery,
+		errBadQuery, errCredentialsPaused,
 	} {
+		add(e.code, e.status)
+	}
+	for _, e := range proactiveRefusals {
 		add(e.code, e.status)
 	}
 	// the mapped sentinels

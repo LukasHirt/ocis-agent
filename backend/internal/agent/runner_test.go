@@ -694,6 +694,7 @@ func TestTheModelComesFromTheCatalogAndThePolicy(t *testing.T) {
 	f.provider = p
 	f.setPolicy(func(p *store.Policy) {
 		p.Models = map[string]string{store.ModelTaskChat: modelChat, store.ModelTaskProactive: modelPro}
+		p.ProactiveEnabled = true
 	})
 	f.enqueue("chat")
 	f.runOnce()
@@ -765,5 +766,49 @@ func TestAnUnauthorizedReadIsReportedAndRequeued(t *testing.T) {
 	}
 	if tm := toolMessages(f.checkpoint().Messages); len(tm) != 0 {
 		t.Errorf("no tool message expected: %+v", tm)
+	}
+}
+
+// Proactive (non-chat) jobs stop at 80% of the daily budget, so chat keeps
+// the rest; chat jobs run up to 100%.
+func TestProactiveJobsStopAtEightyPercentOfTheBudget(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		used int64
+		fail bool
+	}{
+		{store.TriggerSchedule, 79, false},
+		{store.TriggerSchedule, 80, true},
+		{store.TriggerFileEvent, 81, true},
+		{store.TriggerManual, 80, true},
+		{store.TriggerChat, 80, false},
+		{store.TriggerChat, 99, false},
+		{store.TriggerChat, 100, true},
+	} {
+		t.Run(fmt.Sprintf("%s at %d", c.kind, c.used), func(t *testing.T) {
+			f := newFixture(t)
+			p := llmtest.New(llmtest.Say("x", 0, 0))
+			f.provider = p
+			f.setPolicy(func(p *store.Policy) { p.DailyTokens, p.ProactiveEnabled = 100, true })
+			f.enqueueKind(c.kind, "g")
+			cl := f.claim()
+			if err := f.st.InTx(bg, func(tx store.Tx) error {
+				_, err := tx.AppendStep(store.JobStep{JobID: cl.Job.ID, Kind: "llm", Status: "ok", TokensIn: c.used}, cl.Fence)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.runner().Run(bg, cl); err != nil {
+				t.Fatal(err)
+			}
+			if c.fail {
+				assertFailed(t, f, ReasonBudget)
+				if len(p.Requests()) != 0 {
+					t.Error("the model must not be called")
+				}
+			} else if f.job().State != store.JobSucceeded {
+				t.Fatalf("job = %+v", f.job())
+			}
+		})
 	}
 }

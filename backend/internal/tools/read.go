@@ -42,15 +42,16 @@ func parsePath(raw json.RawMessage) (string, error) {
 }
 
 // fmtEntry renders one entry as kind, size, modified, etag and path, separated
-// by tabs. It goes into a Block: names are untrusted. Control characters in
-// names (newline, tab) are rejected upstream by ocisclient (hrefToPath), so a
+// by tabs. It goes into a Block: names are untrusted. C0 controls in names
+// (newline, tab) are rejected upstream by ocisclient (hrefToPath), and
+// visibleName escapes the other characters that break or reorder lines, so a
 // name cannot forge extra lines or columns inside the Block.
 func fmtEntry(e ocisclient.Entry) string {
 	kind := "f"
 	if e.Dir {
 		kind = "d"
 	}
-	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s", kind, e.Size, e.ModTime.UTC().Format(time.RFC3339), e.ETag, e.Path)
+	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s", kind, e.Size, e.ModTime.UTC().Format(time.RFC3339), visibleName(e.ETag), visibleName(e.Path))
 }
 
 // mapErr turns an oCIS error into a refusal the model can read, or passes it

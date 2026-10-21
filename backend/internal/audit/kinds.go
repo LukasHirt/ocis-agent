@@ -19,6 +19,8 @@ const (
 	KindMemoryEdited         = "memory_edited"
 	KindPolicyChanged        = "policy_changed"
 	KindPolicyDenied         = "policy_denied"
+	KindProactiveSkipped     = "proactive_skipped"
+	KindProactiveStarted     = "proactive_started"
 	KindTampered             = "tampered"
 	KindTokenAnomaly         = "token_anomaly"
 	KindTokenCreated         = "token_created"
@@ -36,7 +38,7 @@ var kinds = map[string]bool{
 	KindActionExecuted: true, KindAgentDormant: true, KindAgentPaused: true, KindAgentResumed: true,
 	KindApprovalAcknowledged: true, KindApprovalDecided: true, KindApprovalExpired: true, KindApprovalRequested: true, KindChatMessage: true,
 	KindConversationDeleted: true, KindJobCancelled: true, KindJobFinished: true, KindMemoryChanged: true,
-	KindMemoryEdited: true, KindPolicyChanged: true, KindPolicyDenied: true, KindTampered: true,
+	KindMemoryEdited: true, KindPolicyChanged: true, KindPolicyDenied: true, KindProactiveSkipped: true, KindProactiveStarted: true, KindTampered: true,
 	KindTokenAnomaly: true, KindTokenCreated: true, KindTokenDeleted: true, KindTokenExpired: true,
 	KindTokenInvalid: true, KindTokenLabelClosed: true, KindTokenRenewed: true, KindTokenRevokedAll: true,
 	KindToolCall: true, KindUnenrolled: true,

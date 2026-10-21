@@ -15,7 +15,19 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
-// Deps are the runner's collaborators; every one is required.
+// OwnWrites keeps the agent's own approved writes from looking like user
+// changes to the watch-folder poll (*scheduler.OwnWrites). The runner calls
+// BeforeWrite right before it executes a freshly approved call, with the
+// paths the call names (tools.TargetPaths), and the function it returns
+// (nil: nothing to do) exactly once afterwards, with done true only if the
+// call was done (it also ends the marks of the folders being written). Both
+// are best effort and run outside the executor's transactions.
+type OwnWrites interface {
+	BeforeWrite(ctx context.Context, env tools.Env, paths []string) func(ctx context.Context, done bool)
+}
+
+// Deps are the runner's collaborators; every one is required except
+// OwnWrites.
 type Deps struct {
 	Store    store.Store
 	Queue    *queue.Queue
@@ -27,6 +39,9 @@ type Deps struct {
 	Env      EnvBuilder
 	Creds    Credentials
 	Cfg      Config
+	// OwnWrites is optional: without it, the agent's approved writes into
+	// a watch folder start a follow-up file_event review.
+	OwnWrites OwnWrites
 }
 
 // Runner runs one claimed job at a time: model turns, the gate and the tools.
@@ -139,15 +154,17 @@ func (r *Runner) precheck(ctx context.Context, claim store.Claim, ph phase) (sto
 	}); err != nil {
 		return pol, creds, false, fmt.Errorf("agent: read token usage: %w", err)
 	}
-	if budget := store.DailyBudget(pol.DailyTokens, r.cfg.UserDailyTokens); budget > 0 && in+out >= budget {
+	// proactive jobs stop at 80% of the budget, so chat keeps the rest
+	if store.BudgetReached(in+out, store.DailyBudget(pol.DailyTokens, r.cfg.UserDailyTokens), claim.Job.TriggerKind) {
 		return pol, creds, true, r.fail(ctx, claim, ReasonBudget)
 	}
 	return pol, creds, false, nil
 }
 
 // gateCheck runs before every model call and every tool call: the kill
-// switch (requeue at claim, cancel in a run), the pause (requeue) and the
-// credentials (fail when invalid), all read from the database. It returns the
+// switch (requeue at claim, cancel in a run), the pause (requeue), proactive
+// work switched off for a proactive job (cancel) and the credentials (fail
+// when invalid), all read from the database. It returns the
 // current credentials, so a token renewed during the claim is used at once.
 // stop means the job was released.
 func (r *Runner) gateCheck(ctx context.Context, claim store.Claim, ph phase) (store.Policy, ocisclient.Creds, bool, error) {
@@ -173,6 +190,10 @@ func (r *Runner) gateCheck(ctx context.Context, claim store.Claim, ph phase) (st
 	}
 	if pol.Paused {
 		return pol, none, true, r.requeue(ctx, claim, r.cfg.PausedDelay)
+	}
+	if store.IsProactiveTrigger(claim.Job.TriggerKind) && !pol.ProactiveEnabled {
+		// the user switched proactive work off after the job was queued
+		return pol, none, true, r.end(ctx, claim, ending{state: store.JobCancelled, reason: ReasonProactiveOff})
 	}
 	creds, err := r.d.Creds.AppCreds(ctx, userID)
 	if err != nil {

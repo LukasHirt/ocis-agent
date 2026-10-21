@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/owncloud/ocis-agent/backend/internal/auth"
@@ -50,5 +51,30 @@ func TestEnvFailsWithoutCredentialsOrUser(t *testing.T) {
 	f.creds.setErr(auth.ErrCredentialInvalid)
 	if _, err := b.Env(bg, userID); !errors.Is(err, auth.ErrCredentialInvalid) {
 		t.Errorf("err = %v, want ErrCredentialInvalid", err)
+	}
+}
+
+func TestEnvCarriesThePolicysWatchFoldersAsACopy(t *testing.T) {
+	f := newFixture(t)
+	b := f.deps().Env
+	env, err := b.Env(bg, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env.WatchFolders) != 0 {
+		t.Fatalf("watch = %v, want none", env.WatchFolders)
+	}
+	f.setPolicy(func(p *store.Policy) { p.Watch = []string{"/Documents", "/Projects"} })
+	env, err = b.Env(bg, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(env.WatchFolders, ",") != "/Documents,/Projects" {
+		t.Fatalf("watch = %v", env.WatchFolders)
+	}
+	env.WatchFolders[0] = "/changed"
+	again, err := b.Env(bg, userID)
+	if err != nil || again.WatchFolders[0] != "/Documents" {
+		t.Fatalf("every env needs its own copy: %v %v", again.WatchFolders, err)
 	}
 }

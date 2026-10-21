@@ -63,6 +63,27 @@ export interface Models {
   preferences: ModelPreferences
 }
 
+// The codes of status.proactive.blocked: why no review could start now.
+export type ProactiveBlock =
+  | ''
+  | 'proactive_disabled'
+  | 'kill_switch'
+  | 'paused'
+  | 'credentials_invalid'
+  | 'quiet_hours'
+  | 'live_job'
+  | 'daily_cap'
+  | 'budget'
+
+// The proactive state in the status (read-only).
+export interface ProactiveState {
+  enabled: boolean
+  last_sweep_at: string | null // the last scheduled or requested review
+  next_sweep_at: string | null // an estimate of the next scheduled one; null while off
+  blocked: ProactiveBlock | (string & {})
+  daily_jobs: number // the operator's limit of reviews per UTC day
+}
+
 // GET /status (and the body of enrol, pause and resume).
 export interface Status {
   enrolled: boolean
@@ -74,6 +95,7 @@ export interface Status {
   kill_switch: KillSwitch
   models: Models
   pending_approvals: number // pending approvals of live jobs only
+  proactive?: ProactiveState // absent from an older server
 }
 
 export interface Revoked {
@@ -123,9 +145,13 @@ export interface SettingsUpdate {
 
 export type JobState = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled'
 
+// What started a job: a chat question, a scheduled review, a change in a
+// watched folder, or a review the user asked for.
+export type TriggerKind = 'chat' | 'schedule' | 'file_event' | 'manual'
+
 export interface Job {
   id: string
-  trigger_kind: string
+  trigger_kind: TriggerKind | (string & {})
   trigger_ref: string // the conversation id of a chat job, else ''
   goal: string // untrusted, capped
   state: JobState | (string & {})

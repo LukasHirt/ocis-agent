@@ -39,7 +39,7 @@ func (c *clock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// fakes implements Reaper, Settler, Reconciler and Auth. It counts calls per
+// fakes implements Queue, Settler, Reconciler and Auth. It counts calls per
 // task and can make a task fail (fail) or panic (panics).
 type fakes struct {
 	mu        sync.Mutex
@@ -57,6 +57,8 @@ type fakes struct {
 	hung      map[string]bool
 	sweepRes  auth.SweepResult
 	onCall    func(task string)
+	woken     int
+	unauth    []string
 }
 
 func newFakes() *fakes {
@@ -109,6 +111,18 @@ func (f *fakes) Reap(_ context.Context, maxAttempts int) (store.ReapResult, erro
 		return store.ReapResult{}, err
 	}
 	return store.ReapResult{Requeued: 1, Failed: 1}, nil
+}
+
+func (f *fakes) Wake() {
+	f.mu.Lock()
+	f.woken++
+	f.mu.Unlock()
+}
+
+func (f *fakes) wakes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.woken
 }
 
 func (f *fakes) ExpireAndResume(context.Context) (int, error) {
@@ -195,6 +209,19 @@ func (f *fakes) blockIfHung(ctx context.Context, task string) error {
 	return fmt.Errorf("hung call: %w", ctx.Err())
 }
 
+func (f *fakes) HandleUnauthorized(_ context.Context, userID string) error {
+	f.mu.Lock()
+	f.unauth = append(f.unauth, userID)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakes) unauthorizedUsers() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.unauth...)
+}
+
 func (f *fakes) PauseDormant(_ context.Context, limit int) (int, error) {
 	if err := f.enter("dormant", limit); err != nil {
 		return 0, err
@@ -252,7 +279,8 @@ func newFixture(t *testing.T) *fixture {
 		Log: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now: clk.Now,
 	}
-	fx.cfg = Config{MaxAttempts: 3, LeaseTTL: 2 * time.Minute, RetrySettle: 2 * time.Minute, CallTimeout: 5 * time.Minute, SweepInterval: 15 * time.Minute}
+	fx.cfg = Config{MaxAttempts: 3, LeaseTTL: 2 * time.Minute, RetrySettle: 2 * time.Minute, CallTimeout: 5 * time.Minute, SweepInterval: 15 * time.Minute,
+		Proactive: ProactiveConfig{Limits: store.ProactiveLimits{DailyTokens: 1 << 40}}}
 	return fx
 }
 

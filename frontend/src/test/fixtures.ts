@@ -12,6 +12,7 @@ export const statusOf = (over: Partial<Status> = {}): Status => ({
   kill_switch: { database: false, environment: false },
   models: { default: 'm', available: [], preferences: { chat: null, proactive: null } },
   pending_approvals: 0,
+  proactive: { enabled: false, last_sweep_at: null, next_sweep_at: null, blocked: 'proactive_disabled', daily_jobs: 24 },
   ...over
 })
 

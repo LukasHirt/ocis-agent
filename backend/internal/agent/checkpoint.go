@@ -162,4 +162,5 @@ const (
 	ReasonTooLarge       = "The task grew too large to continue."
 	ReasonInternal       = "The agent stopped because of an internal error."
 	ReasonRejectedByUser = "The user rejected this action."
+	ReasonProactiveOff   = "The agent stopped because proactive work was switched off."
 )

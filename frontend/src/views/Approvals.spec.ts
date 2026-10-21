@@ -197,6 +197,39 @@ describe('Approvals', () => {
     expect(server.count('GET', '/jobs/ja')).toBe(1)
   })
 
+  it.each([
+    ['schedule', 'Scheduled review'],
+    ['file_event', 'File change'],
+    ['manual', 'Review on request']
+  ])('names a proactive job (%s) in its group and says nothing was done yet', async (kind, label) => {
+    const { w } = await setup(
+      serve({ pending: [approvalOf('a1', { job_id: 'jp' })] }, {}, (c) =>
+        c.method === 'GET' && c.path === '/jobs/jp'
+          ? json({ ...jobOf('jp', 'Review my recent file changes'), trigger_kind: kind })
+          : undefined
+      )
+    )
+    const g = w.find('.agent-group')
+    expect(g.find('.agent-group-trigger').text()).toBe(label)
+    expect(g.find('.agent-group-proposal').text()).toBe(
+      'The agent proposes these actions on its own. Nothing has been done yet; each one runs only if you approve it.'
+    )
+    expect(g.find('.agent-group-goal').text()).toContain('Review my recent file changes')
+  })
+
+  it('shows no trigger for a chat job and an unknown one as text', async () => {
+    const { w } = await setup(
+      serve({ pending: [approvalOf('a1', { job_id: 'jc' }), approvalOf('a2', { job_id: 'jx' })] }, { jc: 'q' }, (c) =>
+        c.method === 'GET' && c.path === '/jobs/jx' ? json({ ...jobOf('jx', 'g'), trigger_kind: '<i>hook</i>' }) : undefined
+      )
+    )
+    const [chat, odd] = w.findAll('.agent-group')
+    expect(chat.find('.agent-group-trigger').exists()).toBe(false)
+    expect(chat.find('.agent-group-proposal').exists()).toBe(false)
+    expect(odd.find('.agent-group-trigger').text()).toBe('<i>hook</i>')
+    expect(odd.find('.agent-group-trigger i').exists()).toBe(false)
+  })
+
   it('tolerates a failed goal lookup', async () => {
     const { w } = await setup(serve({ pending: [approvalOf('a1', { job_id: 'job-12345678-x' })] }))
     const g = w.find('.agent-group')

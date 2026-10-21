@@ -142,8 +142,9 @@ Every setting comes from the environment. Logs are JSON lines on stderr.
   catalog is empty.
 - `worker`: the job workers (`AGENT_WORKERS`) and the scheduler, which does all maintenance: token
   renewal and the token sweep, approval expiry, the dormancy pause, the lease reaper and the
-  settling of approvals of ended jobs. It needs the `AGENT_LLM_*` settings; start-up refuses
-  otherwise.
+  settling of approvals of ended jobs; it also starts the scheduled proactive reviews and checks the watch folders for changes, sooner when the user's oCIS notification stream reports a file event (`AGENT_SSE_ENABLED`). It needs the `AGENT_LLM_*` settings; start-up refuses
+  otherwise. The tasks that call oCIS run under deadlines (2 min each, 1 min for the watch
+  folders), so an unresponsive oCIS can delay the lease reaper and approval expiry by up to 7 min.
 
 **Run exactly one process with the worker role per database.** An api-only process runs no
 maintenance (it logs that once at start-up) and its chat jobs stay queued until a worker process
@@ -181,6 +182,12 @@ All variables are optional unless marked required. Durations use Go syntax (`90s
 | `AGENT_API_BURST` | `40` | Burst of the per-user rate limit (1 to 5000). |
 | `AGENT_API_STREAMS_PER_USER` | `3` | Open event streams per user (1 to 10). |
 | `AGENT_API_STREAMS_TOTAL` | `200` | Open event streams in the process (1 to 5000). |
+| `AGENT_PROACTIVE_DAILY_JOBS` | `24` | Proactive reviews (scheduled, file change and on request) per user and UTC day (1 to 1000). |
+| `AGENT_WATCH_POLL_INTERVAL` | `5m` | How often each user's watch folders are checked for changes (1m to 24h): one depth-0 PROPFIND per folder, except a watched `/`, which is listed one level deep without the agent's own folder. Only the first 5000 entries of `/` count, and a `/` whose listing is over 4 MiB (roughly ten thousand entries) cannot be checked. |
+| `AGENT_WATCH_DEBOUNCE` | `1m` | How long the watch folders must stay unchanged after a change before a file-change review starts (10s to 10m; it starts at the latest 10 minutes after the first change). |
+| `AGENT_WATCH_MAX_POLLS_PER_TICK` | `50` | Users whose watch folders one scheduler run (every 10 s, at most 1 min long) checks, four at a time (1 to 1000). With the default, about 1500 users fit into one 5-minute poll interval; beyond that each user's checks space out accordingly. |
+| `AGENT_SSE_ENABLED` | `true` | Keep each watching user's oCIS notification stream (`/ocs/v2.php/apps/notifications/api/v1/notifications/sse`, with the user's app token) open, so that a file event checks the watch folders within about 10 s instead of at the next poll (at most every 30 s per user). Events never start a review themselves; the poll and its debounce still decide. A failed or closed stream reconnects after a wait that starts at 1 s and doubles up to 5 min (each wait is cut by a random amount of up to half; a 401 is reported like any other and waits the longest, and a stream that stayed open for a minute starts again at 1 s). A stream that only went quiet for 2 minutes (no keepalives) reopens after 5 to 10 s. Set `SSE_KEEPALIVE_INTERVAL` (for example `30s`) on the oCIS `sse` service so quiet streams stay open instead of reconnecting every 2 minutes; oCIS sends no keepalives by default (note that its keepalive goroutine of oCIS 9.0 is not stopped when a stream closes, so fewer reconnects also mean fewer leaked goroutines in oCIS). After an oCIS restart every stream reconnects within about a second, then backs off. `false` relies on polling alone. |
+| `AGENT_SSE_MAX_SUBSCRIPTIONS` | `200` | Notification streams open at once, one per enrolled user with proactive work on, watch folders, a valid app token and no pause (0 to 10000; 0 opens none). Users beyond it rely on polling alone. Each stream is one long-lived connection to oCIS. |
 | `AGENT_USER_DAILY_TOKENS` | `200000` | The operator's cap and default of a user's daily model-token budget (1000 to 1000000000). |
 | `AGENT_LLM_BASE_URL` | none | The model endpoint, for example `https://api.openai.com/v1`. https, or http only for a loopback host. Required by the worker role and by the other `AGENT_LLM_*` variables of this table except `AGENT_LLM_MAX_TOKENS`. |
 | `AGENT_LLM_PROVIDER` | `openai` | The wire protocol; only `openai` (OpenAI-compatible chat completions). |

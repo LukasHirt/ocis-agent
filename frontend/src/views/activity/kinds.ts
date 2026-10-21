@@ -22,6 +22,8 @@ const KINDS: Record<string, (t: Gettext) => string> = {
   agent_resumed: (t) => t('Agent resumed'),
   agent_dormant: (t) => t('Agent paused after inactivity'),
   policy_changed: (t) => t('Settings changed'),
+  proactive_started: (t) => t('Review started'),
+  proactive_skipped: (t) => t('Review skipped'),
   token_created: (t) => t('Agent access created'),
   token_renewed: (t) => t('Agent access renewed'),
   token_deleted: (t) => t('Agent access token deleted'),

@@ -47,6 +47,8 @@ type node struct {
 	// tooEarly is how many more GETs answer 425 (the upload is still being
 	// postprocessed)
 	tooEarly int
+	// repropagate: the end of postprocessing moves the ETags once more
+	repropagate bool
 }
 
 type account struct{ username, password, id, driveID string }
@@ -92,6 +94,10 @@ type Server struct {
 	closing   chan struct{}
 	maxPut    int64
 	postproc  int // GETs answered 425 after each upload
+	// reprop: the end of an upload's postprocessing moves the ETag of the
+	// file's folders a second time, repropDelay after the 425 window ends
+	reprop      bool
+	repropDelay time.Duration
 }
 
 // New starts a fake and stops it when the test ends.
@@ -276,6 +282,35 @@ func (s *Server) SetPostprocessing(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.postproc = n
+}
+
+// SetPostprocessingPropagation makes the end of every later upload's
+// postprocessing give the uploaded file's folder (and its ancestors) a new
+// ETag once more, delay after the 425 window of SetPostprocessing ends (at
+// once after the upload without one), as oCIS does when postprocessing
+// finishes (measured on the dev stack: a second move of the parent ETag about
+// 30 ms after the PUT returned). Off by default.
+func (s *Server) SetPostprocessingPropagation(on bool, delay time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reprop, s.repropDelay = on, delay
+}
+
+// repropagate schedules the second propagation for the upload at p. Callers
+// hold s.mu.
+func (s *Server) repropagate(drive, p string) {
+	time.AfterFunc(s.repropDelay, func() {
+		select {
+		case <-s.closing:
+			return
+		default:
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if nodes := s.drives[drive]; nodes != nil {
+			s.bump(nodes, path.Dir(p))
+		}
+	})
 }
 
 // DropStreams closes every open SSE stream from the server side.
@@ -522,6 +557,10 @@ func (s *Server) dav(w http.ResponseWriter, r *http.Request, a *account) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		case n.tooEarly > 0:
 			n.tooEarly--
+			if n.tooEarly == 0 && n.repropagate {
+				n.repropagate = false
+				s.repropagate(drive, p)
+			}
 			w.WriteHeader(http.StatusTooEarly)
 		default:
 			w.Header().Set("ETag", n.etag)
@@ -529,7 +568,7 @@ func (s *Server) dav(w http.ResponseWriter, r *http.Request, a *account) {
 			_, _ = w.Write(n.data)
 		}
 	case http.MethodPut:
-		s.put(w, r, nodes, p, body)
+		s.put(w, r, drive, nodes, p, body)
 	case "MKCOL":
 		if _, ok := nodes[p]; ok {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -566,7 +605,7 @@ func remove(nodes map[string]*node, p string) {
 	}
 }
 
-func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*node, p string, data []byte) {
+func (s *Server) put(w http.ResponseWriter, r *http.Request, drive string, nodes map[string]*node, p string, data []byte) {
 	if pn, ok := nodes[path.Dir(p)]; !ok || !pn.dir || p == "/" {
 		w.WriteHeader(http.StatusConflict)
 		return
@@ -581,8 +620,11 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, nodes map[string]*n
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
-	nodes[p] = &node{data: data, tooEarly: s.postproc}
+	nodes[p] = &node{data: data, tooEarly: s.postproc, repropagate: s.reprop && s.postproc > 0}
 	s.bump(nodes, p)
+	if s.reprop && s.postproc == 0 {
+		s.repropagate(drive, p)
+	}
 	w.Header().Set("ETag", nodes[p].etag)
 	if exists {
 		w.WriteHeader(http.StatusNoContent)

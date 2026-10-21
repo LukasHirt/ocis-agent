@@ -11,7 +11,7 @@ func TestAgentDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := AgentConfig{Workers: 4, MaxSteps: 30, MaxAttempts: 3, MaxRuns: 20, MaxTokens: 4096, LeaseTTL: 2 * time.Minute}
+	want := AgentConfig{Workers: 4, MaxSteps: 30, MaxAttempts: 3, MaxRuns: 20, MaxTokens: 4096, LeaseTTL: 2 * time.Minute, ProactiveDailyJobs: 24}
 	if cfg.Agent != want {
 		t.Errorf("Agent = %+v, want %+v", cfg.Agent, want)
 	}
@@ -26,11 +26,13 @@ func TestAgentOverrides(t *testing.T) {
 		"AGENT_LLM_MAX_TOKENS": "64",
 		"AGENT_LEASE_TTL":      " 1s ",
 		"AGENT_KILL_SWITCH":    " true ",
+
+		"AGENT_PROACTIVE_DAILY_JOBS": "1000",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := AgentConfig{Workers: 64, MaxSteps: 200, MaxAttempts: 1, MaxRuns: 1000, MaxTokens: 64, LeaseTTL: time.Second, KillSwitch: true}
+	want := AgentConfig{Workers: 64, MaxSteps: 200, MaxAttempts: 1, MaxRuns: 1000, MaxTokens: 64, LeaseTTL: time.Second, KillSwitch: true, ProactiveDailyJobs: 1000}
 	if cfg.Agent != want {
 		t.Errorf("Agent = %+v, want %+v", cfg.Agent, want)
 	}
@@ -49,6 +51,8 @@ func TestAgentInvalidValues(t *testing.T) {
 		"AGENT_LLM_MAX_TOKENS": {"x", "0", "63", "-1", "100001"},
 		"AGENT_LEASE_TTL":      {"x", "500ms", "0s", "-1m", "61m", "5"},
 		"AGENT_KILL_SWITCH":    {"maybe", "2"},
+
+		"AGENT_PROACTIVE_DAILY_JOBS": {"x", "0", "-1", "1001", "1.5"},
 	}
 	for name, vals := range bad {
 		for _, v := range vals {
@@ -76,12 +80,12 @@ func TestAgentEmptyMeansDefault(t *testing.T) {
 
 func TestAgentBoundariesAreAccepted(t *testing.T) {
 	cfg, err := Load(llmEnv(map[string]string{
-		"AGENT_MAX_STEPS": "1", "AGENT_MAX_RUNS": "1", "AGENT_MAX_ATTEMPTS": "20", "AGENT_KILL_SWITCH": "false",
+		"AGENT_MAX_STEPS": "1", "AGENT_MAX_RUNS": "1", "AGENT_PROACTIVE_DAILY_JOBS": "1", "AGENT_MAX_ATTEMPTS": "20", "AGENT_KILL_SWITCH": "false",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if a := cfg.Agent; a.MaxSteps != 1 || a.MaxRuns != 1 || a.MaxAttempts != 20 || a.KillSwitch {
+	if a := cfg.Agent; a.MaxSteps != 1 || a.MaxRuns != 1 || a.MaxAttempts != 20 || a.KillSwitch || a.ProactiveDailyJobs != 1 {
 		t.Errorf("Agent = %+v", a)
 	}
 }

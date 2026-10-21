@@ -686,6 +686,24 @@ describe('useAgentStore', () => {
     expect(s.server.count('GET /status')).toBe(++st)
   })
 
+  it('runProactive starts a review and refreshes the status, also after a refusal', async () => {
+    let refuse = false
+    const s = (current = setup(
+      defaultHandlers({
+        'POST /proactive/run': () => (refuse ? apiErr(409, 'live_job') : json({ id: 'j1', trigger_kind: 'manual' }, 202))
+      })
+    ))
+    s.start()
+    await flush()
+    const st = s.server.count('GET /status')
+    expect(await s.store.runProactive()).toMatchObject({ id: 'j1', trigger_kind: 'manual' })
+    expect(s.server.calls.find((c) => c.key === 'POST /proactive/run')?.body).toEqual({})
+    expect(s.server.count('GET /status')).toBe(st + 1)
+    refuse = true
+    await expect(s.store.runProactive()).rejects.toMatchObject({ code: 'live_job' })
+    expect(s.server.count('GET /status')).toBe(st + 2)
+  })
+
   it('a failed token action rethrows and still refreshes the status', async () => {
     const s = (current = setup(defaultHandlers({ 'DELETE /token': () => apiErr(502, 'upstream_unavailable') })))
     s.start()

@@ -21,7 +21,7 @@ func defaultRegistry(t *testing.T) *Registry {
 
 func TestCatalogHasExactlyTheV1Tools(t *testing.T) {
 	got := strings.Join(defaultRegistry(t).Names(), ",")
-	want := "files.copy,files.create_folder,files.delete,files.list,files.list_spaces,files.move,files.overwrite,files.read_text,files.stat,files.write_new,memory.list,memory.read,memory.write"
+	want := "files.copy,files.create_folder,files.delete,files.list,files.list_spaces,files.move,files.overwrite,files.read_text,files.recent_changes,files.stat,files.write_new,memory.list,memory.read,memory.write"
 	if got != want {
 		t.Fatalf("tools = %s\nwant    %s", got, want)
 	}
@@ -31,7 +31,8 @@ func TestCatalogHasExactlyTheV1Tools(t *testing.T) {
 func TestClassificationTable(t *testing.T) {
 	want := map[string]Risk{
 		"files.list_spaces": RiskRead, "files.list": RiskRead, "files.stat": RiskRead, "files.read_text": RiskRead,
-		"memory.list": RiskRead, "memory.read": RiskRead,
+		"files.recent_changes": RiskRead,
+		"memory.list":          RiskRead, "memory.read": RiskRead,
 		"files.create_folder": RiskWrite, "files.write_new": RiskWrite, "files.move": RiskWrite, "files.copy": RiskWrite,
 		"memory.write":    RiskWrite,
 		"files.overwrite": RiskDestructive, "files.delete": RiskDestructive,
@@ -140,19 +141,20 @@ func TestEveryToolSurfacesAnUnauthorizedAnswer(t *testing.T) {
 		execCalls          bool
 	}
 	table := map[string]row{
-		"files.list_spaces":   {prepare: `{}`, exec: `{}`},
-		"files.list":          {prepare: `{"path":"/docs"}`, exec: `{"path":"/docs"}`, execCalls: true},
-		"files.stat":          {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
-		"files.read_text":     {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
-		"files.create_folder": {prepare: `{"path":"/docs/new"}`, exec: `{"path":"/docs/new"}`, rec: `{"path":"/docs/new"}`, prepareCalls: true, execCalls: true},
-		"files.write_new":     {prepare: `{"path":"/docs/n.md","content":"c"}`, exec: `{"path":"/docs/n.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
-		"files.overwrite":     {prepare: `{"path":"/docs/a.md","content":"c"}`, exec: `{"path":"/docs/a.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
-		"files.move":          {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
-		"files.copy":          {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
-		"files.delete":        {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, rec: `{"path":"/docs/a.md"}`, prepareCalls: true, execCalls: true},
-		"memory.list":         {prepare: `{}`, exec: `{}`, execCalls: true},
-		"memory.read":         {prepare: `{"name":"profile.md"}`, exec: `{"name":"profile.md"}`, execCalls: true},
-		"memory.write":        {prepare: `{"name":"profile.md","content":"c","mode":"append"}`, exec: `{"name":"profile.md","content":"c","mode":"append"}`, rec: `{"name":"profile.md","content":"c","mode":"replace"}`, execCalls: true},
+		"files.list_spaces":    {prepare: `{}`, exec: `{}`},
+		"files.list":           {prepare: `{"path":"/docs"}`, exec: `{"path":"/docs"}`, execCalls: true},
+		"files.stat":           {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
+		"files.read_text":      {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, execCalls: true},
+		"files.recent_changes": {prepare: `{}`, exec: `{}`, execCalls: true},
+		"files.create_folder":  {prepare: `{"path":"/docs/new"}`, exec: `{"path":"/docs/new"}`, rec: `{"path":"/docs/new"}`, prepareCalls: true, execCalls: true},
+		"files.write_new":      {prepare: `{"path":"/docs/n.md","content":"c"}`, exec: `{"path":"/docs/n.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
+		"files.overwrite":      {prepare: `{"path":"/docs/a.md","content":"c"}`, exec: `{"path":"/docs/a.md","content":"c"}`, rec: `{"path":"/docs/a.md","content":"c"}`, prepareCalls: true, execCalls: true},
+		"files.move":           {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
+		"files.copy":           {prepare: `{"from":"/docs/a.md","to":"/docs/b.md"}`, exec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, rec: `{"from":"/docs/a.md","to":"/docs/b.md"}`, prepareCalls: true, execCalls: true},
+		"files.delete":         {prepare: `{"path":"/docs/a.md"}`, exec: `{"path":"/docs/a.md"}`, rec: `{"path":"/docs/a.md"}`, prepareCalls: true, execCalls: true},
+		"memory.list":          {prepare: `{}`, exec: `{}`, execCalls: true},
+		"memory.read":          {prepare: `{"name":"profile.md"}`, exec: `{"name":"profile.md"}`, execCalls: true},
+		"memory.write":         {prepare: `{"name":"profile.md","content":"c","mode":"append"}`, exec: `{"name":"profile.md","content":"c","mode":"append"}`, rec: `{"name":"profile.md","content":"c","mode":"replace"}`, execCalls: true},
 	}
 	r := defaultRegistry(t)
 	if len(table) != len(r.Names()) {

@@ -66,6 +66,49 @@ func (t *tx) ListDormantUsers(now time.Time, limit int) ([]string, error) {
 	return out, rows.Err()
 }
 
+// ListProactiveDue implements store.Tx.
+func (t *tx) ListProactiveDue(now time.Time, afterID string, limit int) ([]string, error) {
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT p.user_id FROM policies p LEFT JOIN cursors c ON c.user_id = p.user_id
+		 WHERE p.proactive_enabled = 1 AND p.user_id > ?
+		   AND (c.last_sweep_at IS NULL OR c.last_sweep_at <= ? - p.sweep_interval_s * 1000)
+		 ORDER BY p.user_id LIMIT ?`, afterID, ms(now), listLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListWatchUsers implements store.Tx.
+func (t *tx) ListWatchUsers(afterID string, limit int) ([]string, error) {
+	rows, err := t.q.QueryContext(t.ctx,
+		`SELECT p.user_id FROM policies p JOIN users u ON u.user_id = p.user_id
+		 WHERE p.proactive_enabled = 1 AND p.paused = 0 AND p.watch <> '[]' AND p.user_id > ?
+		 ORDER BY p.user_id LIMIT ?`, afterID, listLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // ListTokensDueForRenewal implements store.Tx.
 func (t *tx) ListTokensDueForRenewal(now time.Time, limit int) ([]store.TokenDue, error) {
 	rows, err := t.q.QueryContext(t.ctx,

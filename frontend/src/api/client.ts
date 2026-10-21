@@ -102,6 +102,9 @@ export interface ApiClient {
   listJobs(params?: JobListParams, signal?: AbortSignal): Promise<JobPage>
   getJob(id: string, signal?: AbortSignal): Promise<JobDetail>
   cancelJob(id: string, signal?: AbortSignal): Promise<Job>
+  // runProactive starts a review now (202 with the job; 409 with a code
+  // saying why not, 429 during the cooldown).
+  runProactive(signal?: AbortSignal): Promise<Job>
   listConversations(params?: PageParams, signal?: AbortSignal): Promise<ConversationPage>
   getConversation(id: string, signal?: AbortSignal): Promise<Conversation>
   createConversation(title?: string, signal?: AbortSignal): Promise<Conversation>
@@ -524,6 +527,7 @@ export const createClient = (platform: Platform, opts: ClientOptions = {}): ApiC
       get('/jobs' + query([['state', params?.state, 'name'], ...pageQuery(params, 'limit200')]), signal),
     getJob: async (id, signal) => get('/jobs/' + segment(id), signal),
     cancelJob: async (id, signal) => post('/jobs/' + segment(id) + '/cancel', {}, signal),
+    runProactive: async (signal) => post('/proactive/run', {}, signal),
     listConversations: async (params, signal) => get('/conversations' + query(pageQuery(params, 'limit100')), signal),
     getConversation: async (id, signal) => get('/conversations/' + segment(id), signal),
     createConversation: async (title, signal) =>

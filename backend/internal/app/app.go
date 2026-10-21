@@ -214,6 +214,7 @@ func Build(ctx context.Context, cfg config.Config, st store.Store, opts Options)
 				AllowedOrigin: cfg.AllowedOrigin, KillSwitchEnv: cfg.Agent.KillSwitch,
 				UserDailyTokens: cfg.API.UserDailyTokens, RatePerSecond: cfg.API.Rate, Burst: cfg.API.Burst,
 				StreamsPerUser: cfg.API.StreamsPerUser, StreamsTotal: cfg.API.StreamsTotal,
+				Proactive: proactiveLimits(cfg),
 			},
 			Log: a.log, Now: a.now, Stop: a.apiStop, EventsPollForTest: opts.tune.eventsPoll,
 		}); err != nil {
@@ -249,10 +250,13 @@ func (a *App) buildWorkers(opts Options) error {
 		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
 		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
-	var err error
+	own, err := scheduler.NewOwnWrites(a.st, a.auth.HandleUnauthorized, scheduler.OwnWritesConfig{})
+	if err != nil {
+		return fmt.Errorf("app: own writes: %w", err)
+	}
 	if a.runner, err = agent.NewRunner(agent.Deps{
 		Store: a.st, Queue: a.queue, Provider: provider, Catalog: cfg.LLM.Catalog, Registry: a.registry,
-		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg,
+		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg, OwnWrites: own,
 	}); err != nil {
 		return fmt.Errorf("app: runner: %w", err)
 	}
@@ -268,14 +272,29 @@ func (a *App) buildWorkers(opts Options) error {
 	}
 	if a.scheduler, err = scheduler.New(scheduler.Deps{
 		Store: a.st, Queue: a.queue, Gate: a.gate, Executor: a.executor, Env: a.env.EnvFunc(),
-		Auth: a.auth, Log: a.log, Now: a.now,
+		Auth: a.auth, Log: a.log, Now: a.now, OwnWrites: own,
 	}, scheduler.Config{
 		MaxAttempts: cfg.Agent.MaxAttempts, LeaseTTL: cfg.Agent.LeaseTTL, RetrySettle: a.retrySettle,
 		SweepInterval: cfg.Process.SweepInterval,
+		Proactive:     scheduler.ProactiveConfig{Limits: proactiveLimits(cfg)},
+		Watch: scheduler.WatchConfig{
+			PollInterval: cfg.Process.WatchPollInterval, Debounce: cfg.Process.WatchDebounce, PerTick: cfg.Process.WatchPollsPerTick,
+		},
+		SSE: scheduler.SSEConfig{
+			Enabled: cfg.Process.SSEEnabled && cfg.Process.SSEMaxSubscriptions > 0, MaxSubscriptions: cfg.Process.SSEMaxSubscriptions,
+		},
 	}); err != nil {
 		return fmt.Errorf("app: scheduler: %w", err)
 	}
 	return nil
+}
+
+// proactiveLimits are the operator's caps of proactive work, the same for the
+// scheduled sweep and the manual run.
+func proactiveLimits(cfg config.Config) store.ProactiveLimits {
+	return store.ProactiveLimits{
+		DailyJobs: cfg.Agent.ProactiveDailyJobs, DailyTokens: cfg.API.UserDailyTokens, KillSwitchEnv: cfg.Agent.KillSwitch,
+	}
 }
 
 // workerPrefix is "<hostname>-<pid>" ("agent" without a usable host name):

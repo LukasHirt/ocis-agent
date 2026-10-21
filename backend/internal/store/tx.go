@@ -272,8 +272,20 @@ type Tx interface {
 	// means 100; the maximum is 1000.
 	ListTokensDueForRenewal(now time.Time, limit int) ([]TokenDue, error)
 
+	// ListProactiveDue returns the ids of users with proactive work enabled
+	// whose sweep is due at now: never swept (no cursor or no last sweep) or
+	// last swept at or before now minus their sweep interval. Paused users
+	// are included (the caller records why it skips them). In user id order
+	// after afterID; limit <= 0 means 100, the maximum is 1000.
+	ListProactiveDue(now time.Time, afterID string, limit int) ([]string, error)
+
+	// ListWatchUsers returns the ids of enrolled users with proactive work
+	// enabled, not paused, and at least one watch folder, in user id order
+	// after afterID; limit <= 0 means 100, the maximum is 1000.
+	ListWatchUsers(afterID string, limit int) ([]string, error)
+
 	// GetCursor returns the user's cursor; an absent cursor is a zero cursor
-	// with an empty, non-nil MemoryETags map.
+	// with empty, non-nil MemoryETags and WatchETags maps.
 	GetCursor(userID string) (Cursor, error)
 	// PutCursor inserts or replaces the user's cursor. ErrInvalid without a
 	// user id, ErrNotFound for an unknown user.
@@ -324,6 +336,11 @@ type Tx interface {
 	// CountJobsSince counts the user's jobs in any state created at or after
 	// since with the given trigger kind (any kind if empty).
 	CountJobsSince(userID, triggerKind string, since time.Time) (int, error)
+	// CountJobsOfKinds counts, in one query, the user's jobs whose trigger
+	// kind is one of kinds (none: 0), in any of states (all states if
+	// empty), created at or after since (zero: any time). ErrInvalid for an
+	// unknown state.
+	CountJobsOfKinds(userID string, kinds []string, states []JobState, since time.Time) (int, error)
 	// CountConversations counts the user's conversations.
 	CountConversations(userID string) (int, error)
 	// ChangeMarks returns the user's change marks (see ChangeMarks).

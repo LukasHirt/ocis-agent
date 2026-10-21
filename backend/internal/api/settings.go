@@ -244,6 +244,45 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 		if err := tx.PutPolicy(pol); err != nil {
 			return err
 		}
+		if pol.ProactiveEnabled && slices.Contains(changed, "proactive_enabled") {
+			// switched on: the first scheduled sweep comes one interval
+			// from now, not at once, and the watch poll starts from fresh
+			// baselines (a change from before never fires a job)
+			c, err := tx.GetCursor(p.UserID)
+			if err != nil {
+				return err
+			}
+			at := s.d.Now()
+			c.LastSweepAt = &at
+			c.WatchETags, c.WatchDirtySince, c.WatchChangedAt = nil, nil, nil
+			if err := tx.PutCursor(c); err != nil {
+				return err
+			}
+		}
+		if !pol.ProactiveEnabled && slices.Contains(changed, "proactive_enabled") {
+			// switched off: its live jobs (queued, requeued, running or
+			// waiting for approval) stop, so no proposal comes after "off"
+			if err := s.cancelProactiveJobs(tx, p.UserID); err != nil {
+				return err
+			}
+		}
+		if !pol.ProactiveEnabled || !slices.Contains(changed, "proactive_enabled") {
+			if slices.Contains(changed, "watch") {
+				// a pending change may be of a folder no longer watched;
+				// the baselines stay (a removed folder's is pruned by the
+				// next poll)
+				c, err := tx.GetCursor(p.UserID)
+				if err != nil {
+					return err
+				}
+				if c.WatchDirtySince != nil || c.WatchChangedAt != nil {
+					c.WatchDirtySince, c.WatchChangedAt = nil, nil
+					if err := tx.PutCursor(c); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		// names only: values can be paths and are the user's data
 		return s.appendAudit(tx, p.UserID, audit.KindPolicyChanged, "changed", strings.Join(changed, ","))
 	})
@@ -251,6 +290,36 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, s.settingsView(out))
+	return nil
+}
+
+// cancelProactiveJobs cancels the user's live proactive jobs and audits each
+// like a cancel. A running one stops at its worker's next write (and the
+// runner cancels one that is claimed again while proactive work is off).
+func (s *Server) cancelProactiveJobs(tx store.Tx, userID string) error {
+	jobs, err := tx.ListJobs(userID, store.JobFilter{
+		States: []store.JobState{store.JobQueued, store.JobRunning, store.JobWaitingApproval}, Limit: 1000,
+	})
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		if !store.IsProactiveTrigger(j.TriggerKind) {
+			continue
+		}
+		switch err := tx.CancelJob(userID, j.ID); {
+		case errors.Is(err, store.ErrConflict): // ended meanwhile
+			continue
+		case err != nil:
+			return err
+		}
+		if _, err := tx.AppendAudit(audit.Event{
+			UserID: userID, TS: s.d.Now(), JobID: j.ID, Kind: audit.KindJobCancelled, Cred: "oidc",
+			Outcome: "cancelled", Detail: "proactive_disabled",
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -333,7 +402,7 @@ func (s *Server) parseSettings(b settingsBody) (settingsPatch, error) {
 	if len(b.QuietHours) > 0 {
 		n++
 		str, err := jsonString(b.QuietHours)
-		if err != nil || !validQuietHours(str) {
+		if err != nil || !store.ValidQuietHours(str) {
 			return sp, errBadJSON
 		}
 		sp.quiet = &str
@@ -469,34 +538,4 @@ func isControlRune(r rune) bool {
 		return true
 	}
 	return false
-}
-
-// validQuietHours accepts "" (no quiet hours) or HH:MM-HH:MM in 24-hour
-// time with two different ends.
-func validQuietHours(q string) bool {
-	if q == "" {
-		return true
-	}
-	if len(q) != 11 || q[5] != '-' {
-		return false
-	}
-	a, ok1 := clockMinutes(q[:5])
-	b, ok2 := clockMinutes(q[6:])
-	return ok1 && ok2 && a != b
-}
-
-func clockMinutes(s string) (int, bool) {
-	if len(s) != 5 || s[2] != ':' {
-		return 0, false
-	}
-	for _, i := range []int{0, 1, 3, 4} {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, false
-		}
-	}
-	h, m := int(s[0]-'0')*10+int(s[1]-'0'), int(s[3]-'0')*10+int(s[4]-'0')
-	if h > 23 || m > 59 {
-		return 0, false
-	}
-	return h*60 + m, true
 }

@@ -21,7 +21,22 @@
           <oc-icon name="refresh" size="small" />
           <span v-text="$gettext('Refresh')" />
         </oc-button>
+        <oc-button size="small" appearance="outline" :disabled="!canReview" @click="reviewNow">
+          <oc-icon name="search-eye" size="small" />
+          <span v-text="$gettext('Review now')" />
+        </oc-button>
       </div>
+      <p
+        v-if="reviewResult"
+        class="agent-tasks-review-result"
+        role="status"
+        data-testid="agent-review-result"
+        v-text="reviewResult"
+      />
+      <p v-if="reviewError" class="agent-tasks-review-error" role="alert" data-testid="agent-review-error">
+        <span v-text="reviewError.message" />
+        <span v-if="reviewError.detail" v-text="' ' + reviewError.detail" />
+      </p>
 
       <div v-if="jobs.error" class="agent-tasks-error">
         <p role="alert" v-text="jobs.error" />
@@ -52,18 +67,50 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import JobRow from './tasks/JobRow.vue'
 import JobDetail from './tasks/JobDetail.vue'
 import { JOB_FILTERS, useJobsStore } from '../stores/jobs'
+import { useAgentStore } from '../stores/agent'
+import { ApiError, describeError } from '../api/errors'
 import { filterLabel } from './tasks/labels'
 
 // The tasks screen: the jobs newest first with a state filter, or the
 // route's job with its steps. It listens for changes only while shown.
 const props = defineProps<{ id?: string }>()
 const jobs = useJobsStore()
-const { $gettext } = useGettext()
+const agent = useAgentStore()
+const { $gettext, interpolate } = useGettext()
+
+// Review now: start a review (POST /proactive/run). The result and any
+// refusal are fixed texts; the server's own text is never shown.
+const reviewing = ref(false)
+const reviewResult = ref<string | null>(null)
+const reviewError = ref<{ message: string; detail?: string } | null>(null)
+const canReview = computed(() => !reviewing.value && agent.status?.enrolled === true)
+
+const reviewNow = async () => {
+  if (!canReview.value) return
+  reviewing.value = true
+  reviewResult.value = null
+  reviewError.value = null
+  try {
+    await agent.runProactive()
+    reviewResult.value = $gettext(
+      'A review has started. The agent only proposes actions: nothing changes until you approve it in the approvals inbox.'
+    )
+    void jobs.refresh()
+  } catch (e) {
+    const detail =
+      e instanceof ApiError && e.code === 'rate_limited' && e.retryAfter !== undefined
+        ? interpolate($gettext('Try again in %{seconds} seconds.'), { seconds: e.retryAfter }, true)
+        : undefined
+    reviewError.value = { message: describeError(e, $gettext), ...(detail ? { detail } : {}) }
+  } finally {
+    reviewing.value = false
+  }
+}
 
 interface FilterOption {
   value: string
@@ -125,6 +172,13 @@ watch(
   flex-direction: column;
   gap: 0.5rem;
   min-width: 0;
+}
+.agent-tasks-review-result {
+  margin: 0;
+}
+.agent-tasks-review-error {
+  margin: 0;
+  color: var(--oc-color-swatch-danger-default, #b00020);
 }
 .agent-tasks-error {
   display: flex;

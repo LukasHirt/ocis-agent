@@ -45,7 +45,14 @@
                 : $gettext('Nothing needs your approval')
           "
         />
-        <JobGroup v-for="g in groups" :key="g.jobId" :job-id="g.jobId" :items="g.items" :goal="goals[g.jobId]" />
+        <JobGroup
+          v-for="g in groups"
+          :key="g.jobId"
+          :job-id="g.jobId"
+          :items="g.items"
+          :goal="goals[g.jobId]"
+          :trigger="triggers[g.jobId]"
+        />
         <p
           v-if="job ? !jobComplete : !store.approvals.complete"
           class="agent-approvals-more"
@@ -226,6 +233,8 @@ const groups = computed(() => {
 // job than its detail); a failed lookup is tried again on a later change
 // of the list, at most once per GOAL_RETRY_MS.
 const goals = reactive<Record<string, string | null>>({})
+// triggers: a job's trigger kind, read with its goal.
+const triggers = reactive<Record<string, string | null>>({})
 const asked = new Map<string, number | 'ok'>() // failure time, or 'ok'
 watch(
   groups,
@@ -237,6 +246,7 @@ watch(
       client.getJob(jobId, abort.signal).then(
         (j) => {
           goals[jobId] = typeof j?.goal === 'string' && j.goal !== '' ? j.goal : null
+          triggers[jobId] = typeof j?.trigger_kind === 'string' && j.trigger_kind !== '' ? j.trigger_kind : null
         },
         () => {
           asked.set(jobId, platform.now())

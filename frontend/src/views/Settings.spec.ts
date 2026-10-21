@@ -4,7 +4,7 @@ import Settings from './Settings.vue'
 import { PLATFORM_KEY } from '../platform'
 import { apiErr, json, settingsOf, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Call, type Handler } from '../test/server'
-import type { Settings as SettingsT, Status } from '../api/types'
+import type { ProactiveState, Settings as SettingsT, Status } from '../api/types'
 
 let wrapper: VueWrapper | undefined
 afterEach(() => {
@@ -347,6 +347,78 @@ describe('Settings', () => {
       expect(fieldError(w, 'agent-quiet-hours') !== null).toBe(!ok)
       await save(w)
       expect(JSON.stringify(s.put)).toBe(ok ? `[{"quiet_hours":"${q}"}]` : '[]')
+    })
+
+    const proactive = (over: Partial<ProactiveState> = {}): ProactiveState => ({
+      enabled: true,
+      last_sweep_at: '2026-01-01T06:00:00Z',
+      next_sweep_at: '2026-01-01T12:00:00Z',
+      blocked: '',
+      daily_jobs: 24,
+      ...over
+    })
+
+    it('explains in plain text what proactive work does, with the daily limit', async () => {
+      const { w } = await setup(settingsServer({}, { proactive: proactive() }).handler)
+      expect(w.find('[data-testid="agent-proactive-about"]').text()).toBe(
+        'When proactive work is on, the agent reviews your recent changes and open tasks on its own: on the ' +
+          'schedule below and soon after a watched folder changes. A review only reads and proposes: every ' +
+          'action other than reading files or updating its memory waits for your approval in the approvals ' +
+          'inbox. Quiet hours are in UTC; no review starts on its own during them. At most 24 reviews run ' +
+          "per day (UTC), and none starts once 80% of the day's token budget is used."
+      )
+    })
+
+    it('names the daily limit generally when the server does not say it', async () => {
+      const { w } = await setup(settingsServer({}, { proactive: undefined }).handler)
+      expect(w.find('[data-testid="agent-proactive-about"]').text()).toContain(
+        "A daily limit applies to reviews, and none starts once 80% of the day's token budget is used."
+      )
+      expect(w.find('[data-testid="agent-proactive-last"]').exists()).toBe(false)
+      expect(w.find('[data-testid="agent-proactive-next"]').exists()).toBe(false)
+      expect(w.find('[data-testid="agent-proactive-blocked"]').exists()).toBe(false)
+    })
+
+    it('labels the quiet hours as UTC', async () => {
+      const { w } = await setup(settingsServer().handler)
+      expect(w.find('[data-testid="agent-quiet-hours"] label').text()).toBe(
+        'Quiet hours in UTC (HH:MM-HH:MM, empty for none)'
+      )
+    })
+
+    it('shows the last review and when the next is expected', async () => {
+      const { w } = await setup(settingsServer({ proactive_enabled: true }, { proactive: proactive() }).handler)
+      const last = w.find('[data-testid="agent-proactive-last"]')
+      expect(last.text()).toContain('Last review')
+      expect(last.find('time').attributes('datetime')).toBe('2026-01-01T06:00:00Z')
+      const next = w.find('[data-testid="agent-proactive-next"]')
+      expect(next.text()).toContain('Next scheduled review expected around')
+      expect(next.find('time').attributes('datetime')).toBe('2026-01-01T12:00:00Z')
+      expect(w.find('[data-testid="agent-proactive-blocked"]').exists()).toBe(false)
+    })
+
+    it('says when there was no review yet and shows no next one while off', async () => {
+      const { w } = await setup(
+        settingsServer({}, { proactive: proactive({ enabled: false, last_sweep_at: null, next_sweep_at: null, blocked: 'proactive_disabled' }) })
+          .handler
+      )
+      expect(w.find('[data-testid="agent-proactive-last"]').text()).toBe('Last review: none yet')
+      expect(w.find('[data-testid="agent-proactive-next"]').exists()).toBe(false)
+      expect(w.find('[data-testid="agent-proactive-blocked"]').exists()).toBe(false)
+    })
+
+    it.each([
+      ['kill_switch', 'The operator has stopped the agent, so no review starts now.'],
+      ['paused', 'The agent is paused, so no review starts now.'],
+      ['credentials_invalid', 'The agent has lost access to your files, so no review starts now. Reconnect it.'],
+      ['quiet_hours', 'It is quiet hours now (UTC), so no review starts on its own.'],
+      ['live_job', 'A review is still waiting, working or waiting for your approval; the next one starts after it ends.'],
+      ['daily_cap', "Today's limit of reviews is reached; reviews resume at midnight UTC."],
+      ['budget', "Most of today's token budget is used; reviews resume at midnight UTC."],
+      ['<b>new</b>', 'No review can start right now.']
+    ])('explains why no review starts now (%s) with a fixed text', async (blocked, text) => {
+      const { w } = await setup(settingsServer({ proactive_enabled: true }, { proactive: proactive({ blocked }) }).handler)
+      expect(w.find('[data-testid="agent-proactive-blocked"]').text()).toBe(text)
     })
 
     it('clears quiet hours with an empty value', async () => {

@@ -1,5 +1,7 @@
 package store
 
+import "errors"
+
 // The kill switch is the system key KillSwitchKey; it is on exactly when its
 // value is KillSwitchOnValue (an absent key is off). While it is on,
 // ClaimNextJob hands out nothing, like for a paused user.
@@ -50,4 +52,16 @@ func PauseSupersedes(current, next string) bool {
 	default:
 		return pauseRank(next) > pauseRank(current)
 	}
+}
+
+// KillSwitchOn reports whether the database kill switch is on.
+func KillSwitchOn(tx Tx) (bool, error) {
+	v, err := tx.GetSystem(KillSwitchKey)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v == KillSwitchOnValue, nil
 }

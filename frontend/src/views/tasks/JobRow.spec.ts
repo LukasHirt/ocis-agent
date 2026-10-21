@@ -41,9 +41,19 @@ describe('JobRow', () => {
     expect(row({ goal: '' }).find('.agent-job-goal').text()).toBe('(no description)')
   })
 
-  it('labels the trigger and shows an unknown one as text', () => {
-    expect(row({ trigger_kind: 'chat' }).find('.agent-job-trigger').text()).toBe('Chat question')
-    expect(row({ trigger_kind: 'file_event' }).find('.agent-job-trigger').text()).toBe('file_event')
+  it.each([
+    ['chat', 'Chat question'],
+    ['schedule', 'Scheduled review'],
+    ['file_event', 'File change'],
+    ['manual', 'Review on request']
+  ])('labels the trigger %s', (kind, label) => {
+    expect(row({ trigger_kind: kind }).find('.agent-job-trigger').text()).toBe(label)
+  })
+
+  it('shows an unknown trigger as text', () => {
+    const w = row({ trigger_kind: '<b>webhook</b>' })
+    expect(w.find('.agent-job-trigger').text()).toBe('<b>webhook</b>')
+    expect(w.find('.agent-job-trigger b').exists()).toBe(false)
   })
 
   it('shows when a job was created, and when it ended once it ended', () => {
