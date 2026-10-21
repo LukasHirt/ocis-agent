@@ -38,7 +38,7 @@
             <span v-text="$gettext('All conversations')" />
           </router-link>
           <h2 class="agent-chat-title agent-section-title">
-            <TextBlock v-if="title" :text="title" />
+            <TextBlock v-if="title" :text="title" wrap="nowrap" />
             <span v-else v-text="$gettext('New conversation')" />
           </h2>
         </div>
@@ -276,9 +276,6 @@ const enable = async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.agent-chat-title .agent-text {
-  white-space: nowrap !important;
 }
 .agent-chat-enrol,
 .agent-chat-error {

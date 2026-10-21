@@ -51,7 +51,7 @@
             :aria-current="c.id === chat.current ? 'page' : undefined"
           >
             <span class="agent-conv-title">
-              <TextBlock v-if="c.title" :text="c.title" />
+              <TextBlock v-if="c.title" :text="c.title" wrap="nowrap" />
               <span v-else class="agent-conv-untitled" v-text="$gettext('New conversation')" />
             </span>
             <time
@@ -246,9 +246,6 @@ const remove = async (id: string) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.agent-conv-title .agent-text {
-  white-space: nowrap !important;
 }
 .agent-conv-current .agent-conv-title {
   font-weight: 600;

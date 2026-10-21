@@ -2,7 +2,7 @@
   <article class="agent-job agent-row">
     <router-link class="agent-job-link agent-row-link" :to="{ name: `${APPID}-tasks-job`, params: { id: job.id } }">
       <span class="agent-job-goal">
-        <TextBlock v-if="job.goal" :text="job.goal" />
+        <TextBlock v-if="job.goal" :text="job.goal" wrap="normal" />
         <span v-else v-text="$gettext('(no description)')" />
       </span>
     </router-link>
@@ -103,9 +103,6 @@ const steps = computed(() => {
   line-clamp: 1;
   overflow: hidden;
   overflow-wrap: anywhere;
-}
-.agent-job-goal .agent-text {
-  white-space: normal !important;
 }
 .agent-job-meta {
   grid-area: meta;
