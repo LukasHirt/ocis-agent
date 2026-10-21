@@ -8,8 +8,21 @@
         </span>
         <span v-else v-text="fallbackTitle" />
       </h3>
+      <span v-if="trigger" class="agent-group-trigger">
+        <span v-if="triggerText" v-text="triggerText" />
+        <TextBlock v-else :text="trigger" class="agent-group-raw" />
+      </span>
       <span class="agent-group-count" v-text="countText" />
     </header>
+    <p
+      v-if="proactive"
+      class="agent-group-proposal"
+      v-text="
+        $gettext(
+          'The agent proposes these actions on its own. Nothing has been done yet; each one runs only if you approve it.'
+        )
+      "
+    />
     <div v-if="live.length > 1" class="agent-group-bulk">
       <oc-button
         appearance="outline"
@@ -49,14 +62,26 @@ import { MAX_BULK, useDecisions } from './decisions'
 import { shortId } from '../../util/format'
 import { visibleText } from '../../util/visibleText'
 import { quote } from './targets'
-import type { Approval, ApprovalState } from '../../api/types'
+import { isProactiveTrigger, triggerLabel } from '../tasks/labels'
+import type { Approval, ApprovalState, TriggerKind } from '../../api/types'
 
 // JobGroup shows the pending approvals of one job with the job's goal
 // (untrusted text; absent when it could not be read) and a bulk decision
 // over the approvals that can still be decided, all of the same job.
-const props = defineProps<{ jobId: string; items: Approval[]; goal?: string | null }>()
+// trigger is the job's trigger kind (absent while unknown): a proactive
+// job is labelled as such and its approvals as proposals; an unknown kind
+// other than chat is shown as text.
+const props = defineProps<{ jobId: string; items: Approval[]; goal?: string | null; trigger?: string | null }>()
 const { $gettext, $ngettext, interpolate } = useGettext()
 const decisions = useDecisions()
+
+const trigger = computed(() =>
+  typeof props.trigger === 'string' && props.trigger !== '' && props.trigger !== ('chat' satisfies TriggerKind)
+    ? props.trigger
+    : null
+)
+const triggerText = computed(() => (trigger.value ? triggerLabel(trigger.value, $gettext) : null))
+const proactive = computed(() => trigger.value !== null && isProactiveTrigger(trigger.value))
 
 const headingId = computed(() => `agent-group-${props.jobId.replace(/[^A-Za-z0-9_-]/g, '_')}`)
 const live = computed(() => props.items.filter((a) => a.state === ('pending' satisfies ApprovalState) && !a.job_ended))
@@ -115,6 +140,19 @@ const countText = computed(() =>
 .agent-group-title {
   margin: 0;
   font-size: 1.1em;
+}
+.agent-group-trigger {
+  font-size: 0.85em;
+  padding: 0 0.5rem;
+  border: 1px solid var(--oc-color-border, #ddd);
+  border-radius: 999px;
+}
+.agent-group-raw {
+  font-family: var(--oc-font-family-mono, monospace);
+}
+.agent-group-proposal {
+  margin: 0;
+  color: var(--oc-color-text-muted, #666);
 }
 .agent-group-count {
   color: var(--oc-color-text-muted, #666);

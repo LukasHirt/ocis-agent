@@ -63,6 +63,16 @@ describe('JobDetail', () => {
     expect(link.text()).toBe('Open the conversation')
   })
 
+  it.each([
+    ['schedule', 'Scheduled review'],
+    ['file_event', 'File change'],
+    ['manual', 'Review on request'],
+    ['later_kind', 'later_kind']
+  ])('names the trigger %s', async (kind, label) => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1', { trigger_kind: kind })] }))
+    expect(w.find('.agent-job-detail-trigger').text()).toBe(label)
+  })
+
   it('has no conversation link for other jobs', async () => {
     const { w } = await setup(jobsState({ jobs: [jobOf('j1', { trigger_kind: 'proactive', trigger_ref: 'x' })] }))
     expect(w.find('.agent-job-detail-conversation').exists()).toBe(false)

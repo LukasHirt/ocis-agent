@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import Tasks from './Tasks.vue'
 import { PLATFORM_KEY } from '../platform'
-import { json } from '../test/fixtures'
+import { apiErr, json, statusOf } from '../test/fixtures'
 import { fakeServer, startStore, type Handler } from '../test/server'
 import { jobOf, jobsHandler, jobsState, type JobsState } from '../test/jobs'
 
@@ -123,11 +123,112 @@ describe('Tasks', () => {
   })
 })
 
+describe('Tasks: review now', () => {
+  const review = (w: VueWrapper) => button(w, 'Review now')
+  const runs = (server: { calls: { method: string; path: string }[] }) =>
+    server.calls.filter((c) => c.method === 'POST' && c.path === '/proactive/run')
+
+  it('starts a review, says that it only proposes and reads the list again', async () => {
+    const st = jobsState()
+    const { w, server } = await setup(st, {}, (c) => {
+      if (c.method !== 'POST' || c.path !== '/proactive/run') return undefined
+      const j = jobOf('jr', { trigger_kind: 'manual', state: 'queued', goal: 'Review my recent file changes' })
+      st.jobs.unshift(j)
+      return json(j, 202)
+    })
+    const lists = server.count('GET', '/jobs')
+    const statuses = server.count('GET', '/status')
+    await review(w)!.trigger('click')
+    await flushPromises()
+    expect(runs(server)).toHaveLength(1)
+    expect(runs(server)[0]).toMatchObject({ body: {} })
+    expect(w.find('[data-testid="agent-review-result"]').text()).toBe(
+      'A review has started. The agent only proposes actions: nothing changes until you approve it in the approvals inbox.'
+    )
+    expect(server.count('GET', '/jobs')).toBeGreaterThan(lists)
+    expect(server.count('GET', '/status')).toBeGreaterThan(statuses)
+    expect(w.findAll('.agent-job-trigger').map((t) => t.text())).toEqual(['Review on request'])
+  })
+
+  it.each([
+    ['proactive_disabled', 'Proactive work is turned off. Turn it on in Settings first.'],
+    ['kill_switch', 'The operator has stopped the agent for now.'],
+    ['paused', 'The agent is paused. Resume it first.'],
+    ['credentials_invalid', 'The agent has lost access to your files. Reconnect it.'],
+    ['live_job', 'A review is already waiting, working or waiting for your approval.'],
+    ['daily_cap', "Today's limit of reviews is reached. It resets at midnight UTC."],
+    ['budget', "Most of today's token budget is used. Reviews resume at midnight UTC."],
+    ['not_enrolled', 'The agent is not set up for you yet. Set it up first.'],
+    ['teapot', 'Something went wrong. Try again later.']
+  ])('shows a fixed text for 409 %s, never the server text', async (code, text) => {
+    const { w } = await setup(jobsState(), {}, (c) =>
+      c.method === 'POST' && c.path === '/proactive/run' ? apiErr(409, code) : undefined
+    )
+    await review(w)!.trigger('click')
+    await flushPromises()
+    const alert = w.find('[data-testid="agent-review-error"]')
+    expect(alert.attributes('role')).toBe('alert')
+    expect(alert.text()).toBe(text)
+    expect(w.text()).not.toContain('server text')
+    expect(w.find('[data-testid="agent-review-result"]').exists()).toBe(false)
+  })
+
+  it('says when to try again after the cooldown', async () => {
+    const { w } = await setup(jobsState(), {}, (c) =>
+      c.method === 'POST' && c.path === '/proactive/run'
+        ? new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'server text' } }), {
+            status: 429,
+            headers: { 'Content-Type': 'application/json', 'Retry-After': '4' }
+          })
+        : undefined
+    )
+    await review(w)!.trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="agent-review-error"]').text().replace(/\s+/g, ' ')).toBe(
+      'Too many requests. Wait a moment and try again. Try again in 4 seconds.'
+    )
+  })
+
+  it('sends once on a double click and clears the last result on the next run', async () => {
+    let answer: (r: Response) => void = () => {}
+    const { w, server } = await setup(jobsState(), {}, (c) =>
+      c.method === 'POST' && c.path === '/proactive/run'
+        ? new Promise<Response>((r) => (answer = r))
+        : undefined
+    )
+    await review(w)!.trigger('click')
+    await review(w)!.trigger('click')
+    expect(review(w)!.attributes('disabled')).toBeDefined()
+    expect(runs(server)).toHaveLength(1)
+    answer(apiErr(409, 'live_job'))
+    await flushPromises()
+    expect(w.find('[data-testid="agent-review-error"]').exists()).toBe(true)
+    await review(w)!.trigger('click')
+    expect(w.find('[data-testid="agent-review-error"]').exists()).toBe(false)
+    answer(json(jobOf('jr', { trigger_kind: 'manual', state: 'queued' }), 202))
+    await flushPromises()
+    expect(w.find('[data-testid="agent-review-result"]').exists()).toBe(true)
+  })
+
+  it('is not offered on a task detail', async () => {
+    const { w } = await setup(jobsState({ jobs: [jobOf('j1')] }), { id: 'j1' })
+    expect(review(w)).toBeUndefined()
+  })
+
+  it('is disabled until the agent is set up', async () => {
+    const { w } = await setup(jobsState(), {}, (c) =>
+      c.path === '/status' ? json(statusOf({ enrolled: false })) : undefined
+    )
+    expect(review(w)!.attributes('disabled')).toBeDefined()
+  })
+})
+
 describe('Tasks without a session', () => {
   it('shows a spinner instead of a blank screen, for the list and for a task', async () => {
     wrapper = mount(Tasks, { global: { mocks: { $router: { push: vi.fn() } } } })
     await flushPromises()
     expect(wrapper.find('[data-stub=OcSpinner]').exists()).toBe(true)
+    expect(button(wrapper, 'Review now')!.attributes('disabled')).toBeDefined()
     wrapper.unmount()
     wrapper = mount(Tasks, { props: { id: 'j1' }, global: { mocks: { $router: { push: vi.fn() } } } })
     await flushPromises()

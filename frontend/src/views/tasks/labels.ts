@@ -1,4 +1,4 @@
-import type { Job, JobState } from '../../api/types'
+import type { Job, JobState, TriggerKind } from '../../api/types'
 
 type Gettext = (msgid: string) => string
 
@@ -49,18 +49,30 @@ export const filterLabel = (state: string, t: Gettext): string => {
 // null (show the raw value as text).
 export const triggerLabel = (kind: string, t: Gettext): string | null => {
   switch (kind) {
-    case 'chat':
+    case 'chat' satisfies TriggerKind:
       return t('Chat question')
-    case 'schedule':
-      return t('Scheduled task')
+    case 'schedule' satisfies TriggerKind:
+      return t('Scheduled review')
+    case 'file_event' satisfies TriggerKind:
+      return t('File change')
+    case 'manual' satisfies TriggerKind:
+      return t('Review on request')
   }
   return null
 }
 
+// isProactiveTrigger reports a job the agent started for a review (on its
+// schedule, on a file change or on the user's request), which only
+// proposes actions.
+export const isProactiveTrigger = (kind: string): boolean =>
+  kind === ('schedule' satisfies TriggerKind) ||
+  kind === ('file_event' satisfies TriggerKind) ||
+  kind === ('manual' satisfies TriggerKind)
+
 // conversationOf is the id of the conversation a chat job answers, or
 // null for any other job.
 export const conversationOf = (job: Pick<Job, 'trigger_kind' | 'trigger_ref'>): string | null =>
-  job.trigger_kind === 'chat' && typeof job.trigger_ref === 'string' && job.trigger_ref !== '' ? job.trigger_ref : null
+  job.trigger_kind === ('chat' satisfies TriggerKind) && typeof job.trigger_ref === 'string' && job.trigger_ref !== '' ? job.trigger_ref : null
 
 // tokenCount is a token count from the API, or 0 when it is not one.
 export const tokenCount = (n: unknown): number => (typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : 0)

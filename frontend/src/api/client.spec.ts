@@ -90,6 +90,7 @@ describe('createClient: request shape per method', () => {
     ['listJobs', (c) => c.listJobs({ state: 'running', limit: 5 }), 'GET', '/jobs?state=running&limit=5', undefined],
     ['getJob', (c) => c.getJob(ID), 'GET', `/jobs/${ID}`, undefined],
     ['cancelJob', (c) => c.cancelJob(ID), 'POST', `/jobs/${ID}/cancel`, {}],
+    ['runProactive', (c) => c.runProactive(), 'POST', '/proactive/run', {}],
     ['listConversations', (c) => c.listConversations({ cursor: ID }), 'GET', `/conversations?cursor=${ID}`, undefined],
     ['createConversation', (c) => c.createConversation(), 'POST', '/conversations', {}],
     ['createConversation titled', (c) => c.createConversation('Hi'), 'POST', '/conversations', { title: 'Hi' }],

@@ -24,6 +24,8 @@ describe('activity kinds', () => {
       'agent_resumed',
       'agent_dormant',
       'policy_changed',
+      'proactive_started',
+      'proactive_skipped',
       'token_created',
       'token_renewed',
       'token_deleted',
@@ -36,6 +38,11 @@ describe('activity kinds', () => {
     ]
     expect([...KNOWN_KINDS].sort()).toEqual([...written].sort())
     for (const k of written) expect(kindLabel(k, t)).toMatch(/^[A-Z]/)
+  })
+
+  it('names the review events', () => {
+    expect(kindLabel('proactive_started', t)).toBe('Review started')
+    expect(kindLabel('proactive_skipped', t)).toBe('Review skipped')
   })
 
   it('has no label for an unknown kind, also not for inherited names', () => {

@@ -17,6 +17,7 @@ import type {
   Approvals,
   Decision,
   DecisionItem,
+  Job,
   Renewed,
   Revoked,
   RevokeAllPreview,
@@ -581,6 +582,13 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     return s.client.previewRevokeAll(s.abort.signal)
   }
 
+  // runProactive starts a review now; the status (proactive state) is read
+  // again afterwards, also after a refusal.
+  const runProactive = (): Promise<Job> => {
+    const s = active()
+    return withStatus(() => s.client.runProactive())
+  }
+
   // revokeAll is the incident revoke: ALL of the user's app tokens.
   const revokeAll = (): Promise<Revoked> => {
     const s = active()
@@ -613,6 +621,7 @@ export const useAgentStore = defineStore('ocis-agent', () => {
     revokeToken,
     previewRevokeAll,
     revokeAll,
+    runProactive,
     subscribe,
     session: currentSession,
     start,
