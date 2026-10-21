@@ -40,7 +40,7 @@
         <section v-if="partial" class="agent-job-detail-partial-section agent-surface" aria-labelledby="agent-job-partial-h">
           <h3 id="agent-job-partial-h" class="agent-card-title" v-text="$gettext('Partial answer (unfinished)')" />
           <div v-if="partial.text" class="agent-job-detail-partial" aria-live="off">
-            <TextBlock :text="partial.text" />
+            <MarkdownBlock :text="partial.text" partial />
           </div>
           <p class="agent-job-detail-partial-state agent-chip agent-chip--info">
             <oc-icon name="loader-4" size="small" />
@@ -50,7 +50,7 @@
 
         <section v-if="detail?.answer" class="agent-job-detail-answer-section agent-surface" aria-labelledby="agent-job-answer-h">
           <h3 id="agent-job-answer-h" class="agent-card-title" v-text="$gettext('Answer')" />
-          <div class="agent-job-detail-answer"><TextBlock :text="detail.answer" /></div>
+          <div class="agent-job-detail-answer"><MarkdownBlock :text="detail.answer" /></div>
         </section>
 
         <section class="agent-job-detail-steps" aria-labelledby="agent-job-steps-h">
@@ -160,6 +160,7 @@
 import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
+import MarkdownBlock from '../../components/MarkdownBlock.vue'
 import RiskBadge from '../../components/RiskBadge.vue'
 import EmptyState from '../../components/state/EmptyState.vue'
 import ErrorState from '../../components/state/ErrorState.vue'

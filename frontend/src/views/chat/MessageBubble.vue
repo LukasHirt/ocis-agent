@@ -16,6 +16,7 @@
       </header>
       <div class="agent-msg-content">
         <span v-if="systemText" v-text="systemText" />
+        <MarkdownBlock v-else-if="kind === 'assistant'" :text="String(message.content ?? '')" />
         <TextBlock v-else :text="message.content" />
       </div>
 
@@ -60,6 +61,7 @@
 import { computed } from 'vue'
 import { useGettext } from 'vue3-gettext'
 import TextBlock from '../../components/TextBlock.vue'
+import MarkdownBlock from '../../components/MarkdownBlock.vue'
 import RiskBadge from '../../components/RiskBadge.vue'
 import { APPID } from '../../appid'
 import { formatTime } from '../../util/format'
@@ -67,9 +69,10 @@ import { errorText } from '../../util/reasons'
 import type { AgentNotice, JobApprovals } from '../../stores/chat'
 import type { JobState, Message } from '../../api/types'
 
-// MessageBubble shows one message as plain text (no markup, no links): a
-// question with the state of the job that answers it, an answer, or a
-// system notice. Every state has a text label and an icon.
+// MessageBubble shows one message: a question with the state of the job that
+// answers it, an answer, or a system notice. Answers render a safe Markdown
+// subset as text-only elements; everything else is plain text. Every state
+// has a text label and an icon.
 const props = defineProps<{
   message: Message
   notice?: AgentNotice

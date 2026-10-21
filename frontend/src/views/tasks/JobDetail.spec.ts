@@ -53,6 +53,7 @@ describe('JobDetail', () => {
     expect(w.find('.agent-job-detail-runs').text()).toBe('2')
     expect(w.find('.agent-job-detail-tokens').text()).toBe('2000 in, 100 out')
     expect(w.find('.agent-job-detail-answer').text()).toBe('All sorted')
+    expect(w.find('.agent-job-detail-answer strong').exists()).toBe(false)
     expect(button(w, 'Cancel task')).toBeUndefined()
   })
 
@@ -201,6 +202,21 @@ describe('JobDetail', () => {
     expect(text.find('b').exists()).toBe(false)
     expect(text.text()).toBe('<b>so far</b>\\u{202E}')
     expect(w.find('.agent-job-detail-answer-section').exists()).toBe(false)
+  })
+
+  it('renders the answer as markdown', async () => {
+    const job = jobOf('j1', { state: 'succeeded' })
+    const { w } = await setup(jobsState({ jobs: [job], answers: { j1: '**a** <b>x</b>' } }))
+    const answer = w.find('.agent-job-detail-answer')
+    expect(answer.find('strong').text()).toBe('a')
+    expect(answer.find('b').exists()).toBe(false)
+    expect(answer.text()).toContain('<b>x</b>')
+  })
+
+  it('closes unfinished markdown in the partial answer', async () => {
+    const job = jobOf('j1', { state: 'running', partial: 'so **far', partial_state: 'writing' })
+    const { w } = await setup(jobsState({ jobs: [job] }))
+    expect(w.find('.agent-job-detail-partial strong').text()).toBe('far')
   })
 
   it('says the model of a running job is still thinking', async () => {

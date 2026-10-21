@@ -151,17 +151,22 @@ describe('MessageBubble', () => {
     expect(w.find('.agent-msg-notice').text()).toBe(text)
   })
 
-  it('renders answers as plain pre-wrapped text, never as markup', () => {
+  it('renders answers as safe markdown', () => {
     const hostile = '<img src=x onerror=alert(1)> **bold** https://evil.example\n\u202eevil'
     const w = mountBubble({ message: answer('m2', hostile) })
     expect(w.find('img').exists()).toBe(false)
     expect(w.find('a').exists()).toBe(false) // URLs are not linkified
     const text = w.find('.agent-msg-content')
     expect(text.text()).toContain('<img src=x onerror=alert(1)>')
-    expect(text.text()).toContain('**bold**')
+    expect(text.find('strong').text()).toBe('bold')
     expect(text.find('.agent-ctl').text()).toBe('\\u{202E}')
-    expect(text.find('.agent-text').attributes('style')).toContain('pre-wrap')
     expect(w.find('.agent-msg').classes()).toContain('agent-msg-assistant')
+  })
+
+  it('never renders a user question as markdown', () => {
+    const w = mountBubble({ message: userMessage('m1', null, '**x**') })
+    expect(w.find('.agent-msg-content strong').exists()).toBe(false)
+    expect(w.find('.agent-msg-content').text()).toBe('**x**')
   })
 
   it('marks system messages visually and by text', () => {
