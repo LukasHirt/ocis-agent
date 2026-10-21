@@ -218,9 +218,4 @@ const decidedAt = computed(() => {
 .agent-card-verify p {
   margin: 0;
 }
-.agent-label {
-  display: block;
-  font-weight: bold;
-  font-size: 0.9em;
-}
 </style>

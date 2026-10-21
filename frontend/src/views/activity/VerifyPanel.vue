@@ -56,25 +56,25 @@ const resultText = computed(() => {
 </script>
 
 <style>
-.agent-verify {
+.agent-activity .agent-verify {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }
-.agent-verify p {
+.agent-activity .agent-verify p {
   margin: 0;
 }
-.agent-verify-result {
+.agent-activity .agent-verify-result {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
 }
-.agent-verify-broken,
-.agent-verify-error {
+.agent-activity .agent-verify-broken,
+.agent-activity .agent-verify-error {
   color: var(--oc-color-swatch-danger-default, #b00020);
 }
-.agent-verify-note {
+.agent-activity .agent-verify-note {
   flex-basis: 100%;
   font-size: 0.875rem;
 }

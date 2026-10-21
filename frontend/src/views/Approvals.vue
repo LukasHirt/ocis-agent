@@ -304,7 +304,7 @@ const toggleHistory = () => {
   flex-direction: column;
   gap: 1.5rem;
 }
-.agent-verify {
+.agent-approvals .agent-verify {
   border: 2px solid var(--oc-color-swatch-danger-default, #b00020);
   border-radius: 6px;
   padding: var(--oc-space-medium, 1rem);

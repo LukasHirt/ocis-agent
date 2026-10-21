@@ -61,8 +61,9 @@ onBeforeUnmount(clearResetTimer)
   justify-content: flex-end;
 }
 .agent-json-pre {
-  background: var(--oc-color-background-muted, #f5f5f5);
-  padding: var(--oc-space-small, 0.5rem);
-  border-radius: 4px;
+  background: var(--oc-color-background-muted);
+  padding: var(--agent-space-2) var(--agent-space-3);
+  border-radius: var(--agent-radius-s);
+  font-size: var(--agent-font-xs);
 }
 </style>
