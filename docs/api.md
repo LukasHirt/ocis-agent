@@ -509,7 +509,11 @@ start a review stays pending, is checked again at the next poll and is recorded 
 scheduled review). The first
 check of a folder only records its state, switching proactive work on starts afresh, and
 changing `watch` drops a pending change, so earlier changes never start a review. Changes inside `/.ocis-agent` (the agent's memory) do not
-count. A folder that is missing or unreadable is skipped. Paused users are not checked: changes
+count, and neither do the agent's own approved writes: right before such a write the agent
+checks the watch folders that contain its paths and right after it records their new state,
+but only if the recorded state is still the one from before the write, so a change the user
+made earlier still starts a review (a change landing during the write itself is taken for the
+agent's). If a check fails, the write counts as a change. A folder that is missing or unreadable is skipped. Paused users are not checked: changes
 made while paused start one review after the resume.
 
 ### POST /agent-api/v1/proactive/run

@@ -250,10 +250,13 @@ func (a *App) buildWorkers(opts Options) error {
 		KillSwitch: cfg.Agent.KillSwitch, ShutdownRequeueDelay: a.shutdownRequeueDelay,
 		UserDailyTokens: cfg.API.UserDailyTokens, Now: a.now,
 	}
-	var err error
+	own, err := scheduler.NewOwnWrites(a.st)
+	if err != nil {
+		return fmt.Errorf("app: own writes: %w", err)
+	}
 	if a.runner, err = agent.NewRunner(agent.Deps{
 		Store: a.st, Queue: a.queue, Provider: provider, Catalog: cfg.LLM.Catalog, Registry: a.registry,
-		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg,
+		Gate: a.gate, Executor: a.executor, Env: a.env, Creds: a.auth, Cfg: rcfg, OwnWrites: own,
 	}); err != nil {
 		return fmt.Errorf("app: runner: %w", err)
 	}

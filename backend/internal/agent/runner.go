@@ -15,7 +15,18 @@ import (
 	"github.com/owncloud/ocis-agent/backend/internal/tools"
 )
 
-// Deps are the runner's collaborators; every one is required.
+// OwnWrites keeps the agent's own approved writes from looking like user
+// changes to the watch-folder poll (*scheduler.OwnWrites). The runner calls
+// BeforeWrite right before it executes a freshly approved call, with the
+// paths the call names (tools.TargetPaths), and the function it returns
+// (nil: nothing to do) only once that call is done. Both are best effort and
+// run outside the executor's transactions.
+type OwnWrites interface {
+	BeforeWrite(ctx context.Context, env tools.Env, paths []string) func(context.Context)
+}
+
+// Deps are the runner's collaborators; every one is required except
+// OwnWrites.
 type Deps struct {
 	Store    store.Store
 	Queue    *queue.Queue
@@ -27,6 +38,9 @@ type Deps struct {
 	Env      EnvBuilder
 	Creds    Credentials
 	Cfg      Config
+	// OwnWrites is optional: without it, the agent's approved writes into
+	// a watch folder start a follow-up file_event review.
+	OwnWrites OwnWrites
 }
 
 // Runner runs one claimed job at a time: model turns, the gate and the tools.

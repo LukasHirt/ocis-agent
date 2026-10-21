@@ -170,13 +170,21 @@ func (r *Runner) resolveApproval(ctx context.Context, claim store.Claim, env too
 			// execute, try again later
 			return true, r.backoff(ctx, claim)
 		}
+		var afterWrite func(context.Context)
 		if a.State == store.ApprovalApproved || a.State == store.ApprovalExecuting {
 			// about to execute or reconcile
 			if stop, err := r.toolCheck(ctx, claim, &env); stop || err != nil {
 				return true, err
 			}
+			if a.State == store.ApprovalApproved && r.d.OwnWrites != nil {
+				// never executed before: a Done outcome is this run's write
+				afterWrite = r.d.OwnWrites.BeforeWrite(ctx, env, tools.TargetPaths(a.Args))
+			}
 		}
 		out, err := r.d.Executor.Run(ctx, claim, env, a.ID)
+		if afterWrite != nil && err == nil && out.State == approvals.OutcomeDone {
+			afterWrite(ctx)
+		}
 		if err == nil && a.State == store.ApprovalExpired && a.DecidedBy == "" {
 			// expired while pending (ExpireAndResume writes no step); an
 			// approval that expired after the decision got its step from
