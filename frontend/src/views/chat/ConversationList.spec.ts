@@ -61,6 +61,23 @@ describe('ConversationList', () => {
     expect(links[0].attributes('aria-current')).toBeUndefined()
   })
 
+  it('gives each link the visible title as a tooltip and keeps the actions passive', async () => {
+    const { w, chat } = await setup(
+      chatState({ conversations: [conversationOf('c1', { title: 'a\u202eb' }), conversationOf('c2', { title: '' })] })
+    )
+    chat.current = 'c1'
+    await flushPromises()
+    const items = w.findAll('.agent-conv')
+    expect(items[0].find('a').attributes('title')).toBe('a\\u{202E}b')
+    expect(items[1].find('a').attributes('title')).toBe('New conversation')
+    expect(items[0].classes()).toContain('agent-conv-current')
+    expect(items[1].classes()).not.toContain('agent-conv-current')
+    expect(items[0].find('a').attributes('aria-current')).toBe('page')
+    const actions = items[0].findAll('.agent-conv-actions button')
+    expect(actions).toHaveLength(2)
+    for (const b of actions) expect(b.attributes('data-variation')).toBe('passive')
+  })
+
   it('shows an empty state', async () => {
     const { w } = await setup(chatState())
     expect(w.text()).toContain('No conversations yet')

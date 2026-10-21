@@ -229,7 +229,7 @@ const enable = async () => {
   min-width: 0;
   min-height: 0;
   border-right: var(--agent-line);
-  background: var(--oc-color-background-muted);
+  background: var(--oc-color-background-default);
 }
 .agent-chat-side-head {
   flex: none;

@@ -48,6 +48,7 @@
           <router-link
             class="agent-conv-link agent-row-link"
             :to="{ name: `${APPID}-chat-conversation`, params: { id: c.id } }"
+            :title="nameOf(c)"
             :aria-current="c.id === chat.current ? 'page' : undefined"
           >
             <span class="agent-conv-title">
@@ -64,6 +65,7 @@
           <span class="agent-conv-actions agent-row-aside">
             <oc-button
               appearance="raw"
+              variation="passive"
               size="small"
               :aria-label="interpolate($gettext('Rename %{title}'), { title: nameOf(c) }, true)"
               @click="edit(c)"
@@ -72,6 +74,7 @@
             </oc-button>
             <oc-button
               appearance="raw"
+              variation="passive"
               size="small"
               :aria-label="interpolate($gettext('Delete %{title}'), { title: nameOf(c) }, true)"
               :disabled="deleting === c.id"
@@ -215,16 +218,17 @@ const remove = async (id: string) => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--agent-space-1);
+  gap: 2px;
 }
 .agent-conv {
   position: relative;
   display: flex;
   align-items: center;
   gap: var(--agent-space-1);
-  border-radius: var(--agent-radius-m);
-  padding: var(--agent-space-2) var(--agent-space-3);
   min-width: 0;
+  min-height: 2.75rem;
+  padding: var(--agent-space-2) var(--agent-space-3);
+  border-radius: var(--agent-radius-s);
 }
 .agent-conv:hover {
   background: var(--oc-color-background-hover);
@@ -232,39 +236,43 @@ const remove = async (id: string) => {
 .agent-conv-current,
 .agent-conv-current:hover {
   background: var(--oc-color-background-highlight);
-  box-shadow: inset 3px 0 0 var(--oc-color-swatch-primary-default);
 }
 .agent-conv-link {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
   text-decoration: none;
-  color: inherit;
+  color: var(--oc-color-text-default);
 }
 .agent-conv-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.agent-conv-current .agent-conv-title {
-  font-weight: 600;
-}
 .agent-conv-untitled {
-  font-style: italic;
+  color: var(--oc-color-text-muted);
 }
 .agent-conv-time {
   font-size: var(--agent-font-xs);
   color: var(--oc-color-text-muted);
+  white-space: nowrap;
 }
 .agent-conv-actions {
   display: flex;
-  gap: var(--agent-space-1);
+  flex: none;
+  gap: 2px;
   opacity: 0;
 }
+.agent-conv-actions svg {
+  fill: var(--oc-color-text-muted);
+}
+.agent-conv-actions button:hover svg {
+  fill: var(--oc-color-text-default);
+}
 .agent-conv:hover .agent-conv-actions,
-.agent-conv:focus-within .agent-conv-actions,
-.agent-conv-current .agent-conv-actions {
+.agent-conv:focus-within .agent-conv-actions {
   opacity: 1;
 }
 @media (hover: none) {
