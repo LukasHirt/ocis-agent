@@ -244,7 +244,9 @@ func argv0(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
-	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); err == nil {
+	// An empty read is not an answer: right after exec the kernel can briefly
+	// show no arguments, so fall through to ps.
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); err == nil && len(b) > 0 {
 		first, _, _ := strings.Cut(string(b), "\x00")
 		return first
 	}
