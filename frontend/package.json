@@ -25,8 +25,8 @@
     "pinia": "^3.0.4",
     "typescript": "5.9.3",
     "vite": "7.3.5",
-    "vitest": "5.0.5",
-    "vue": "3.5.44",
+    "vitest": "5.1.0",
+    "vue": "3.5.45",
     "vue-router": "^5.0.6",
     "vue-tsc": "3.3.14",
     "vue3-gettext": "^2.4.0"
