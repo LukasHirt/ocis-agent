@@ -1,0 +1,84 @@
+FROM docker.io/golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS source
+
+ARG GIT_REF="main"
+# Optional exact commit to build. CI passes the commit the verified release tag
+# points to, which pins the clone to it (a tag moved after it was resolved
+# cannot change what gets built) and, because it is referenced in the clone
+# layer below, busts the build cache whenever it changes. Leave empty to clone
+# GIT_REF as-is.
+ARG GIT_SHA=""
+
+RUN apk add --no-cache git && \
+    git clone --depth 1 --branch "${GIT_REF}" https://github.com/owncloud/ocis-agent.git /src && \
+    if [ -n "${GIT_SHA}" ]; then \
+      git -C /src fetch --depth 1 origin "${GIT_SHA}" && \
+      git -C /src checkout --detach FETCH_HEAD; \
+    fi
+
+
+FROM docker.io/golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
+
+ARG TARGETARCH
+
+COPY --from=source /src /src
+
+WORKDIR /src/backend
+RUN go mod download && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+      go build -trimpath -ldflags="-s -w" -o /out/ocis-agent ./cmd/ocis-agent
+
+
+FROM docker.io/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+
+ARG VERSION=""
+ARG REVISION=""
+
+LABEL maintainer="ownCloud GmbH <devops@owncloud.com>" \
+  org.opencontainers.image.title="oCIS Agent" \
+  org.opencontainers.image.vendor="ownCloud GmbH" \
+  org.opencontainers.image.authors="ownCloud GmbH" \
+  org.opencontainers.image.description="oCIS Agent - always-on personal agent sidecar for ownCloud Infinite Scale" \
+  org.opencontainers.image.licenses="Apache-2.0" \
+  org.opencontainers.image.documentation="https://github.com/owncloud/ocis-agent" \
+  org.opencontainers.image.url="https://hub.docker.com/r/owncloud/ocis-agent" \
+  org.opencontainers.image.source="https://github.com/owncloud/ocis-agent" \
+  org.opencontainers.image.version="${VERSION:-main-${REVISION}}" \
+  org.opencontainers.image.revision="${REVISION}"
+
+# A fixed non-root uid/gid, so a host directory mounted at /data can be chowned
+# to it. Upstream's documentation and existing /data volumes rely on 10001, so
+# do not change it.
+RUN apk upgrade --no-cache && \
+    addgroup -S -g 10001 ocis-agent && \
+    adduser -S -D -H -u 10001 -G ocis-agent -h /data -s /sbin/nologin ocis-agent && \
+    mkdir -p /data && \
+    chown 10001:10001 /data && \
+    chmod 0700 /data
+
+COPY --from=build /out/ocis-agent /usr/local/bin/ocis-agent
+COPY --from=source /src/LICENSE /src/NOTICE /usr/share/doc/ocis-agent/
+
+# AGENT_HTTP_ADDR and AGENT_DEBUG_ADDR are fixed here because the health check
+# below uses them; change both together if you override them. AGENT_MASTER_KEY
+# is never baked in: pass it at run time.
+ENV AGENT_DATA_DIR=/data \
+    AGENT_HTTP_ADDR=:9300 \
+    AGENT_DEBUG_ADDR=:9301
+
+USER 10001:10001
+WORKDIR /data
+VOLUME [ "/data" ]
+
+# 9300: the REST API under /agent-api/. 9301: /healthz and /readyz for probes
+# only; do not publish it.
+EXPOSE 9300/tcp 9301/tcp
+
+# Liveness of the API role. A worker-only process (AGENT_ROLES=worker) serves
+# no API: override the check with the debug listener's /readyz on 9301.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:9300/agent-api/healthz || exit 1
+
+# SIGTERM drains running jobs for up to AGENT_SHUTDOWN_DRAIN, then requeues
+# them: give the container a stop grace period of at least that plus 15s.
+STOPSIGNAL SIGTERM
+ENTRYPOINT [ "/usr/local/bin/ocis-agent" ]

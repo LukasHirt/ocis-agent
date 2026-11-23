@@ -1,0 +1,9 @@
+# CVEs baked into the ocis-agent binary (Go modules). Unfixable
+# by this repo - requires an upstream owncloud/ocis-agent
+# fix. Add an entry only when upstream cannot ship a fix promptly, and always
+# with a justification comment: the CVE, why it is accepted, and the upstream
+# issue tracking it. Remove the entry once the fix is released.
+#
+# Go `stdlib` findings are not upstream's problem: they mean the pinned
+# golang builder digest in Dockerfile.multiarch is stale. Bump the digest
+# instead of adding an entry here.
