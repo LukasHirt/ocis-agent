@@ -1,0 +1,141 @@
+name: Docker CI
+
+permissions:
+  contents: read
+
+# Publishing runs (pushes, schedules, manual runs) are serialised, so an older
+# run that finishes late cannot move `latest` back to an older release. Queued
+# runs resolve the matrix afresh when they start. Pull requests only build, so
+# each PR has its own group and a new push cancels its stale run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  # Merges here (including Dependabot base-image and toolchain bumps) rebuild
+  # and re-push the newest release, so fixes reach the published image.
+  push:
+    branches: [main]
+  # Deliberately unfiltered: a path filter would stop `lint` and `test` from
+  # reporting on some PRs, and a check that does not always report cannot be
+  # a required status check on `main`.
+  pull_request:
+  schedule:
+    # Pick up new upstream releases.
+    - cron: 0 */6 * * *
+    # Weekly safety net: rebuild the newest release so base-image fixes reach
+    # it even when nothing was merged here.
+    - cron: 0 3 * * 0
+  workflow_dispatch:
+    inputs:
+      rebuild-newest:
+        description: Also rebuild (and re-push) the newest release
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Test the release resolver
+        run: scripts/test-resolve-pending-releases.sh
+
+  lint:
+    uses: owncloud-docker/ubuntu/.github/workflows/lint-editorconfig.yml@master
+
+  prepare:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      date: ${{ steps.resolve.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the releases to build
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          REBUILD_INPUT: ${{ inputs.rebuild-newest }}
+        # Assign first, echo second: a command substitution that fails inside
+        # echo's argument does not fail the step (echo itself returns 0), so a
+        # Docker Hub outage would silently emit an empty matrix and `build`
+        # would die on fromJson('') instead of reporting the real error.
+        run: |
+          MODE="pending"
+          if [ "$EVENT_NAME" = pull_request ]; then
+            MODE="pr"
+          elif [ "$EVENT_NAME" = push ] || [ "$EVENT_SCHEDULE" = "0 3 * * 0" ] || [ "$REBUILD_INPUT" = true ]; then
+            MODE="rebuild"
+          fi
+          export MODE
+          matrix=$(scripts/resolve-pending-releases.sh)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [lint, prepare]
+    if: needs.prepare.outputs.matrix != '[]'
+    strategy:
+      # Each release is scanned against its own binary; one failing leg
+      # should not cancel the others.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    uses: owncloud-docker/ubuntu/.github/workflows/docker-build-native.yml@master
+    with:
+      docker-repo-name: owncloud/ocis-agent
+      docker-tag: ${{ matrix.version }}
+      docker-context: .
+      docker-file: Dockerfile.multiarch
+      docker-hub-username: ${{ vars.DOCKERHUB_USERNAME }}
+      docker-build-args: |
+        GIT_REF=${{ matrix.ref }}
+        GIT_SHA=${{ matrix.sha }}
+        VERSION=${{ matrix.version }}
+        REVISION=${{ matrix.sha }}
+      docker-cache-from: type=gha
+      docker-cache-to: type=gha,mode=max
+      trivy-ignore-files: .trivyignore
+      # Only the highest release floats `latest`. The dated tag records the
+      # build of each day (a second rebuild that day replaces it).
+      docker-extra-tags: |
+        ${{ matrix.version }}-${{ needs.prepare.outputs.date }}
+        ${{ matrix.latest && 'latest' || '' }}
+      # The smoke test runs the default entrypoint with the api role only:
+      # the worker role refuses to start without a model endpoint. The api
+      # role does not contact oCIS at start-up, so a placeholder URL is
+      # enough. The master key is 32 zero bytes - a public throwaway that
+      # only this test container ever sees.
+      smoke-test-port: "9300"
+      smoke-test-url: "http://localhost:9300/agent-api/healthz"
+      smoke-test-env: |
+        AGENT_ROLES=api
+        AGENT_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        AGENT_OCIS_URL=https://ocis.invalid
+      push: ${{ github.event_name != 'pull_request' }}
+    secrets:
+      docker-hub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  update-docker-hub-description:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    uses: owncloud-docker/ubuntu/.github/workflows/docker-hub-desc.yml@master
+    with:
+      docker-repo-name: owncloud/ocis-agent
+      docker-repo-description: oCIS Agent - always-on personal agent sidecar for ownCloud Infinite Scale
+      docker-hub-username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      docker-hub-password: ${{ secrets.DOCKERHUB_TOKEN }}
